@@ -38,8 +38,9 @@
 //!   also with the clipper off). Its IM-feedback input
 //!   ([`crate::multiband::MultibandCompressor::set_upper_clip_activity`])
 //!   gets the final clipper's share of touched samples once per internal
-//!   chunk (at most 512 frames). The clipper runs after the multiband, so
-//!   the bass clipper works with the previous chunk's activity, about
+//!   chunk (512 frames on a fixed grid, independent of the buffer sizes).
+//!   The clipper runs after the multiband, so the bass clipper works with
+//!   the previous chunk's activity, about
 //!   10 ms late at 48 kHz; the feedback's own attack is 30 ms, so this
 //!   does not matter. With the clipper or the chain off the input is 0.
 //! - **Final clipper**: [`crate::clipper::FinalClipper`] (oversampled
@@ -239,7 +240,7 @@ const TRIM_SETTLED_DB: f64 = 1.0;
 pub const CLIPPER_MARGIN_DB: f32 = 0.5;
 /// Default limiter lookahead (ms). With the final clipper taking the peaks,
 /// the limiter handles only residue, so 1.5 ms is enough (see
-/// `docs/elements/broadcastprocessor.md`); 0.75 ms for low latency.
+/// `docs/elements/broadcastprocessor.md`).
 pub const DEFAULT_LOOKAHEAD_MS: f32 = 1.5;
 /// Limiter lookahead (ms) of the low-latency configuration.
 pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.75;
@@ -1137,6 +1138,10 @@ pub struct BroadcastProcessor {
     /// Feed the clipper's activity to the bass clipper (see
     /// [`BroadcastProcessor::set_bass_im_feedback`]).
     bass_im_feedback: bool,
+    /// Clipper stats since the last hand-over to the bass clipper.
+    im_clip: ClipStats,
+    /// Frames into the current internal chunk (0 … CHUNK − 1).
+    grid_pos: usize,
     sub_gr: f64,
     sub_frames: usize,
     meter_clip: ClipStats,
@@ -1206,6 +1211,8 @@ impl BroadcastProcessor {
             applied_density_db: 0.0,
             sub_clip: ClipStats::default(),
             bass_im_feedback: true,
+            im_clip: ClipStats::default(),
+            grid_pos: 0,
             sub_gr: 0.0,
             sub_frames: 0,
             meter_clip: ClipStats::default(),
@@ -1457,7 +1464,7 @@ impl BroadcastProcessor {
     fn process_chunk(&mut self, chunk: &mut [f32]) {
         // The limiter's ceiling moves at most CEILING_STEP_DB per chunk.
         let target = self.params.true_peak_ceiling_dbtp;
-        if self.ceiling_db != target {
+        if self.grid_pos == 0 && self.ceiling_db != target {
             let d = (target - self.ceiling_db).clamp(-CEILING_STEP_DB, CEILING_STEP_DB);
             self.ceiling_db = if (target - self.ceiling_db).abs() <= CEILING_STEP_DB {
                 target
@@ -1531,13 +1538,17 @@ impl BroadcastProcessor {
         // IM feedback: the clipper's share of touched samples in this chunk
         // reaches the bass clipper before the next one (the clipper runs
         // after the multiband, so the feedback is one chunk late).
-        let activity =
-            if self.bass_im_feedback && self.params.enabled && self.params.clipper_enabled {
-                clip_stats.touched_share() as f32
-            } else {
-                0.0
-            };
-        self.multiband.set_upper_clip_activity(activity);
+        self.im_clip.accumulate(&clip_stats);
+        if self.grid_pos + chunk.len() / self.channels == CHUNK {
+            let activity =
+                if self.bass_im_feedback && self.params.enabled && self.params.clipper_enabled {
+                    self.im_clip.touched_share() as f32
+                } else {
+                    0.0
+                };
+            self.multiband.set_upper_clip_activity(activity);
+            self.im_clip = ClipStats::default();
+        }
         let lim = &mut self.limiter;
         run_stage(
             &mut self.limiter_fade,
@@ -1719,8 +1730,16 @@ impl Processor for BroadcastProcessor {
             return;
         }
         self.fresh = false;
-        for chunk in samples[..usable].chunks_mut(CHUNK * ch) {
-            self.process_chunk(chunk);
+        // Internal chunks follow a fixed grid of CHUNK frames from the last
+        // configure/reset, so whatever happens once per chunk (the ceiling
+        // glide, the IM feedback) does not depend on the buffer sizes.
+        let mut rest = &mut samples[..usable];
+        while !rest.is_empty() {
+            let n = (CHUNK - self.grid_pos).min(rest.len() / ch);
+            let (head, tail) = rest.split_at_mut(n * ch);
+            self.process_chunk(head);
+            self.grid_pos = (self.grid_pos + n) % CHUNK;
+            rest = tail;
         }
     }
 
@@ -1738,6 +1757,8 @@ impl Processor for BroadcastProcessor {
             .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
         self.clipper.reset();
         self.multiband.set_upper_clip_activity(0.0);
+        self.im_clip = ClipStats::default();
+        self.grid_pos = 0;
         self.governor.reset();
         if self.applied_density_db != 0.0 {
             self.applied_density_db = 0.0;

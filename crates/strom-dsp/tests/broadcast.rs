@@ -1383,3 +1383,81 @@ mod dense_clicks {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
+
+/// The output does not depend on how the input is cut into buffers.
+///
+/// - Hot, peaky programme with a bass line, streaming preset with the bass
+///   clip threshold at the clipper's (the spike guard, the AGC, the
+///   multiband with the bass clipper and its IM feedback, the clipper and
+///   the limiter all work): buffers of 1, 100, 333, 1024 and 4801 frames
+///   give the output of 512-frame buffers within 1e-9 (the final
+///   clipper's resampling rounds differently on 1-frame buffers, about
+///   1e-17).
+/// - With the clipper off, a ceiling change half way: the limiter's
+///   ceiling glide steps on the same frames.
+///
+/// Internal chunks follow a fixed grid of 512 frames, so per-chunk work
+/// (the ceiling glide, the IM feedback hand-over) lands on the same
+/// frames. Guard: without the grid the 1-frame run differed by 0.08.
+///
+/// Not covered, and buffer-dependent: the governor takes the clipper's and
+/// the limiter's work per 10 ms output sub-block as the buffers fall (up
+/// to 2e-4 with 1-frame buffers), and the final clipper glides a threshold
+/// change per call (up to 2e-5 with 333-frame buffers).
+#[test]
+fn output_does_not_depend_on_buffer_size() {
+    let fs = 48_000.0f32;
+    let ch = 2;
+    let mut p = BroadcastParams::preset(strom_dsp::presets::BroadcastPreset::Streaming, 4);
+    p.bass_clip_threshold_db = p.true_peak_ceiling_dbtp - 0.5;
+    p.governor_enabled = false;
+    let frames = 3 * fs as usize;
+    let mut x = programme_support::peaky_programme(ch, fs as f64, 0.3);
+    x.truncate(frames * ch);
+    for (n, f) in x.chunks_mut(ch).enumerate() {
+        let b = (0.5 * (2.0 * PI * 50.0 * n as f64 / fs as f64).sin()) as f32;
+        f.iter_mut().for_each(|v| *v = 2.0 * *v + b);
+    }
+    let clipper_off = BroadcastParams {
+        clipper_enabled: false,
+        ..p
+    };
+    for (name, p, change) in [
+        ("full chain", p, false),
+        ("ceiling glide", clipper_off, true),
+    ] {
+        let run_with = |block: usize| {
+            let mut bp = processor(fs, ch, &p);
+            let mut out = x.clone();
+            let half = if change { frames / 2 * ch } else { out.len() };
+            for c in out[..half].chunks_mut(block * ch) {
+                bp.process(c);
+            }
+            bp.set_params(&BroadcastParams {
+                true_peak_ceiling_dbtp: -6.0,
+                ..p
+            });
+            for c in out[half..].chunks_mut(block * ch) {
+                bp.process(c);
+            }
+            let m = bp.take_meters();
+            assert!(
+                change || m.clip_depth_db > -100.0,
+                "the clipper should work: {}",
+                m.clip_depth_db
+            );
+            out
+        };
+        let reference = run_with(512);
+        for block in [1, 100, 333, 1024, 4801] {
+            let out = run_with(block);
+            let worst = out
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            println!("{name}, {block}-frame buffers: largest difference from 512 {worst:e}");
+            assert!(worst <= 1e-9, "{name}, {block}-frame buffers: {worst:e}");
+        }
+    }
+}
