@@ -7,7 +7,8 @@
 //!   lower with the feedback than without. The upper clipper here is a
 //!   stand-in (a hard clip at the base rate, its activity = share of
 //!   samples clipped per 10 ms block, fed back with one block of delay); the
-//!   end-to-end check with the real final clipper belongs with it.
+//!   end-to-end check with the real final clipper is in
+//!   `tests/broadcast_expander_bass.rs`.
 //! - Bands stay aligned: with the lookahead, the impulse response is the
 //!   crossover sum delayed by the lookahead, flat within ±0.05 dB, and the
 //!   latency is reported.

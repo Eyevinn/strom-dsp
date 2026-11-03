@@ -37,7 +37,11 @@
 //!   or [`LOW_LATENCY_BASS_LOOKAHEAD_MS`]) is the stage's latency (constant,
 //!   also with the clipper off). Its IM-feedback input
 //!   ([`crate::multiband::MultibandCompressor::set_upper_clip_activity`])
-//!   stays at "no activity" until a clipper after the multiband feeds it.
+//!   gets the final clipper's share of touched samples once per internal
+//!   chunk (at most 512 frames). The clipper runs after the multiband, so
+//!   the bass clipper works with the previous chunk's activity, about
+//!   10 ms late at 48 kHz; the feedback's own attack is 30 ms, so this
+//!   does not matter. With the clipper or the chain off the input is 0.
 //! - **Final clipper**: [`crate::clipper::FinalClipper`] (oversampled
 //!   soft clipping of shaped clippings; `clipper_latency` sets 69 or 48
 //!   frames), threshold [`CLIPPER_MARGIN_DB`] under the ceiling, low cut at
@@ -1130,6 +1134,9 @@ pub struct BroadcastProcessor {
     /// Clipper stats and limiter gain reduction (dB · frames) since the
     /// last output sub-block, and since the last `take_meters`.
     sub_clip: ClipStats,
+    /// Feed the clipper's activity to the bass clipper (see
+    /// [`BroadcastProcessor::set_bass_im_feedback`]).
+    bass_im_feedback: bool,
     sub_gr: f64,
     sub_frames: usize,
     meter_clip: ClipStats,
@@ -1198,6 +1205,7 @@ impl BroadcastProcessor {
             spike_fade: Fade::default(),
             applied_density_db: 0.0,
             sub_clip: ClipStats::default(),
+            bass_im_feedback: true,
             sub_gr: 0.0,
             sub_frames: 0,
             meter_clip: ClipStats::default(),
@@ -1308,6 +1316,22 @@ impl BroadcastProcessor {
     /// The clip budget governor (for inspection: density, cut, state).
     pub fn governor(&self) -> &ClipBudgetGovernor {
         &self.governor
+    }
+
+    /// The bass clipper's current IM feedback (dB by which it lowers the
+    /// bass clip threshold, 0 … [`crate::bassclip::BASS_IM_MAX_DB`]).
+    pub fn bass_im_reduction_db(&self) -> f64 {
+        self.multiband.bass_im_reduction_db()
+    }
+
+    /// Feed the final clipper's activity to the bass clipper's IM feedback
+    /// (on by default). Off, the bass clipper sees no activity: for
+    /// measuring what the feedback does. Never allocates.
+    pub fn set_bass_im_feedback(&mut self, on: bool) {
+        self.bass_im_feedback = on;
+        if !on {
+            self.multiband.set_upper_clip_activity(0.0);
+        }
     }
 
     /// Current parameters.
@@ -1504,6 +1528,16 @@ impl BroadcastProcessor {
         let clip_stats = self.clipper.inner.activity();
         self.sub_clip.accumulate(&clip_stats);
         self.meter_clip.accumulate(&clip_stats);
+        // IM feedback: the clipper's share of touched samples in this chunk
+        // reaches the bass clipper before the next one (the clipper runs
+        // after the multiband, so the feedback is one chunk late).
+        let activity =
+            if self.bass_im_feedback && self.params.enabled && self.params.clipper_enabled {
+                clip_stats.touched_share() as f32
+            } else {
+                0.0
+            };
+        self.multiband.set_upper_clip_activity(activity);
         let lim = &mut self.limiter;
         run_stage(
             &mut self.limiter_fade,
@@ -1703,6 +1737,7 @@ impl Processor for BroadcastProcessor {
         self.limiter
             .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
         self.clipper.reset();
+        self.multiband.set_upper_clip_activity(0.0);
         self.governor.reset();
         if self.applied_density_db != 0.0 {
             self.applied_density_db = 0.0;
