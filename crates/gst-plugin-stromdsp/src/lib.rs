@@ -19,7 +19,7 @@ pub mod equalizer;
 pub mod gate;
 pub mod limiter;
 pub mod meter;
-pub mod stereotools;
+pub mod stereo;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gate::register(plugin)?;
@@ -29,7 +29,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     ducker::register(plugin)?;
     deesser::register(plugin)?;
     delay::register(plugin)?;
-    stereotools::register(plugin)?;
+    stereo::register(plugin)?;
     cleanup::register(plugin)?;
     meter::register(plugin)?;
     Ok(())
