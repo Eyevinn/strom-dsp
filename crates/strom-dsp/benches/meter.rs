@@ -1,7 +1,7 @@
 //! Meter benchmarks at 48 kHz stereo, 480-frame (10 ms) blocks:
 //! `LoudnessMeter::process` with and without true peak, each reading on its
 //! own (their cost depends on the window, not on the block), the correlation
-//! meter and the mono detector.
+//! meter, the 3-band correlation meter and the mono detector.
 //!
 //! ```text
 //! cargo bench -p strom-dsp --bench meter
@@ -11,7 +11,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use strom_dsp::meter::{
-    ChannelLayout, CorrelationMeter, LoudnessConfig, LoudnessMeter, MonoDetector,
+    BandCorrelation, ChannelLayout, CorrelationMeter, LoudnessConfig, LoudnessMeter, MonoDetector,
     MonoDetectorParams,
 };
 
@@ -71,6 +71,15 @@ fn bench(c: &mut Criterion) {
             m.process_interleaved(black_box(blocks[i % blocks.len()]), 2);
             i += 1;
             black_box(m.correlation())
+        })
+    });
+    let mut m = BandCorrelation::new(FS, 300.0);
+    let mut i = 0;
+    g.bench_function("band_correlation", |b| {
+        b.iter(|| {
+            m.process_interleaved(black_box(blocks[i % blocks.len()]), 2);
+            i += 1;
+            black_box(m.correlations())
         })
     });
     let mut d = MonoDetector::new(FS, &MonoDetectorParams::default());

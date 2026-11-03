@@ -16,7 +16,7 @@
 
 use rtsan_standalone::ScopedSanitizeRealtime;
 use strom_dsp::meter::{
-    ChannelLayout, CorrelationMeter, LoudnessConfig, LoudnessMeter, MonoDetector,
+    BandCorrelation, ChannelLayout, CorrelationMeter, LoudnessConfig, LoudnessMeter, MonoDetector,
     MonoDetectorParams,
 };
 
@@ -120,6 +120,36 @@ fn correlation_and_mono_detector_are_realtime_safe() {
         if i % 97 == 96 {
             m.reset();
             d.reset();
+        }
+        drop(_rt);
+        pos += n;
+    }
+    assert!(sink.is_finite());
+}
+
+#[test]
+fn band_correlation_is_realtime_safe() {
+    let max = *SIZES.iter().max().unwrap();
+    let input = signal(max * 8, 3);
+    let (l, r): (Vec<f32>, Vec<f32>) = input.chunks_exact(3).map(|f| (f[0], f[1])).unzip();
+    let mut m = BandCorrelation::new(48_000.0, 300.0);
+    let mut pos = 0;
+    let mut sink = 0.0f64;
+    for i in 0..BUFFERS {
+        let n = SIZES[i % SIZES.len()];
+        if pos + n > l.len() {
+            pos = 0;
+        }
+        let _rt = ScopedSanitizeRealtime::default();
+        m.set_integration_ms(5.0 + (i % 100) as f32 * 10.0);
+        if i % 50 == 0 {
+            m.set_split_frequencies([200.0 + (i % 7) as f32 * 20.0, 4000.0]);
+        }
+        m.process_interleaved(&input[3 * pos..3 * (pos + n)], 3);
+        m.process_pair(&l[pos..pos + n], &r[pos..pos + n]);
+        sink += m.correlations().iter().sum::<f64>() + m.correlation(2);
+        if i % 97 == 96 {
+            m.reset();
         }
         drop(_rt);
         pos += n;
