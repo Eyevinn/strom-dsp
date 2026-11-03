@@ -23,8 +23,9 @@
 //!   frequency of interest to avoid waveform distortion (Giannoulis,
 //!   Massberg & Reiss, JAES 60(6), 2012; Zölzer, *DAFX*, dynamics chapter).
 //!
-//! Every value below states its reason. The README (per element, "Why these
-//! defaults") and `PROVENANCE.md` repeat them.
+//! Every value below states its reason. Each element's page,
+//! `docs/elements/<element>.md` ("Why these defaults"), and `PROVENANCE.md`
+//! repeat them.
 
 use crate::broadcast::{BroadcastParams, MAX_CROSSOVERS};
 use crate::compressor::CompressorDetector;

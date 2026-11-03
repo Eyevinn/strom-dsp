@@ -5,8 +5,8 @@
 //! Every property of every element is checked for name, GLib value type,
 //! range, default, flags (readable, writable, controllable, mutable in
 //! PLAYING vs READY), and that no extra properties exist. The defaults are
-//! strom-dsp's own broadcast choice (`strom_dsp::presets`, README "Why these
-//! defaults").
+//! strom-dsp's own broadcast choice (`strom_dsp::presets`; "Why these
+//! defaults" on each element's page, `docs/elements/<element>.md`).
 
 mod util;
 
