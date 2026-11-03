@@ -138,6 +138,40 @@ basics from J. O. Smith III. No code listing was used.
   (`safety_clip_count()`); tests show it stays at 0. Release state is snapped
   to its target below 1e-15 (denormal-safe).
 
+### GStreamer elements (`crates/gst-plugin-stromdsp`)
+
+Written from the gstreamer-rs bindings documentation and crate sources
+(MIT/Apache-2.0) and the GStreamer API docs.
+
+- Each element keeps its settings as a `Copy` struct behind a `Mutex`, plus an
+  atomic generation counter. Once per buffer, the streaming thread compares
+  generations (one atomic load) and copies the settings only if they changed,
+  using `try_lock`. If a setter holds the lock, the change is picked up on the
+  next buffer, so the streaming thread never blocks on the application thread.
+- `set_caps` reads `rate` and `channels` from the caps (not `AudioInfo`, which
+  rejects more than 2 channels without a channel mask) and reconfigures the
+  processor; this is the only place that allocates. DISCONT buffers and
+  FLUSH_STOP call `reset()`.
+- Samples are converted from F32LE in fixed-size chunks through a scratch
+  buffer, so no `unsafe` code and no alignment assumptions are needed.
+- `enabled = false` uses BaseTransform passthrough (gate, compressor, EQ). The
+  limiter is never passthrough: it keeps its lookahead delay, adds the
+  lookahead to upstream's min/max in the LATENCY query, and posts a Latency
+  message when the lookahead changes.
+
+## Incident log
+
+- **2026-11-03, research only, no code affected.** During online research of
+  Rust SIMD and denormal handling, a research assistant (which wrote no
+  project code) viewed `src/denormal.rs` of the crate `truce-core`. That crate
+  turned out to carry a proprietary licence (`LicenseRef-TruceLicense-1.0`),
+  i.e. an "unclear licence" in the sense of the clean-room rules. The file only
+  sets the CPU flush-to-zero flag. Remediation: nothing from it is used. FTZ
+  handling, if added, comes from the MIT-licensed `no_denormals` crate or is
+  written from the Intel SDM (MXCSR) and Arm ARM (FPCR.FZ) by a contributor
+  who has not seen that file. The project's correctness never relies on FTZ:
+  all recursive states are flushed explicitly (see above).
+
 ## Dependencies
 
 | Crate | Used by | Licence |
