@@ -23,6 +23,12 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     )
 });
 
+impl common::Bypassable for Settings {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Settings {
     enabled: bool,
@@ -68,7 +74,8 @@ impl ObjectImpl for StromDspDeesser {
                 common::bool_prop(
                     "enabled",
                     "Enabled",
-                    "Process audio; when false the element is a bit-exact passthrough",
+                    "Process audio; when false the element crossfades to dry (20 ms), then is a \
+                     bit-exact passthrough",
                     true,
                 ),
                 common::float_prop(
@@ -137,10 +144,7 @@ impl ObjectImpl for StromDspDeesser {
                 let was = self
                     .settings
                     .update(|s| std::mem::replace(&mut s.enabled, enabled));
-                if enabled && !was {
-                    self.settings.request_reset();
-                }
-                self.obj().set_passthrough(!enabled);
+                common::set_enabled_idle(&*self.obj(), &self.engine, enabled);
                 gst::debug!(CAT, imp = self, "enabled: {was} -> {enabled}");
             }
             "mode" => {
@@ -193,7 +197,7 @@ impl ElementImpl for StromDspDeesser {
                 "De-esser with linked channels: a high-pass detector at `frequency` drives a \
                  gain reduction (up to max-reduction dB above threshold) applied to the band \
                  above `frequency` (split-band, LR4 crossover) or to the whole signal \
-                 (wideband). No latency. enabled=false is a bit-exact passthrough.",
+                 (wideband). No latency. Toggling enabled crossfades over 20 ms; enabled=false is then a bit-exact passthrough.",
                 "Eyevinn Technology",
             )
         });
@@ -210,7 +214,7 @@ impl BaseTransformImpl for StromDspDeesser {
     const MODE: gst_base::subclass::BaseTransformMode =
         gst_base::subclass::BaseTransformMode::AlwaysInPlace;
     const PASSTHROUGH_ON_SAME_CAPS: bool = false;
-    const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
+    const TRANSFORM_IP_ON_PASSTHROUGH: bool = true;
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         *self.engine.lock().unwrap() = None;
@@ -225,7 +229,14 @@ impl BaseTransformImpl for StromDspDeesser {
             imp = self,
             "configuring for {rate} Hz, {channels} channels"
         );
-        common::configure_engine(&self.engine, &self.settings, rate, channels, apply);
+        common::configure_engine_bypass(
+            &*self.obj(),
+            &self.engine,
+            &self.settings,
+            rate,
+            channels,
+            apply,
+        );
         self.parent_set_caps(incaps, outcaps)
     }
 
@@ -241,7 +252,14 @@ impl BaseTransformImpl for StromDspDeesser {
         common::sync_controlled_values(&*self.obj(), inbuf);
     }
 
+    fn transform_ip_passthrough(
+        &self,
+        buf: &gst::Buffer,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        common::transform_passthrough_bypass(&*self.obj(), &self.engine, &self.settings, buf, apply)
+    }
+
     fn transform_ip(&self, buf: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        common::transform_buffer(&self.engine, &self.settings, buf, apply)
+        common::transform_buffer_bypass(&*self.obj(), &self.engine, &self.settings, buf, apply)
     }
 }

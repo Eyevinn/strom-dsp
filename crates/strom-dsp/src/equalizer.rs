@@ -15,8 +15,19 @@
 //!   filters are stable for every `0 < w0 < π`, `Q > 0`, `A > 0`; the clamp keeps
 //!   a safe margin from `w0 = π` where low-pass/all-pass poles reach `z = −1`.
 //! - **Parameter changes** (frequency, gain, Q of a band whose type stays the
-//!   same): the parameters are smoothed by a one-pole smoother with a 10 ms
-//!   time constant in the domains `ln f`, dB and `ln Q`. Every 32 frames the
+//!   same): the parameters are smoothed in the domains `ln f`, dB and `ln Q` by
+//!   two cascaded one-pole stages ([`SMOOTHING_MS`] = 5 ms each, a critically
+//!   damped second-order glide: step response `1 − (1 + t/τ)·e^(−t/τ)`, half
+//!   way after 8.4 ms, 90 % after 19.5 ms), whose output speed is limited to
+//!   [`MAX_OCTAVES_PER_MS`] (frequency, Q) and [`MAX_DB_PER_MS`] (gain).
+//!   Why: a one-pole glide (the earlier design, 10 ms) starts at its full
+//!   speed, a kink that a steady tone hears as a click when the change is
+//!   large (knob test in the plugin crate: −36 dB re the quiet end for
+//!   +12 → −12 dB, −44 dB for a 250 → 4000 Hz sweep through the tone). The
+//!   second stage starts the glide with zero speed; the rate limit spreads a
+//!   large change over a time proportional to its size (24 dB: ≥ 16 ms;
+//!   4 octaves: ≥ 80 ms), with a residual on a 1 kHz tone of −54 … −65 dB at
+//!   the limit speed. Small changes are not slowed down. Every 32 frames the
 //!   coefficients for the smoothed parameters are recomputed and the
 //!   coefficients are linearly interpolated per sample across those 32 frames.
 //!   Every intermediate coefficient set is stable: each endpoint is a stable
@@ -81,8 +92,13 @@ pub const MAX_GAIN_DB: f32 = 60.0;
 pub const MIN_Q: f32 = 0.01;
 /// Highest Q.
 pub const MAX_Q: f32 = 100.0;
-/// Time constant (ms) of the frequency/gain/Q smoother.
-pub const SMOOTHING_MS: f64 = 10.0;
+/// Time constant (ms) of each of the two cascaded one-pole stages of the
+/// frequency/gain/Q smoother (see the module documentation).
+pub const SMOOTHING_MS: f64 = 5.0;
+/// Rate limit of the smoothed frequency and Q: 0.05 octave per ms.
+pub const MAX_OCTAVES_PER_MS: f64 = 0.05;
+/// Rate limit of the smoothed gain (dB per ms).
+pub const MAX_DB_PER_MS: f64 = 1.5;
 /// Length (ms) of the crossfade used for type changes and enabling/disabling.
 pub const CROSSFADE_MS: f64 = 10.0;
 
@@ -271,6 +287,9 @@ struct BandSlot {
     gain_db: f64,
     ln_q: f64,
     coefs: BiquadCoefficients,
+    /// First smoother stage of (`ln_f`, `gain_db`, `ln_q`); the fields above
+    /// are the second stage (the smoothed parameters).
+    pre: [f64; 3],
     /// Smoothed parameters equal the target and `coefs` are exact.
     settled: bool,
     /// Which of the two state banks belongs to `kind`.
@@ -296,6 +315,8 @@ pub struct Equalizer {
     states: Vec<f64>,
     /// Smoother pole for one full ramp block.
     smooth_block_coef: f64,
+    /// Smoother pole for one frame.
+    smooth_coef: f64,
     fade_len: usize,
     /// Apply targets without smoothing/crossfade at the next `process`.
     snap_pending: bool,
@@ -395,6 +416,7 @@ impl Equalizer {
         s.ln_f = t.ln_f;
         s.gain_db = t.gain_db;
         s.ln_q = t.ln_q;
+        s.pre = [t.ln_f, t.gain_db, t.ln_q];
         s.coefs = coefs;
         s.settled = true;
     }
@@ -432,22 +454,38 @@ impl Equalizer {
     /// Advance the smoother of slot `b` by `n` frames and return the new coefficients.
     fn advance_smoother(&mut self, b: usize, n: usize) -> BiquadCoefficients {
         let t = self.targets[b];
+        // Exact n-step update of two cascaded one-poles with pole `a`, as
+        // errors from the target: e1 ← aⁿ·e1, e2 ← aⁿ·e2 + n·(1 − a)·aⁿ·e1.
+        let a = self.smooth_coef;
         let k = if n == RAMP_BLOCK {
             self.smooth_block_coef
         } else {
-            one_pole_coef(SMOOTHING_MS, self.sample_rate).powi(n as i32)
+            a.powi(n as i32)
         };
+        let c = n as f64 * (1.0 - a) * k;
+        let fs_ms = self.sample_rate * 0.001;
+        let oct = MAX_OCTAVES_PER_MS * std::f64::consts::LN_2 * n as f64 / fs_ms;
+        let limits = [oct, MAX_DB_PER_MS * n as f64 / fs_ms, oct];
         let s = &mut self.slots[b];
-        s.ln_f = t.ln_f + (s.ln_f - t.ln_f) * k;
-        s.gain_db = t.gain_db + (s.gain_db - t.gain_db) * k;
-        s.ln_q = t.ln_q + (s.ln_q - t.ln_q) * k;
-        if (s.ln_f - t.ln_f).abs() < SNAP_LN_F
-            && (s.gain_db - t.gain_db).abs() < SNAP_DB
-            && (s.ln_q - t.ln_q).abs() < SNAP_LN_Q
-        {
+        let targets = [t.ln_f, t.gain_db, t.ln_q];
+        let mut out = [s.ln_f, s.gain_db, s.ln_q];
+        for i in 0..3 {
+            let (e1, e2) = (s.pre[i] - targets[i], out[i] - targets[i]);
+            s.pre[i] = targets[i] + k * e1;
+            let next = targets[i] + k * e2 + c * e1;
+            out[i] += (next - out[i]).clamp(-limits[i], limits[i]);
+        }
+        [s.ln_f, s.gain_db, s.ln_q] = out;
+        let near = |v: [f64; 3]| {
+            (v[0] - t.ln_f).abs() < SNAP_LN_F
+                && (v[1] - t.gain_db).abs() < SNAP_DB
+                && (v[2] - t.ln_q).abs() < SNAP_LN_Q
+        };
+        if near(out) && near(s.pre) {
             s.ln_f = t.ln_f;
             s.gain_db = t.gain_db;
             s.ln_q = t.ln_q;
+            s.pre = targets;
             s.settled = true;
         }
         let (kind, f, g, q) = (s.kind, s.ln_f, s.gain_db, s.ln_q);
@@ -553,7 +591,8 @@ impl Processor for Equalizer {
         self.sample_rate = fs;
         self.channels = channels;
         self.states = vec![0.0; MAX_BANDS * 2 * STATE_PER_CHANNEL * channels];
-        self.smooth_block_coef = one_pole_coef(SMOOTHING_MS, fs).powi(RAMP_BLOCK as i32);
+        self.smooth_coef = one_pole_coef(SMOOTHING_MS, fs);
+        self.smooth_block_coef = self.smooth_coef.powi(RAMP_BLOCK as i32);
         self.fade_len = ((CROSSFADE_MS * 0.001 * fs).round() as usize).max(1);
         self.slots = [BandSlot::default(); MAX_BANDS];
         self.update_targets();

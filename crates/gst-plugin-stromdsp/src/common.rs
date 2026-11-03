@@ -116,15 +116,154 @@ impl<T: Copy> SharedSettings<T> {
 /// Number of interleaved samples converted per chunk (see [`Engine::process_bytes`]).
 const SCRATCH_SAMPLES: usize = 4096;
 
-/// A configured DSP processor plus the scratch buffer used to convert between
-/// the little-endian byte payload and `f32` samples.
+/// Length (ms) of the `enabled` crossfade between processed and dry signal.
+///
+/// Calibrated with the knob test (`tests/knobs.rs`): a raised-cosine fade of
+/// a full-scale swing on a 1 kHz tone leaves an annihilator residual of about
+/// −61 dB at 10 ms and −67 dB at 20 ms. 20 ms keeps a +12 dB EQ boost (a
+/// three-fold amplitude swing) and a 7 kHz de-esser band below −50 dB, and is
+/// still an immediate reaction for an operator. Same length as the delay
+/// element's crossfade.
+pub(crate) const BYPASS_FADE_MS: f64 = 20.0;
+
+/// Warm-up (ms) when leaving full bypass: the processor is reset and runs on
+/// the live input for this long, while the output stays dry, before the
+/// crossfade to its output starts. Filters settle and detectors catch up with
+/// the current level, so the crossfade starts from valid state.
+pub(crate) const BYPASS_WARMUP_MS: f64 = 10.0;
+
+/// Click-free `enabled` switch: a raised-cosine crossfade between the
+/// processor's output ("wet") and its input ("dry").
+///
+/// The wet weight is `w = (1 − cos(π·k/L))/2` for fade position `k = 0 … L`
+/// ([`BYPASS_FADE_MS`]): zero slope at both ends, so the gain change has no
+/// kink. Disabling moves `k` down to 0 (then the element switches to
+/// BaseTransform passthrough, bit-exact); enabling moves it up to `L` (then
+/// the output is the processor's output, bit-exact, with no mixing cost).
+/// A toggle during a running fade reverses it from where it is.
+///
+/// Leaving full bypass ([`BypassFade::set_enabled`] returns true) needs a
+/// processor reset: its state is from whenever it was bypassed, arbitrarily
+/// long ago. The processor then runs for [`BYPASS_WARMUP_MS`] with the output
+/// still dry, and only then fades in, so it is never faded in from a stale
+/// or a just-reset state.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BypassFade {
+    len: u32,
+    warmup_len: u32,
+    /// Fade position `k`, `0 ..= len`.
+    pos: u32,
+    /// Remaining warm-up frames (only while enabling from full bypass).
+    warm: u32,
+    enabled: bool,
+}
+
+impl Default for BypassFade {
+    /// Enabled, at 48 kHz (replaced when the format is known).
+    fn default() -> Self {
+        Self::new(48_000, true)
+    }
+}
+
+impl BypassFade {
+    /// Settled at `enabled` (no fade running).
+    pub(crate) fn new(rate: u32, enabled: bool) -> Self {
+        let frames = |ms: f64| ((ms * 0.001 * rate as f64).round() as u32).max(1);
+        let len = frames(BYPASS_FADE_MS);
+        Self {
+            len,
+            warmup_len: frames(BYPASS_WARMUP_MS),
+            pos: if enabled { len } else { 0 },
+            warm: 0,
+            enabled,
+        }
+    }
+
+    /// Set the target state. Returns true when the processor leaves full
+    /// bypass and must be reset (its state is stale).
+    pub(crate) fn set_enabled(&mut self, enabled: bool) -> bool {
+        if enabled == self.enabled {
+            return false;
+        }
+        self.enabled = enabled;
+        self.warm = 0;
+        if enabled && self.pos == 0 {
+            self.warm = self.warmup_len;
+            return true;
+        }
+        false
+    }
+
+    /// Disabled and fully faded out: the output is the dry input.
+    #[inline]
+    pub(crate) fn is_bypassed(&self) -> bool {
+        !self.enabled && self.pos == 0
+    }
+
+    /// Enabled and fully faded in: the output is the processor's output.
+    #[inline]
+    pub(crate) fn is_wet(&self) -> bool {
+        self.enabled && self.pos == self.len
+    }
+
+    /// Count `frames` of warm-up that were output dry by the caller.
+    pub(crate) fn advance_dry(&mut self, frames: usize) {
+        if self.enabled {
+            self.warm = self
+                .warm
+                .saturating_sub(frames.min(u32::MAX as usize) as u32);
+        }
+    }
+
+    /// Mix one chunk in place: `wet` (the processor's output) becomes the
+    /// output, `dry` is the unprocessed input. Advances the fade per frame.
+    #[inline]
+    pub(crate) fn mix(&mut self, wet: &mut [f32], dry: &[f32], channels: usize) {
+        let inv_len = std::f64::consts::PI / self.len as f64;
+        for (w, d) in wet
+            .chunks_exact_mut(channels)
+            .zip(dry.chunks_exact(channels))
+        {
+            if self.enabled {
+                if self.warm > 0 {
+                    self.warm -= 1;
+                } else if self.pos < self.len {
+                    self.pos += 1;
+                }
+            } else if self.pos > 0 {
+                self.pos -= 1;
+            }
+            if self.pos == 0 {
+                w.copy_from_slice(d);
+            } else if self.pos < self.len {
+                let g = (0.5 - 0.5 * (self.pos as f64 * inv_len).cos()) as f32;
+                for (a, &b) in w.iter_mut().zip(d) {
+                    *a = b + g * (*a - b);
+                }
+            }
+        }
+    }
+}
+
+/// Settings of an element with an `enabled` property handled by [`BypassFade`].
+pub(crate) trait Bypassable {
+    fn enabled(&self) -> bool;
+}
+
+/// A configured DSP processor plus the scratch buffers used to convert between
+/// the little-endian byte payload and `f32` samples, and the `enabled`
+/// crossfade state.
 #[derive(Debug)]
 pub(crate) struct Engine<P: Processor> {
     pub(crate) dsp: P,
     pub(crate) channels: usize,
     /// Settings generation last applied to `dsp`.
     pub(crate) applied: u64,
+    /// `enabled` crossfade (always wet for elements that do not use it).
+    pub(crate) fade: BypassFade,
     scratch: Vec<f32>,
+    /// Copy of the input while a crossfade runs.
+    dry: Vec<f32>,
 }
 
 impl<P: Processor> Engine<P> {
@@ -136,7 +275,9 @@ impl<P: Processor> Engine<P> {
             dsp,
             channels,
             applied: u64::MAX,
+            fade: BypassFade::new(rate, true),
             scratch: vec![0.0; frames * channels],
+            dry: vec![0.0; frames * channels],
         }
     }
 
@@ -146,6 +287,8 @@ impl<P: Processor> Engine<P> {
     /// The payload is converted chunk-wise through a scratch buffer allocated in
     /// [`Engine::new`]: this keeps the code free of `unsafe` and of alignment
     /// assumptions on the buffer memory, is endian-correct, and never allocates.
+    /// While the `enabled` crossfade runs, the input is kept in a second
+    /// scratch buffer and mixed with the processor's output ([`BypassFade::mix`]).
     #[inline]
     pub(crate) fn process_bytes(&mut self, data: &mut [u8]) {
         let frame_bytes = self.channels * 4;
@@ -156,10 +299,33 @@ impl<P: Processor> Engine<P> {
             for (s, b) in samples.iter_mut().zip(chunk.chunks_exact(4)) {
                 *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             }
-            self.dsp.process(samples);
+            if self.fade.is_wet() {
+                self.dsp.process(samples);
+            } else {
+                let dry = &mut self.dry[..samples.len()];
+                dry.copy_from_slice(samples);
+                self.dsp.process(samples);
+                self.fade.mix(samples, dry, self.channels);
+            }
             for (b, s) in chunk.chunks_exact_mut(4).zip(samples.iter()) {
                 b.copy_from_slice(&s.to_le_bytes());
             }
+        }
+    }
+
+    /// Run the processor on a copy of `data` (warm-up while the buffer passes
+    /// through untouched).
+    fn warm_up_bytes(&mut self, data: &[u8]) {
+        let frame_bytes = self.channels * 4;
+        let usable = data.len() / frame_bytes * frame_bytes;
+        let chunk_bytes = self.scratch.len() * 4;
+        for chunk in data[..usable].chunks(chunk_bytes) {
+            let samples = &mut self.scratch[..chunk.len() / 4];
+            for (s, b) in samples.iter_mut().zip(chunk.chunks_exact(4)) {
+                *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            }
+            self.dsp.process(samples);
+            self.fade.advance_dry(samples.len() / self.channels);
         }
     }
 }
@@ -261,6 +427,128 @@ pub(crate) fn configure_engine<P: Processor + Default, S: Copy>(
     *guard = Some(engine);
 }
 
+// ---------------------------------------------------------------------------
+// `enabled` with a crossfade, for the BaseTransform passthrough elements.
+//
+// Steady states: enabled → the processor's output (no mixing); disabled →
+// BaseTransform passthrough, bit-exact (phase 1 spec §4). In between, the
+// streaming thread crossfades ([`BypassFade`]) and owns the passthrough flag:
+//
+// - disabling: `transform_ip` keeps running and fades out; when the fade
+//   reaches dry it sets passthrough itself;
+// - enabling: the element is in passthrough, so it gets the buffers in
+//   `transform_ip_passthrough` (TRANSFORM_IP_ON_PASSTHROUGH = true), which
+//   sees the change, resets the processor, warms it up on a copy of the
+//   (untouched) buffer and leaves passthrough; `transform_ip` fades in.
+//
+// The application thread sets passthrough directly only while no stream is
+// configured (no engine), so `enabled=false` maps to passthrough at once on an
+// idle element. It never calls into BaseTransform while streaming, so a
+// controller-driven `enabled` (set from the streaming thread with the object
+// lock held) cannot deadlock.
+// ---------------------------------------------------------------------------
+
+/// `set_property("enabled")` helper: on an idle element (no stream
+/// configured) apply passthrough at once; while streaming the streaming
+/// thread fades and switches (see above). Never blocks.
+pub(crate) fn set_enabled_idle<P: Processor>(
+    obj: &impl IsA<gst_base::BaseTransform>,
+    slot: &EngineSlot<P>,
+    enabled: bool,
+) {
+    let idle = matches!(slot.try_lock(), Ok(g) if g.is_none());
+    if idle {
+        obj.set_passthrough(!enabled);
+    }
+}
+
+/// `set_caps` helper for elements with a crossfaded `enabled`: like
+/// [`configure_engine`], and the fade starts settled at the current setting.
+pub(crate) fn configure_engine_bypass<P: Processor + Default, S: Copy + Bypassable>(
+    obj: &impl IsA<gst_base::BaseTransform>,
+    slot: &EngineSlot<P>,
+    settings: &SharedSettings<S>,
+    rate: u32,
+    channels: usize,
+    apply: impl FnOnce(&mut P, &S),
+) {
+    configure_engine(slot, settings, rate, channels, apply);
+    let enabled = settings.get().enabled();
+    if let Some(e) = slot.lock().unwrap().as_mut() {
+        e.fade = BypassFade::new(rate, enabled);
+    }
+    obj.set_passthrough(!enabled);
+}
+
+/// Apply changed settings, and the `enabled` target to the fade (resetting
+/// the processor when it leaves full bypass); honour reset requests/DISCONT.
+#[inline]
+fn update_bypass_engine<P: Processor, S: Copy + Bypassable>(
+    engine: &mut Engine<P>,
+    settings: &SharedSettings<S>,
+    discont: bool,
+    apply: impl FnOnce(&mut P, &S),
+) {
+    if let Some(s) = settings.fetch_if_changed(&mut engine.applied) {
+        apply(&mut engine.dsp, &s);
+        if engine.fade.set_enabled(s.enabled()) {
+            engine.dsp.reset();
+        }
+    }
+    if settings.take_reset() || discont {
+        engine.dsp.reset();
+    }
+}
+
+/// `transform_ip` helper for elements with a crossfaded `enabled`: like
+/// [`transform_buffer`], plus the fade, and the switch to passthrough once a
+/// fade-out is complete. No allocation, no logging.
+#[inline]
+pub(crate) fn transform_buffer_bypass<P: Processor, S: Copy + Bypassable>(
+    obj: &impl IsA<gst_base::BaseTransform>,
+    slot: &EngineSlot<P>,
+    settings: &SharedSettings<S>,
+    buf: &mut gst::BufferRef,
+    apply: impl FnOnce(&mut P, &S),
+) -> Result<gst::FlowSuccess, gst::FlowError> {
+    let mut guard = slot.lock().unwrap();
+    let engine = guard.as_mut().ok_or(gst::FlowError::NotNegotiated)?;
+    let discont = buf.flags().contains(gst::BufferFlags::DISCONT);
+    update_bypass_engine(engine, settings, discont, apply);
+    let mut map = buf.map_writable().map_err(|_| gst::FlowError::Error)?;
+    engine.process_bytes(map.as_mut_slice());
+    if engine.fade.is_bypassed() {
+        // Faded out: from the next buffer on, bit-exact passthrough.
+        obj.set_passthrough(true);
+    }
+    Ok(gst::FlowSuccess::Ok)
+}
+
+/// `transform_ip_passthrough` helper for elements with a crossfaded
+/// `enabled`: the buffer always passes untouched. When `enabled` became true,
+/// reset the processor, warm it up on this buffer and leave passthrough (the
+/// fade-in runs in [`transform_buffer_bypass`]). Otherwise only a generation
+/// check. No allocation, no logging.
+#[inline]
+pub(crate) fn transform_passthrough_bypass<P: Processor, S: Copy + Bypassable>(
+    obj: &impl IsA<gst_base::BaseTransform>,
+    slot: &EngineSlot<P>,
+    settings: &SharedSettings<S>,
+    buf: &gst::Buffer,
+    apply: impl FnOnce(&mut P, &S),
+) -> Result<gst::FlowSuccess, gst::FlowError> {
+    let mut guard = slot.lock().unwrap();
+    let engine = guard.as_mut().ok_or(gst::FlowError::NotNegotiated)?;
+    let discont = buf.flags().contains(gst::BufferFlags::DISCONT);
+    update_bypass_engine(engine, settings, discont, apply);
+    if !engine.fade.is_bypassed() {
+        let map = buf.map_readable().map_err(|_| gst::FlowError::Error)?;
+        engine.warm_up_bytes(map.as_slice());
+        obj.set_passthrough(false);
+    }
+    Ok(gst::FlowSuccess::Ok)
+}
+
 /// Clear the processor state (FLUSH_STOP).
 pub(crate) fn reset_engine<P: Processor>(slot: &EngineSlot<P>) {
     if let Some(engine) = slot.lock().unwrap().as_mut() {
@@ -341,6 +629,52 @@ mod tests {
         b.chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
+    }
+
+    #[test]
+    fn bypass_fade_raised_cosine_warm_up_and_reversal() {
+        let rate = 48_000;
+        let len = (BYPASS_FADE_MS * 48.0) as usize;
+        let warm = (BYPASS_WARMUP_MS * 48.0) as usize;
+        let mut f = BypassFade::new(rate, true);
+        assert!(f.is_wet() && !f.is_bypassed());
+        // wet = 1, dry = 0 on one channel: the output is the wet weight.
+        let run = |f: &mut BypassFade, n: usize| -> Vec<f32> {
+            let mut wet = vec![1.0f32; n];
+            f.mix(&mut wet, &vec![0.0; n], 1);
+            wet
+        };
+        assert!(!f.set_enabled(false), "fading out needs no reset");
+        let out = run(&mut f, len + 10);
+        for (k, v) in out.iter().enumerate().take(len) {
+            let pos = (len - 1 - k) as f64;
+            let w = 0.5 - 0.5 * (std::f64::consts::PI * pos / len as f64).cos();
+            assert!((*v as f64 - w).abs() < 1e-6, "{k}: {v} vs {w}");
+        }
+        // Fully dry, bit-exact, from the end of the fade on.
+        assert!(out[len - 1..].iter().all(|&v| v == 0.0));
+        assert!(f.is_bypassed());
+        // Leaving full bypass: reset requested, then warm-up (dry), then fade in.
+        assert!(f.set_enabled(true));
+        let out = run(&mut f, warm + len + 10);
+        assert!(out[..warm].iter().all(|&v| v == 0.0), "dry during warm-up");
+        assert!(out[warm] > 0.0 && out[warm] < 1e-4, "smooth start");
+        assert!(
+            out[warm + len - 1..].iter().all(|&v| v == 1.0),
+            "bit-exact wet"
+        );
+        assert!(f.is_wet());
+        // Reversal mid-fade continues from where it is: no jump.
+        f.set_enabled(false);
+        let a = run(&mut f, len / 2);
+        assert!(!f.set_enabled(true), "not bypassed: no reset");
+        let b = run(&mut f, 1);
+        assert!((a[a.len() - 1] - b[0]).abs() < 2e-3);
+        // advance_dry only counts warm-up.
+        let mut g = BypassFade::new(rate, false);
+        assert!(g.set_enabled(true));
+        g.advance_dry(warm);
+        assert!(run(&mut g, 1)[0] > 0.0);
     }
 
     #[test]

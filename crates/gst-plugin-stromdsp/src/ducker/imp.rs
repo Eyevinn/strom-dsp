@@ -65,7 +65,7 @@ use strom_dsp::ducker::{Ducker, DuckerParams};
 use strom_dsp::Processor;
 
 use super::RangeMode;
-use crate::common::{self, SharedSettings};
+use crate::common::{self, BypassFade, SharedSettings};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -262,6 +262,10 @@ struct State {
     prog: Option<(u32, usize)>,
     key: Option<KeyFifo>,
     prog_scratch: Vec<f32>,
+    /// Copy of the programme while the `enabled` crossfade runs.
+    dry_scratch: Vec<f32>,
+    /// `enabled` crossfade (see [`BypassFade`]).
+    fade: BypassFade,
     key_scratch: Vec<f32>,
     applied: u64,
     settings: Settings,
@@ -271,7 +275,8 @@ struct State {
 
 impl State {
     fn apply(&mut self, s: &Settings) {
-        if s.enabled && !self.settings.enabled {
+        // Leaving full bypass: the state is stale; reset, warm up, fade in.
+        if self.fade.set_enabled(s.enabled) {
             self.dsp.reset();
         }
         self.dsp.set_params(&s.params);
@@ -335,7 +340,8 @@ impl ObjectImpl for StromDspDucker {
                 common::bool_prop(
                     "enabled",
                     "Enabled",
-                    "Duck the programme; when false the programme passes bit-exact \
+                    "Duck the programme; toggling crossfades over 20 ms, and when false the \
+                     programme then passes bit-exact \
                      (the key is still consumed)",
                     true,
                 ),
@@ -606,6 +612,9 @@ impl StromDspDucker {
             state.dsp.reset();
         }
         let enabled = state.settings.enabled;
+        // Run the processor unless fully bypassed (it keeps running while a
+        // crossfade to or from dry is in progress).
+        let run = !state.fade.is_bypassed();
         let mut map = buf.map_writable().map_err(|_| gst::FlowError::Error)?;
         let data = map.as_mut_slice();
         let frames = data.len() / (4 * ch);
@@ -613,6 +622,8 @@ impl StromDspDucker {
             dsp,
             key,
             prog_scratch,
+            dry_scratch,
+            fade,
             key_scratch,
             ..
         } = state;
@@ -636,20 +647,34 @@ impl StromDspDucker {
                     let ks = &mut key_scratch[..kn * kc];
                     real += k.take(i0, ks);
                     let bytes = &mut data[j * ch * 4..(j + n) * ch * 4];
-                    if enabled {
+                    if run {
                         let ps = &mut prog_scratch[..n * ch];
                         from_le(bytes, ps);
-                        dsp.process_with_key(ps, ks, kc);
+                        if fade.is_wet() {
+                            dsp.process_with_key(ps, ks, kc);
+                        } else {
+                            let dry = &mut dry_scratch[..n * ch];
+                            dry.copy_from_slice(ps);
+                            dsp.process_with_key(ps, ks, kc);
+                            fade.mix(ps, dry, ch);
+                        }
                         to_le(ps, bytes);
                     }
                     j += n;
                 }
             }
-            None if enabled => {
+            None if run => {
                 for bytes in data[..frames * ch * 4].chunks_mut(CHUNK_FRAMES * ch * 4) {
                     let ps = &mut prog_scratch[..bytes.len() / 4];
                     from_le(bytes, ps);
-                    dsp.process(ps);
+                    if fade.is_wet() {
+                        dsp.process(ps);
+                    } else {
+                        let dry = &mut dry_scratch[..ps.len()];
+                        dry.copy_from_slice(ps);
+                        dsp.process(ps);
+                        fade.mix(ps, dry, ch);
+                    }
                     to_le(ps, bytes);
                 }
             }
@@ -760,7 +785,9 @@ impl AggregatorImpl for StromDspDucker {
                     st.prog = Some((rate, channels));
                     st.dsp.configure(rate as f32, channels);
                     st.prog_scratch = vec![0.0; CHUNK_FRAMES * channels];
+                    st.dry_scratch = vec![0.0; CHUNK_FRAMES * channels];
                     let (s, generation) = self.settings.snapshot();
+                    st.fade = BypassFade::new(rate, s.enabled);
                     st.dsp.set_params(&s.params);
                     st.settings = s;
                     st.applied = generation;
