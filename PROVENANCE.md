@@ -159,6 +159,19 @@ Written from the gstreamer-rs bindings documentation and crate sources
   lookahead to upstream's min/max in the LATENCY query, and posts a Latency
   message when the lookahead changes.
 
+## Incident log
+
+- **2026-11-03, research only, no code affected.** During online research of
+  Rust SIMD and denormal handling, a research assistant (which wrote no
+  project code) viewed `src/denormal.rs` of the crate `truce-core`. That crate
+  turned out to carry a proprietary licence (`LicenseRef-TruceLicense-1.0`),
+  i.e. an "unclear licence" in the sense of the clean-room rules. The file only
+  sets the CPU flush-to-zero flag. Remediation: nothing from it is used. FTZ
+  handling, if added, comes from the MIT-licensed `no_denormals` crate or is
+  written from the Intel SDM (MXCSR) and Arm ARM (FPCR.FZ) by a contributor
+  who has not seen that file. The project's correctness never relies on FTZ:
+  all recursive states are flushed explicitly (see above).
+
 ## Dependencies
 
 | Crate | Used by | Licence |
