@@ -58,13 +58,16 @@
 //! **lowering**, write `crossover0-frequency` first, then 1, 2, 3 (the
 //! lowest moves out of the way first); when **raising**, write
 //! `crossover3-frequency` first, then 2, 1, 0. Or use
-//! `crossover-frequencies`, which sets them all at once: its entries (at
-//! most 4; extra entries are ignored with a warning; a non-numeric or NaN
-//! entry rejects the whole write) are clamped to 20 … 20000 Hz, sorted, and
-//! become crossovers 0 … k−1; the others keep their values. The whole set is
-//! then made strictly ascending (pushed up from the lowest, then down from
-//! the highest, by at most what is needed). Only the first `num-bands − 1`
-//! crossovers are used.
+//! `crossover-frequencies`, which sets them all at once. Its entries are
+//! validated by GObject against the element spec (`gfloat`, 20 … 20000 Hz:
+//! an array with an entry of another type, out of range or NaN is rejected
+//! as a whole with a GLib warning, like any out-of-range property value; an
+//! empty array is ignored). At most 4 entries are used (extra entries are
+//! ignored with a warning). They are sorted and become crossovers 0 … k−1;
+//! the others keep their values. The whole set is then made strictly
+//! ascending (pushed up from the lowest, then down from the highest, by at
+//! most what is needed), so duplicates end up 1 Hz apart. Only the first
+//! `num-bands − 1` crossovers are used.
 //!
 //! # Presets
 //!

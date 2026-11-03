@@ -708,7 +708,7 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     .nick("Crossover frequencies")
                     .blurb(
                         "All crossovers at once (Hz), e.g. <150.0, 1000.0, 5000.0>: entries \
-                         are clamped to 20 .. 20000, sorted and set as crossover 0, 1, ...; \
+                         (20 .. 20000) are sorted and set as crossover 0, 1, ...; \
                          the rest keep their values; the set is kept strictly ascending",
                     )
                     .element_spec(&entry)
