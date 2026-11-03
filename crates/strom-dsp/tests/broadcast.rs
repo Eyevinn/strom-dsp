@@ -1052,6 +1052,12 @@ mod peaky_acceptance {
     /// phase (sample peaks 3 dB under its true peak) every ~2.3 s; and a
     /// single-sample click every ~1.1 s.
     fn programme(ch: usize, fs: f64) -> Vec<f32> {
+        programme_with_clicks(ch, fs, 1.1)
+    }
+
+    /// [`programme`] with a single-sample click every `click_s` seconds
+    /// instead of every 1.1 s (same bed, hits and bursts).
+    pub(super) fn programme_with_clicks(ch: usize, fs: f64, click_s: f64) -> Vec<f32> {
         let frames = 1 << 19;
         let mut x = pink(frames, ch, fs, 31);
         x.iter_mut().for_each(|v| *v *= 0.12);
@@ -1088,7 +1094,7 @@ mod peaky_acceptance {
             }
             start += (2.3 * fs) as usize;
         }
-        // Single-sample clicks every 1.1 s.
+        // Single-sample clicks every `click_s`.
         let mut n = (0.37 * fs) as usize;
         let mut sign = 1.0f32;
         while n < frames {
@@ -1096,7 +1102,7 @@ mod peaky_acceptance {
                 x[n * ch + c] += 4.0 * sign;
             }
             sign = -sign;
-            n += (1.1 * fs) as usize;
+            n += (click_s * fs) as usize;
         }
         x
     }
@@ -1193,5 +1199,75 @@ mod peaky_acceptance {
     #[test]
     fn preset_speech() {
         check("speech");
+    }
+}
+
+/// The [`peaky_acceptance`] programme with a click every 300 ms instead of
+/// every 1.1 s, through the `streaming` preset (4 bands) at −35, −23 and
+/// −10 LUFS input; integrated output loudness from 10 s to 60 s.
+///
+/// The clicks carry much of the input's measured loudness, and the limiter
+/// takes about 13 dB off them, so the output-referenced trim runs into its
+/// +6 dB bound at −23 and −10 LUFS input (short-term output settles near
+/// −16.9 LUFS), and at −35 LUFS the AGC also reaches its 24 dB maximum gain
+/// (near −17.4 LUFS). The integrated value also includes the 10 … 25 s
+/// in which the trim is still rising.
+///
+/// This misses the ±1 LU goal of [`peaky_acceptance`], so the test
+/// documents the current result instead: each value must stay within
+/// `BAND_LU` of the value measured when it was written (`MEASURED`), so a
+/// change in either direction shows up.
+mod dense_clicks {
+    use super::*;
+    use strom_dsp::presets::BroadcastPreset;
+
+    const SECONDS: usize = 60;
+    const SKIP_SECONDS: usize = 10;
+    const CLICK_S: f64 = 0.3;
+    /// (input LUFS, measured integrated output LUFS).
+    const MEASURED: [(f64, f64); 3] = [(-35.0, -17.69), (-23.0, -17.15), (-10.0, -17.11)];
+    const BAND_LU: f64 = 0.5;
+
+    #[test]
+    fn streaming_with_clicks_every_300_ms() {
+        let ch = 2;
+        let fs = FS as f64;
+        let p = BroadcastParams::preset(BroadcastPreset::Streaming, 4);
+        let src = peaky_acceptance::programme_with_clicks(ch, fs, CLICK_S);
+        let mut failures = Vec::new();
+        for (input_lufs, expected) in MEASURED {
+            let mut x = src.clone();
+            scale_to_lufs(&mut x, ch, fs, input_lufs);
+            let mut bp = processor(FS, ch, &p);
+            let mut meter = LoudnessMeter::new(&LoudnessConfig {
+                sample_rate: FS,
+                channels: ch,
+                layout: ChannelLayout::Unknown,
+                true_peak: false,
+            })
+            .unwrap();
+            let mut looper = Looper::new(&x);
+            let mut buf = vec![0.0f32; BLOCK * ch];
+            let per_s = FS as usize / BLOCK;
+            for i in 0..SECONDS * per_s {
+                looper.fill(&mut buf);
+                bp.process(&mut buf);
+                if i >= SKIP_SECONDS * per_s {
+                    meter.process(&buf);
+                }
+            }
+            let integrated = meter.integrated();
+            println!(
+                "clicks every 300 ms, streaming at {input_lufs} LUFS: integrated \
+                 {integrated:.2} LUFS (target {}, recorded {expected:.2})",
+                p.target_loudness_lufs
+            );
+            if (integrated - expected).abs() > BAND_LU {
+                failures.push(format!(
+                    "at {input_lufs} LUFS: integrated {integrated:.2} LUFS, recorded {expected:.2}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

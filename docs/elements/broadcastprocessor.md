@@ -42,8 +42,8 @@ mutable in PLAYING unless noted.
 | `target-loudness` | float, LUFS | −40…−5 | −23 |
 | `true-peak-ceiling` | float, dBTP | −12…0 | −1 |
 | `agc-enabled` | bool | | true |
-| `agc-max-gain` | float, dB | 0…30 | 12 |
-| `agc-max-cut` | float, dB | 0…30 | 12 |
+| `agc-max-gain` | float, dB | 0…30 | 24 |
+| `agc-max-cut` | float, dB | 0…30 | 24 |
 | `agc-rate-up` | float, dB/s | 0.1…20 | 1 |
 | `agc-rate-down` | float, dB/s | 0.1…40 | 3 |
 | `agc-gate` | float, LUFS | −80…−20 | −50 |
@@ -91,7 +91,7 @@ and deliberately gentle:
 
 | Nick | Target | Ceiling | AGC max gain/cut | AGC rate up/down | `agc-gate` | Band threshold | Band ratio | `limiter-release` |
 |---|---|---|---|---|---|---|---|---|
-| `ebu-r128` (default) | −23 LUFS | −1 dBTP | 12 / 12 dB | 1 / 3 dB/s | −50 LUFS | −18 dB | 2 | 200 ms |
+| `ebu-r128` (default) | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 LUFS | −18 dB | 2 | 200 ms |
 | `atsc-a85` | −24 LKFS | −2 dBTP | 24 / 24 | 3 / 6 | −50 | −19 | 2 | 200 |
 | `streaming` | −16 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −50 | −11 | 2 | 200 |
 | `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 |
@@ -103,11 +103,15 @@ All presets: `input-gain` 0, all stages on, `multiband-drive` 0, band makeup 0.
   streaming range (`speech` sits inside that range at −18 LUFS).
 - **Band thresholds:** target + 5 dB (speech: + 7 dB). They follow the target
   because the multiband comes after the AGC.
-- **AGC range and rates:** `ebu-r128` uses ±12 dB, which covers programme
-  delivered between −35 and −11 LUFS, and 1 dB/s up, 3 dB/s down: a slow
-  fader, not a compressor, that brings a loud item down faster than it lifts
-  a quiet one. The others sit further from typical delivery levels, so they
-  need ±24 dB and 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
+- **AGC range:** ±24 dB for every preset. The AGC must cover the distance
+  from input to target (12 dB for −35 LUFS input to −23 LUFS) plus what the
+  multiband and limiter take away after it, which the output-referenced trim
+  adds to the AGC target (up to 6 dB). With ±12 dB, −35 LUFS input to
+  `ebu-r128` used the whole range just to reach the target.
+- **AGC rates:** `ebu-r128` rides at 1 dB/s up, 3 dB/s down: a slow fader,
+  not a compressor, that brings a loud item down faster than it lifts a
+  quiet one. The others sit further from typical delivery levels, so they
+  use 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, and a
   150 ms limiter release.
 
@@ -153,12 +157,25 @@ gated loudness at the output and trims the AGC target to make that up
 below `agc-gate`, while the AGC is ramping or bypassed, and when the AGC is at
 `agc-max-gain` or `agc-max-cut`. Those bounds and the AGC rates still apply.
 
-**Limitation:** the trim cannot exceed the AGC range. Programme that needs
-the whole of `agc-max-gain` just to reach the target (for example −35 LUFS
-input with the `ebu-r128` preset's 12 dB) gets no make-up, and can land
-below target by what the multiband and limiter remove. Material the limiter
-already holds at the ceiling cannot get louder either; the trim then stops
-at its 6 dB range.
+**Limitation:** the trim cannot exceed the AGC range or its own ±6 dB.
+Programme that needs most of `agc-max-gain` just to reach the target gets
+little make-up, and can land below target by what the multiband and limiter
+remove. Material the limiter already holds at the ceiling cannot get louder
+either; the trim then stops at its 6 dB range.
+
+Measured case: the peaky programme above with a click every 300 ms instead
+of every 1.1 s, `streaming` preset. The limiter takes about 13 dB off the
+clicks, the trim reaches +6 dB, and at −35 LUFS input the AGC also reaches
+its 24 dB maximum gain. Integrated output (10 … 60 s, target −16 LUFS):
+
+| Input | Output | Off target |
+|---|---|---|
+| −35 LUFS | −17.69 LUFS | −1.69 LU |
+| −23 LUFS | −17.15 LUFS | −1.15 LU |
+| −10 LUFS | −17.11 LUFS | −1.11 LU |
+
+All three miss ±1 LU. Short-term output settles near −16.9 LUFS (−17.4 at
+−35 LUFS input); the rest is the time the trim takes to rise.
 
 ## Signals
 
