@@ -225,12 +225,12 @@ impl LimiterParams {
 /// - **Clip budget** (see [`crate::governor`]): 2 dB (clip depth up to
 ///   −30 dB, limiter mean gain reduction up to 1 dB) for the broadcast and
 ///   speech presets: at −18 … −24 LUFS a programme rarely reaches the
-///   clipper, so the budget only matters for hot, peaky material, and the
-///   peaky acceptance programme stays within ±1 LU. Speech is not given a
-///   smaller budget: with 1 dB the governor took 1.6 … 1.9 LU off the
-///   peaky programme. Streaming gets 3 dB (−25 dB, 1.5 dB): at −16 LUFS
-///   peaks reach the clipper more often, and a 2 dB budget cost the peaky
-///   programme 0.5 … 1.5 LU.
+///   clipper, so the budget only matters for hot, peaky material.
+///   Streaming gets 3 dB (−25 dB, 1.5 dB): at −16 LUFS peaks reach the
+///   clipper more often. The budget never costs loudness (the governor
+///   puts loudness first); it decides when the output trim holds and when
+///   an excess is reported. On these defaults no test programme goes over
+///   it.
 /// - **Limiter release**: 200 ms for programme, long compared with bass
 ///   periods (no low-frequency distortion) and short enough to recover
 ///   between phrases (the same reasoning as [`LimiterParams::broadcast`]).
