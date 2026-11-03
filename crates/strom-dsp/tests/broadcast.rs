@@ -1261,14 +1261,18 @@ mod peaky_acceptance {
 ///   The largest single value is printed: a click that lands on a hit
 ///   also gets the hit's own reduction.
 ///
-/// The clicks carry much of the input's measured loudness. Without the
-/// spike guard the limiter takes about 13 dB off them, the
-/// output-referenced trim runs into its +6 dB bound, and the integrated
-/// output misses the target by 1.1 … 1.7 LU (−17.69, −17.15 and −17.11 LUFS
-/// at the three input levels).
+/// The clicks carry much of the input's measured loudness. Before the
+/// spike guard and the final clipper the limiter took about 13 dB off
+/// them, the output-referenced trim ran into its +6 dB bound, and the
+/// integrated output missed the target by 1.1 … 1.7 LU (−17.69, −17.15 and
+/// −17.11 LUFS at the three input levels). With the spike guard off today
+/// the final clipper takes most of each click and the output lands within
+/// 1 LU (−16.44 … −16.32 LUFS), but the limiter still takes 4.0 … 4.1 dB
+/// off the clicks; with it on, 0.2 dB (−16.14 … −16.09 LUFS).
 ///
-/// Guard: the same run with the spike guard off must still miss, so the
-/// test fails if the spike guard stops catching the clicks.
+/// Guard: the same run with the spike guard off must fail one of the two
+/// bounds (today the limiter reduction on the clicks), so the test fails
+/// if the spike guard stops catching the clicks.
 mod dense_clicks {
     use super::*;
     use strom_dsp::presets::BroadcastPreset;
