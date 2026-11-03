@@ -5,6 +5,8 @@
 //!   fallback (to show what the explicit SIMD buys).
 //! - `oversample/{2x,8x}_up_down/480` for comparison, and the 4× peak path the
 //!   true-peak limiter will use.
+//! - `stft/{1024_256,2048_512}_identity/480`: STFT analysis + resynthesis
+//!   with an identity callback, frame/hop 1024/256 and 2048/512.
 //!
 //! Throughput is in base-rate frames, so the share of one core is
 //! `48 000 frames/s ÷ measured frames/s`.
@@ -14,6 +16,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use strom_dsp::oversample::{OversampleFactor, Oversampler};
 use strom_dsp::simd::{detect, Level};
+use strom_dsp::stft::{Complex32, Stft, StftHop};
 
 const CH: usize = 2;
 const FRAMES: usize = 480;
@@ -72,5 +75,38 @@ fn oversample(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, oversample);
+fn stft(c: &mut Criterion) {
+    // Long input, consumed one 480-frame buffer per iteration, so every
+    // hop's FFT pair is included at its real rate.
+    let src = programme(FRAMES * 100, CH);
+    let mut g = c.benchmark_group("stft");
+    g.throughput(Throughput::Elements(FRAMES as u64));
+    for (frame, hop, name) in [
+        (1024, StftHop::Quarter, "1024_256"),
+        (2048, StftHop::Quarter, "2048_512"),
+    ] {
+        let mut s = Stft::new();
+        s.configure(frame, hop, CH).unwrap();
+        let mut buf = vec![0.0f32; FRAMES * CH];
+        let mut pos = 0;
+        let mut identity = |_: usize, sp: &mut [Complex32]| {
+            black_box(sp);
+        };
+        g.bench_function(format!("{name}_identity/{FRAMES}"), |b| {
+            b.iter(|| {
+                let n = FRAMES * CH;
+                if pos + n > src.len() {
+                    pos = 0;
+                }
+                buf.copy_from_slice(&src[pos..pos + n]);
+                pos += n;
+                s.process(&mut buf, &mut identity);
+                black_box(&buf);
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, oversample, stft);
 criterion_main!(benches);

@@ -78,3 +78,48 @@ fn oversampler_is_realtime_safe() {
         }
     }
 }
+
+#[test]
+fn stft_is_realtime_safe() {
+    use strom_dsp::stft::{Complex32, Stft, StftHop};
+
+    let max = *SIZES.iter().max().unwrap();
+    for (frame, hop) in [
+        (256, StftHop::Half),
+        (1024, StftHop::Quarter),
+        (4096, StftHop::Half),
+    ] {
+        for ch in CHANNELS {
+            let mut s = Stft::new();
+            s.configure(frame, hop, ch).unwrap();
+            let input = signal(max * 8, ch);
+            let mut buf = vec![0.0f32; max * ch];
+            // A spectral gate, as a noise reducer would do.
+            let mut proc = |_: usize, sp: &mut [Complex32]| {
+                for b in sp.iter_mut() {
+                    if b.norm_sqr() < 1.0 {
+                        *b *= 0.1;
+                    }
+                }
+            };
+            let mut pos = 0;
+            for i in 0..BUFFERS {
+                let n = SIZES[i % SIZES.len()];
+                if (pos + n) * ch > input.len() {
+                    pos = 0;
+                }
+                let block = &mut buf[..n * ch];
+                block.copy_from_slice(&input[pos * ch..(pos + n) * ch]);
+                let _rt = ScopedSanitizeRealtime::default();
+                s.process(block, &mut proc);
+                let _ = s.latency_frames();
+                if i % 97 == 96 {
+                    s.reset();
+                }
+                drop(_rt);
+                pos += n;
+                assert!(block.iter().all(|v| v.is_finite()));
+            }
+        }
+    }
+}
