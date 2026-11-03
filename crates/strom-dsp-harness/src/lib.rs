@@ -10,6 +10,9 @@
 //! - [`chain`]: the broadcast chain cases and the numbers per case.
 //! - [`baseline`]: the checked-in baseline (`baseline.json`) and the
 //!   regression check against it.
+//! - [`listen`]: the listening kit: processor configurations over the
+//!   test corpus, before/after audio, numbers and a static listening page
+//!   (binary `strom-dsp-listen`).
 //!
 //! Every metric is a plain function over interleaved `f32` signals, so a
 //! new stage only needs to hand its before/after signals (or its meter
@@ -17,6 +20,7 @@
 
 pub mod baseline;
 pub mod chain;
+pub mod listen;
 pub mod metrics;
 pub mod signals;
 pub mod spectrum;

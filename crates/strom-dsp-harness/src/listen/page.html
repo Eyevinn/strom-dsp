@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strom-dsp listening kit</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1b1d21; --muted: #5d636e;
+  --line: #d9dbe0; --accent: #1f6feb; --accent-text: #ffffff; --row: #eef3fd;
+  --bad: #b42318; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121418; --panel: #1b1e24; --text: #e6e8ec; --muted: #9aa1ad;
+    --line: #2e333c; --accent: #4c8dff; --accent-text: #0b0d10; --row: #1f2a3d; --bad: #ff7b72;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121418; --panel: #1b1e24; --text: #e6e8ec; --muted: #9aa1ad;
+  --line: #2e333c; --accent: #4c8dff; --accent-text: #0b0d10; --row: #1f2a3d; --bad: #ff7b72;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 1.25rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0 0 6px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px; margin-top: 14px; }
+.pickers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 700px) { .pickers { grid-template-columns: 1fr; } }
+label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 3px; }
+select, button { font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+select { width: 100%; }
+button { cursor: pointer; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.about { color: var(--muted); font-size: .88rem; margin: 8px 0 0; }
+.versions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.versions button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text);
+  border-color: var(--accent); }
+.transport { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#play { min-width: 88px; font-weight: 600; }
+#seek { flex: 1 1 200px; accent-color: var(--accent); }
+#time { font-family: var(--mono); font-size: .85rem; min-width: 96px; }
+.opts { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: .9rem; }
+.opts label { display: inline; color: var(--text); font-size: .9rem; }
+#status { font-family: var(--mono); font-size: .8rem; color: var(--muted); margin-top: 8px;
+  overflow-wrap: anywhere; }
+#status.err { color: var(--bad); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; }
+tbody tr { cursor: pointer; }
+tr.sel td { background: var(--row); font-weight: 600; }
+td.num { font-family: var(--mono); }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
+.clipinfo dt { color: var(--muted); font-size: .8rem; margin-top: 6px; }
+.clipinfo dd { margin: 0; overflow-wrap: anywhere; font-size: .9rem; }
+a { color: var(--accent); }
+.note { font-size: .82rem; color: var(--muted); }
+kbd { font-family: var(--mono); font-size: .8rem; border: 1px solid var(--line);
+  border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>strom-dsp listening kit</h1>
+  <button id="theme" type="button" title="Switch light or dark theme">Theme</button>
+</header>
+
+<section class="panel">
+  <div class="pickers">
+    <div><label for="group">Processor</label><select id="group"></select></div>
+    <div><label for="config">Configuration</label><select id="config"></select></div>
+    <div><label for="clip">Clip</label><select id="clip"></select></div>
+  </div>
+  <p class="about" id="groupAbout"></p>
+  <p class="about" id="configAbout"></p>
+</section>
+
+<section class="panel">
+  <h2>Versions</h2>
+  <div class="versions" id="versions" role="group" aria-label="Versions"></div>
+  <div class="transport">
+    <button id="play" type="button">Play</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position">
+    <span id="time">0:00.0 / 0:00</span>
+  </div>
+  <div class="opts">
+    <span><input type="checkbox" id="loop" checked> <label for="loop">Loop</label></span>
+    <span><input type="checkbox" id="match"> <label for="match">Match loudness (turn louder versions down to the quietest)</label></span>
+  </div>
+  <div id="status">Audio: not started</div>
+  <p class="note">Switching versions keeps the playback position: all versions play in sync and
+    only the one you hear changes. Keys: <kbd>space</kbd> play/pause, <kbd>0</kbd> original,
+    <kbd>1</kbd>–<kbd>9</kbd> versions, <kbd>a</kbd> original ⇄ configuration,
+    <kbd>←</kbd>/<kbd>→</kbd> 5 s. On an iPhone, the silent switch mutes Web Audio unless the
+    page sets its audio session to playback; this page does so where the browser supports it.
+    If you hear nothing, turn the silent switch off.</p>
+</section>
+
+<section class="panel">
+  <h2>Harness numbers</h2>
+  <div class="tablewrap"><table id="numbers"></table></div>
+  <p class="note" id="numbersNote"></p>
+  <details>
+    <summary>Every number of the selected version</summary>
+    <div class="tablewrap"><table id="allnumbers"></table></div>
+  </details>
+</section>
+
+<section class="panel">
+  <h2>Clip</h2>
+  <dl class="clipinfo" id="clipinfo"></dl>
+  <p class="note" id="downloads"></p>
+</section>
+
+<p class="note">The clips are freely licensed (CC0, public domain, CC BY 3.0/4.0); the full
+  attribution list is in <a href="ATTRIBUTION.md">ATTRIBUTION.md</a> and every number is in
+  <a href="listen-data.json">listen-data.json</a>.</p>
+</main>
+
+<script>
+const DATA = /*DATA*/null;
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  let lastError = "";
+
+  // ---- theme -------------------------------------------------------------
+  function setTheme(t) {
+    if (t) document.documentElement.setAttribute("data-theme", t);
+    else document.documentElement.removeAttribute("data-theme");
+  }
+  try { setTheme(localStorage.getItem("strom-listen-theme")); } catch (e) {}
+  $("theme").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") ||
+      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = cur === "dark" ? "light" : "dark";
+    setTheme(next);
+    try { localStorage.setItem("strom-listen-theme", next); } catch (e) {}
+  });
+
+  // ---- data --------------------------------------------------------------
+  const groups = DATA.groups;
+  const clips = Object.fromEntries(DATA.clips.map((c) => [c.id, c]));
+  const setsByKey = Object.fromEntries(DATA.sets.map((s) => [s.group + "/" + s.clip, s]));
+  const state = { group: null, config: null, clip: null, version: "original", set: null };
+
+  function fill(sel, items) {
+    sel.textContent = "";
+    for (const [value, text] of items) {
+      const o = document.createElement("option");
+      o.value = value; o.textContent = text; sel.appendChild(o);
+    }
+  }
+  function fmt(v) {
+    if (v === null || v === undefined) return "–";
+    if (Math.abs(v) >= 100) return v.toFixed(0);
+    return v.toFixed(Math.abs(v) >= 10 ? 1 : 2);
+  }
+  function fmtTime(t) {
+    const m = Math.floor(t / 60), s = t - m * 60;
+    return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+  }
+
+  // ---- audio -------------------------------------------------------------
+  let ctx = null, master = null;
+  const player = { buffers: {}, gains: {}, sources: [], playing: false, startedAt: 0,
+    offset: 0, duration: 0, token: 0 };
+  const loaded = {}; // set key -> {version: base64}
+
+  function showStatus(msg, isErr) {
+    const st = ctx ? ctx.state : "not started";
+    statusEl.textContent = "Audio: " + st + (msg ? " · " + msg : "") +
+      (lastError && !isErr ? " · last error: " + lastError : "");
+    statusEl.className = isErr ? "err" : "";
+  }
+  function fail(msg) { lastError = msg; showStatus(msg, true); }
+  window.addEventListener("error", (e) => fail(String(e.message || e)));
+  window.addEventListener("unhandledrejection", (e) => fail(String(e.reason)));
+
+  function ensureContext() {
+    if (ctx) return ctx;
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = "playback";
+    } catch (e) { /* not supported */ }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { fail("this browser has no Web Audio"); return null; }
+    ctx = new AC();
+    master = ctx.createGain();
+    master.connect(ctx.destination);
+    ctx.onstatechange = () => showStatus();
+    showStatus();
+    return ctx;
+  }
+
+  window.__stromListenLoaded = function (key, versions) {
+    loaded[key] = versions;
+    if (state.set && key === state.set.group + "/" + state.set.clip) decodeSet();
+  };
+
+  function requestSet(set) {
+    const key = set.group + "/" + set.clip;
+    if (loaded[key]) { decodeSet(); return; }
+    showStatus("loading " + key);
+    const s = document.createElement("script");
+    s.src = set.dir + "/audio.js";
+    s.onerror = () => fail("could not load " + s.src);
+    document.head.appendChild(s);
+  }
+
+  function b64ToArrayBuffer(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  }
+
+  function decodeOne(buf) {
+    return new Promise((resolve, reject) => {
+      const p = ctx.decodeAudioData(buf, resolve, reject);
+      if (p && p.then) p.then(resolve, reject);
+    });
+  }
+
+  async function decodeSet() {
+    const set = state.set;
+    if (!set || !ctx) return;
+    const key = set.group + "/" + set.clip;
+    const data = loaded[key];
+    if (!data) return;
+    const token = ++player.token;
+    showStatus("decoding " + key);
+    try {
+      const out = {};
+      for (const v of set.versions) {
+        if (!data[v.id]) throw new Error("no audio for version " + v.id);
+        out[v.id] = await decodeOne(b64ToArrayBuffer(data[v.id]));
+        if (token !== player.token) return;
+      }
+      const wasPlaying = player.playing;
+      stopSources();
+      player.buffers = out;
+      player.duration = Math.min(...Object.values(out).map((b) => b.duration));
+      if (player.offset >= player.duration) player.offset = 0;
+      buildGains();
+      showStatus("ready: " + key);
+      if (wasPlaying || player.wantPlay) start();
+      player.wantPlay = false;
+    } catch (e) {
+      fail("decoding failed: " + (e && e.message ? e.message : e));
+    }
+  }
+
+  function levelOf(id) {
+    if (!$("match").checked) return 1;
+    const lufs = (v) => v.numbers && typeof v.numbers.lufs === "number" ? v.numbers.lufs : null;
+    const all = state.set.versions.map(lufs).filter((x) => x !== null);
+    const mine = lufs(state.set.versions.find((v) => v.id === id));
+    if (!all.length || mine === null) return 1;
+    return Math.pow(10, (Math.min(...all) - mine) / 20);
+  }
+
+  function buildGains() {
+    for (const g of Object.values(player.gains)) g.disconnect();
+    player.gains = {};
+    for (const id of Object.keys(player.buffers)) {
+      const g = ctx.createGain();
+      g.gain.value = id === state.version ? levelOf(id) : 0;
+      g.connect(master);
+      player.gains[id] = g;
+    }
+  }
+
+  function stopSources() {
+    for (const s of player.sources) { try { s.onended = null; s.stop(); } catch (e) {} }
+    player.sources = [];
+    if (player.playing) player.offset = position();
+    player.playing = false;
+  }
+
+  function start() {
+    if (!ctx || !Object.keys(player.buffers).length) return;
+    const t0 = ctx.currentTime + 0.05;
+    const loop = $("loop").checked;
+    player.sources = Object.entries(player.buffers).map(([id, buf]) => {
+      const s = ctx.createBufferSource();
+      s.buffer = buf;
+      s.loop = loop;
+      if (loop) { s.loopStart = 0; s.loopEnd = player.duration; }
+      s.connect(player.gains[id]);
+      s.start(t0, player.offset);
+      return s;
+    });
+    player.sources[0].onended = () => {
+      if (!$("loop").checked) { player.sources = []; player.playing = false; player.offset = 0; updatePlay(); }
+    };
+    player.startedAt = t0 - player.offset;
+    player.playing = true;
+    updatePlay();
+  }
+
+  function position() {
+    if (!player.playing || !ctx) return player.offset;
+    let t = Math.max(0, ctx.currentTime - player.startedAt);
+    if ($("loop").checked && player.duration > 0) t = t % player.duration;
+    return Math.min(t, player.duration);
+  }
+
+  function updatePlay() { $("play").textContent = player.playing ? "Pause" : "Play"; }
+
+  async function togglePlay() {
+    if (!ensureContext()) return;
+    if (ctx.state !== "running") {
+      try { await ctx.resume(); } catch (e) { fail("resume failed: " + e); }
+    }
+    if (player.playing) { stopSources(); updatePlay(); return; }
+    if (!Object.keys(player.buffers).length) {
+      player.wantPlay = true;
+      if (state.set) requestSet(state.set);
+      return;
+    }
+    start();
+  }
+
+  function seek(t) {
+    const was = player.playing;
+    stopSources();
+    player.offset = Math.max(0, Math.min(t, Math.max(0, player.duration - 0.01)));
+    if (was) start();
+  }
+
+  function selectVersion(id) {
+    if (!state.set || !state.set.versions.some((v) => v.id === id)) return;
+    const prev = state.version;
+    state.version = id;
+    if (ctx) {
+      const now = ctx.currentTime, ramp = 0.012;
+      for (const [vid, g] of Object.entries(player.gains)) {
+        const target = vid === id ? levelOf(vid) : 0;
+        g.gain.cancelScheduledValues(now);
+        g.gain.setValueAtTime(g.gain.value, now);
+        g.gain.linearRampToValueAtTime(target, now + ramp);
+      }
+    }
+    if (id !== "original" && state.group.configs.some((c) => c.id === id)) {
+      state.config = id;
+      $("config").value = id;
+      showConfigAbout();
+    }
+    if (prev !== id) renderVersions();
+    renderNumbers();
+    renderDownloads();
+  }
+
+  // ---- UI ----------------------------------------------------------------
+  function renderVersions() {
+    const box = $("versions");
+    box.textContent = "";
+    state.set.versions.forEach((v, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = (i <= 9 ? i + " · " : "") + v.label;
+      b.setAttribute("aria-pressed", v.id === state.version ? "true" : "false");
+      b.addEventListener("click", () => selectVersion(v.id));
+      box.appendChild(b);
+    });
+  }
+
+  function renderNumbers() {
+    const t = $("numbers");
+    t.textContent = "";
+    const head = t.createTHead().insertRow();
+    const th = (row, text) => { const c = document.createElement("th"); c.textContent = text; row.appendChild(c); };
+    th(head, "Version");
+    for (const [, label] of state.group.columns) th(head, label);
+    const body = t.createTBody();
+    for (const v of state.set.versions) {
+      const r = body.insertRow();
+      if (v.id === state.version) r.className = "sel";
+      r.addEventListener("click", () => selectVersion(v.id));
+      r.insertCell().textContent = v.label;
+      for (const [key] of state.group.columns) {
+        const c = r.insertCell();
+        c.className = "num";
+        c.textContent = fmt(v.numbers[key]);
+      }
+    }
+    $("numbersNote").textContent = "Measured on each version as processed, before the listening gain of " +
+      fmt(state.set.gain_db) + " dB that every version of this set shares (loudest sample peak at " +
+      DATA.listen_peak_dbfs + " dBFS). The original is the clip scaled to " + DATA.reference_lufs +
+      " LUFS. Broadcast numbers other than loudness are measured from " + DATA.broadcast_skip_s +
+      " s on; NMR is against the same chain with every dynamic stage neutral.";
+    const all = $("allnumbers");
+    all.textContent = "";
+    const v = state.set.versions.find((x) => x.id === state.version);
+    const hb = all.createTHead().insertRow();
+    th(hb, "Key"); th(hb, v.label);
+    const bb = all.createTBody();
+    for (const [k, val] of Object.entries(v.numbers)) {
+      const r = bb.insertRow();
+      r.insertCell().textContent = k;
+      const c = r.insertCell(); c.className = "num"; c.textContent = fmt(val);
+    }
+  }
+
+  function renderClip() {
+    const c = clips[state.clip];
+    const dl = $("clipinfo");
+    dl.textContent = "";
+    const item = (k, v, href) => {
+      const dt = document.createElement("dt"); dt.textContent = k; dl.appendChild(dt);
+      const dd = document.createElement("dd");
+      if (href) {
+        href.split(" ; ").forEach((h, i) => {
+          if (i) dd.appendChild(document.createTextNode(" ; "));
+          if (/^https?:/.test(h)) {
+            const a = document.createElement("a"); a.href = h; a.textContent = h; a.rel = "noopener";
+            dd.appendChild(a);
+          } else dd.appendChild(document.createTextNode(h));
+        });
+      } else dd.textContent = v;
+      dl.appendChild(dd);
+    };
+    item("Clip", c.id + " (" + c.category + ", " + c.channels + " ch, " + fmt(state.set.seconds) + " s rendered)");
+    item("Attribution", c.attribution);
+    item("Licence", c.licence);
+    item("Licence text", null, c.licence_url);
+    item("Source", null, c.source_url);
+    item("Extract", c.extract);
+    item("Processing", c.processing);
+  }
+
+  function renderDownloads() {
+    const v = state.set.versions.find((x) => x.id === state.version);
+    const p = $("downloads");
+    p.textContent = "Files of this version: ";
+    for (const [kind, href] of Object.entries(v.files)) {
+      const a = document.createElement("a"); a.href = href; a.textContent = kind.toUpperCase();
+      a.setAttribute("download", "");
+      p.appendChild(a); p.appendChild(document.createTextNode(" "));
+    }
+  }
+
+  function showConfigAbout() {
+    const c = state.group.configs.find((x) => x.id === state.config);
+    $("configAbout").textContent = c ? c.about : "";
+  }
+
+  function chooseGroup(id, keepClip) {
+    state.group = groups.find((g) => g.id === id);
+    $("groupAbout").textContent = state.group.about;
+    fill($("config"), state.group.configs.map((c) => [c.id, c.label]));
+    const cl = DATA.sets.filter((s) => s.group === id).map((s) => s.clip);
+    fill($("clip"), cl.map((c) => [c, clips[c].category.replace(/^\d_/, "").replace(/_/g, " ") + ": " + c]));
+    state.config = state.group.configs[0].id;
+    $("config").value = state.config;
+    showConfigAbout();
+    chooseClip(keepClip && cl.includes(keepClip) ? keepClip : cl[0]);
+  }
+
+  function chooseClip(id) {
+    state.clip = id;
+    $("clip").value = id;
+    const set = setsByKey[state.group.id + "/" + id];
+    const wasPlaying = player.playing;
+    stopSources();
+    player.buffers = {};
+    player.offset = 0;
+    player.wantPlay = wasPlaying;
+    state.set = set;
+    if (!set.versions.some((v) => v.id === state.version)) state.version = state.config;
+    renderVersions(); renderNumbers(); renderClip(); renderDownloads(); updatePlay();
+    if (ctx) requestSet(set); else showStatus("press Play to start audio");
+  }
+
+  fill($("group"), groups.filter((g) => DATA.sets.some((s) => s.group === g.id)).map((g) => [g.id, g.label]));
+  $("group").addEventListener("change", (e) => chooseGroup(e.target.value, state.clip));
+  $("config").addEventListener("change", (e) => selectVersion(e.target.value));
+  $("clip").addEventListener("change", (e) => chooseClip(e.target.value));
+  $("play").addEventListener("click", togglePlay);
+  $("seek").addEventListener("input", (e) => seek(e.target.value / 1000 * player.duration));
+  $("loop").addEventListener("change", () => { if (player.playing) seek(position()); });
+  $("match").addEventListener("change", () => selectVersion(state.version));
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "SELECT" || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === " ") { e.preventDefault(); togglePlay(); }
+    else if (/^[0-9]$/.test(e.key)) {
+      const v = state.set.versions[Number(e.key)];
+      if (v) selectVersion(v.id);
+    } else if (e.key === "a") selectVersion(state.version === "original" ? state.config : "original");
+    else if (e.key === "ArrowRight") seek(position() + 5);
+    else if (e.key === "ArrowLeft") seek(position() - 5);
+  });
+  (function tick() {
+    const t = position();
+    $("time").textContent = fmtTime(t) + " / " + fmtTime(player.duration).replace(/\.\d$/, "");
+    if (player.duration > 0 && document.activeElement !== $("seek")) $("seek").value = Math.round(t / player.duration * 1000);
+    requestAnimationFrame(tick);
+  })();
+
+  state.version = "original";
+  chooseGroup($("group").value);
+  showStatus("press Play to start audio");
+})();
+</script>
+</body>
+</html>
