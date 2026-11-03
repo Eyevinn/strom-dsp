@@ -31,7 +31,7 @@ dependency with its licence.
 | [`stromdsp-delay`](docs/elements/delay.md) | Intentional delay for alignment and lip sync |
 | [`stromdsp-stereo`](docs/elements/stereo.md) | Balance, width, mono, swap, M/S and polarity |
 | [`stromdsp-meter`](docs/elements/meter.md) | Loudness (BS.1770), peak, true peak, RMS and correlation meter |
-| [`stromdsp-broadcastprocessor`](docs/elements/broadcastprocessor.md) | Final processor: spike guard → AGC → multiband (expander per band, bass clipper) → final clipper → true-peak limiter, clip budget governor, with presets |
+| [`stromdsp-broadcastprocessor`](docs/elements/broadcastprocessor.md) | Final processor: spike guard → AGC → multiband (expander per band, bass clipper) → final clipper → true-peak limiter, clip budget governor, with presets and a low-latency mode (at most 6 / 3 ms) |
 
 The first four form the channel strip. Every processing element has an
 `enabled` property that crossfades to a bit-exact bypass, every
@@ -93,12 +93,14 @@ let comp = gst::ElementFactory::make("stromdsp-compressor").build()?;
 ## Performance
 
 At 48 kHz stereo with 10 ms buffers, on an Apple M5 Pro (criterion medians,
-measured under heavy unrelated load, so upper bounds):
+measured under unrelated load, so upper bounds; the broadcast rows from a
+later run at load average 3 … 4):
 
 | Benchmark | Time per 10 ms buffer | % of one core |
 |---|---|---|
 | Channel strip (gate → compressor → 4-band EQ → limiter) | 18.3 µs | 0.18 % |
-| Broadcast processor (AGC → 4-band multiband → true-peak limiter, with meters) | 78.3 µs | 0.78 % |
+| Broadcast processor, `ebu-r128` defaults (spike guard → AGC → 4-band multiband with expanders and bass clipper → final clipper → true-peak limiter, governor, meters), `standard` / `low` latency | 82.6 / 82.0 µs | 0.83 / 0.82 % |
+| Broadcast processor, `streaming` defaults, `standard` / `low` latency | 93.4 / 88.6 µs | 0.93 / 0.89 % |
 
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, and covers
 the instruction-count benchmarks (gungraun) and the RealtimeSanitizer tests.

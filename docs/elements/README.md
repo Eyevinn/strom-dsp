@@ -16,7 +16,7 @@ any message format and a `gst-launch-1.0` example.
 | [`stromdsp-delay`](delay.md) | utility | intentional delay for alignment (not reported as latency) | none |
 | [`stromdsp-stereo`](stereo.md) | utility | balance, width, mono, swap, M/S, polarity | none |
 | [`stromdsp-meter`](meter.md) | measurement | loudness, peak, RMS and correlation meter | none |
-| [`stromdsp-broadcastprocessor`](broadcastprocessor.md) | broadcast | spike guard → AGC → multiband (expander per band, bass clipper) → final clipper → true-peak limiter final processor | `24 + round(0.5 · fs / 1000) + round(3 · fs / 1000) + 69 + round(limiter-lookahead · fs / 1000) + 32` frames |
+| [`stromdsp-broadcastprocessor`](broadcastprocessor.md) | broadcast | spike guard → AGC → multiband (expander per band, bass clipper) → final clipper → true-peak limiter final processor | `latency-mode`: `standard` 5.60 ms, `low` 2.77 ms at 48 kHz (formula on its page) |
 
 The rules every element follows, and the tests that enforce them, are in
 [ELEMENT_GUIDELINES.md](../ELEMENT_GUIDELINES.md).
@@ -39,10 +39,10 @@ None of the elements adds latency, except:
 - `stromdsp-limiter`: the audio is delayed by `lookahead`, which is added to
   the LATENCY query; a change posts a `Latency` message. The delay is kept
   with `enabled=false`.
-- `stromdsp-broadcastprocessor`: `24 + round(0.5 · fs / 1000) +
-  round(3 · fs / 1000) + 69 + round(limiter-lookahead · fs / 1000) + 32`
-  frames (365 frames, 7.60 ms, at 48 kHz with the default 1.5 ms), the same with `enabled=false` and
-  with any stage bypassed.
+- `stromdsp-broadcastprocessor`: set by `latency-mode` (READY-only):
+  `standard` 269 frames (5.60 ms) at 48 kHz, at most 6 ms at 44.1, 48 and
+  96 kHz; `low` 133 frames (2.77 ms), at most 3 ms. The formula is on its
+  page. The same with `enabled=false` and with any stage bypassed.
 
 The content delay of `stromdsp-delay` is not latency: it is not reported, and
 timestamps pass through unchanged.

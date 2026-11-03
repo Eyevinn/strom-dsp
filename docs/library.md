@@ -51,7 +51,9 @@ Reusable building blocks are public too:
   `CorrelationMeter`, `BandCorrelation` and `MonoDetector`.
 - `strom_dsp::agc`: `Agc`, the gated, rate-limited loudness-targeting AGC.
 - `strom_dsp::multiband`: `MultibandCompressor`, an LR4 crossover with one
-  compressor per band (1–5 bands).
+  compressor per band (1–5 bands), a downward expander per band
+  (`strom_dsp::dynamics::expander`) and the bass clipper on band 0
+  (`strom_dsp::bassclip`, with its IM-feedback input).
 - `strom_dsp::truepeak`: `TruePeakLimiter`, a lookahead limiter with a 4×
   oversampled true-peak detector (BS.1770 Annex 2).
 - `strom_dsp::spike_guard`: `SpikeGuard`, removes short, isolated peaks
@@ -59,11 +61,14 @@ Reusable building blocks are public too:
 - `strom_dsp::clipper`: `FinalClipper`, oversampled soft clipping of
   shaped clippings, with latency settings and per-block activity
   (`ClipStats`).
-- `strom_dsp::governor`: `ClipBudgetGovernor`, the clip budget loop.
+- `strom_dsp::governor`: `ClipBudgetGovernor`, the clip budget loop
+  (loudness first: it reports a budget excess, it never lowers the
+  loudness).
 - `strom_dsp::broadcast`: `BroadcastProcessor`, the chain behind
   `stromdsp-broadcastprocessor` (input gain → spike guard → AGC →
   multiband → final clipper → true-peak limiter, clip budget governor),
-  with its meters.
+  with its meters, and `LatencyMode` (standard, low), which sets every
+  stage's latency setting at once.
 - `strom_dsp::presets`: the element defaults (`GateParams::broadcast()` and
   friends) and the broadcast presets (`BroadcastPreset`).
 - Processors behind the utility elements: `ducker`, `deesser`, `cleanup`,

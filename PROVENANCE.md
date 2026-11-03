@@ -457,15 +457,19 @@ processing path uses a masking model.
 **Own design choices.**
 - One operator number, the clip budget in dB (0 … 6), mapped to three
   allowances: clip depth `−40 + 5·B` dB, limiter mean gain reduction
-  `B/2` dB, touched share `0.2 %·2^(B/2)`. The largest "budget used" of the
+  `B/2` dB, touched share `0.5 %·2^(B/2)`. The largest "budget used" of the
   three, over a gated 3 s window, is compared with `B`.
-- Law: over budget, hold the trim from adding gain, give back density,
-  then cut the AGC target (τ = 8 s, rate-limited); release below a 0.4 dB
-  hysteresis band. Density (band thresholds lowered with compensating
-  makeup) is used only where budget is left and the trim and the AGC are
-  at a bound. Frozen in pauses and below the gate, like the trim.
-- Why density is not the first resort when over budget: measured on our
-  own percussive test programme (documented in the module).
+- Law (a product decision: loudness compliance comes first): the governor
+  never lowers the output below the target. Over budget with the output on
+  target it holds the trim from adding gain and gives back density, and
+  reports the excess; below the target the trim stays free. Density (band
+  thresholds lowered with compensating makeup, τ = 10 s, rate-limited) rises
+  whenever the trim and the AGC cannot reach the target. A loudness deficit
+  is reported only once all density is used. Frozen in pauses and below the
+  gate, like the trim.
+- An earlier law cut the AGC target when over budget, accepting a loudness
+  deficit instead of more clipping; it cost 1.4 … 2.0 LU on our own
+  percussive test programme and was replaced (documented in the module).
 
 No masking model and no candidate gain curves are used anywhere in the
 governor or the clipper.
@@ -474,21 +478,35 @@ governor or the clipper.
 
 **The chain** is our own composition of existing parts, not a new algorithm:
 input gain → spike guard (`spike_guard.rs`) → wideband AGC (`agc.rs`) →
-multiband compressor (`multiband.rs`) → true-peak limiter (`truepeak.rs`).
-The spike guard sits ahead of the AGC so clicks neither pump it nor count
-toward the loudness it measures. Levelling comes first,
-so the band dynamics work on programme at the target loudness, and the
-true-peak ceiling comes last, so no later stage can push a peak over it.
+multiband compressor (`multiband.rs`, with the per-band expander and the
+bass clipper) → final clipper (`clipper.rs`) → true-peak limiter
+(`truepeak.rs`), with the clip budget governor (`governor.rs`) around the
+clipper and the limiter. The spike guard sits ahead of the AGC so clicks
+neither pump it nor count toward the loudness it measures. Levelling comes
+first, so the band dynamics work on programme at the target loudness, and
+the true-peak ceiling comes last, so no later stage can push a peak over it.
 
-The chain now also has a final clipper before the limiter and a clip
-budget governor around both (sections above). With the clipper taking the
-peaks, the limiter's default lookahead dropped from 5 ms to 1.5 ms (0.75 ms
-for low latency), justified by measurement: the true-peak ceiling holds
+With the clipper taking the peaks, the limiter's default lookahead dropped
+from 5 ms to 1.5 ms, justified by measurement: the true-peak ceiling holds
 within +0.008 dB on the nasty-signal set at 44.1, 48 and 96 kHz, and the
-limiter's mean gain reduction on the peaky test programme is lower than
-before (0.69 dB against 1.72 dB with no clipper and 5 ms). A ceiling change
+limiter's mean gain reduction on the hot peaky test programme is lower than
+before (0.82 dB against 1.68 dB with no clipper and 5 ms). A ceiling change
 glides at 1 dB per 512 frames, so the shorter attack ramp does not make
 a large jump audible.
+
+- **Latency modes** (own design, following the element guidelines on
+  latency budgets): `LatencyMode::Standard` (spike guard 0.5 ms, bass
+  clipper 1 ms, standard clipper, limiter 1.5 ms; budget 6 ms) and
+  `LatencyMode::Low` (none, none, low clipper, 0.6 ms; budget 3 ms). Each
+  setting's cost is measured in the tests (overshoot, gain reduction,
+  aliasing, onsets); the low limiter lookahead is 0.6 ms because 0.75 ms
+  put 44.1 kHz over the 3 ms budget.
+- **IM feedback wiring:** the final clipper's touched share is handed to
+  the bass clipper once per 512 frames (one chunk late, since the clipper
+  runs after the multiband).
+- **Internal chunk grid:** the chain cuts its work into 512-frame chunks
+  on a fixed grid from configure/reset, so per-chunk work (the ceiling
+  glide, the IM hand-over) does not depend on buffer sizes.
 
 Own choices:
 - **Input gain:** glides in dB through two cascaded 5 ms one-poles.
@@ -525,8 +543,10 @@ Own choices:
 - **Expander and bass clipper in the chain** (own values): every band's
   expander threshold at target − 24 dB (speech − 22 dB), ratio 1.5 (speech
   2), floor 4 dB (speech 6 dB), hold 100 ms, knee 6 dB, open 3 ms, close
-  150 ms; the bass clip threshold at target + 9 dB, with a 3 ms lookahead
-  that adds 144 frames at 48 kHz to the chain latency. Reasoning: studio
+  150 ms; the bass clip threshold at target + 9 dB. The bass lookahead is
+  1 ms (standard) or none (low latency): measured, a longer one buys little
+  because the analytic envelope reaches an onset later than a few ms of
+  lookahead can cover. Reasoning: studio
   noise levels relative to R 68 / R 128 alignment and speech timing, the
   same textbook sources as the gate's defaults; the floor is kept small so
   a misjudged threshold can do little on quiet music.
@@ -672,13 +692,18 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   block, with the full reduction at 1 %; attack 30 ms.
 - **Own choices:** release 50 ms (the analytic envelope is flat, so a
   short release does not ripple; with the rectified waveform it would —
-  that is the guard test), lookahead set by the host (3 ms in the
-  broadcast processor), raised-cosine enable fade of 10 ms over a constant
+  that is the guard test), lookahead set by the host (1 ms or none in the
+  broadcast processor), a gain ramp of at least 0.5 ms (with a shorter
+  lookahead the gain arrives late by the difference rather than stepping),
+  threshold changes gliding through two cascaded 5 ms one-poles (as the
+  chain's input gain), raised-cosine enable fade of 10 ms over a constant
   delay, control path stopped while off.
 - **Tests:** `tests/bass_clipper.rs` (harmonics with a rectified-envelope
   guard, IM sidebands with and without feedback against a stand-in upper
-  clipper, band alignment, click-free changes, no allocation) and
-  `tests/rtsan_multiband_expander_bass.rs`.
+  clipper, band alignment, click-free changes at 1 ms and with no
+  lookahead, the pinned cost of 0, 1 and 3 ms, no allocation),
+  `tests/broadcast_expander_bass.rs` (IM sidebands end to end through the
+  real final clipper) and `tests/rtsan_multiband_expander_bass.rs`.
 
 ### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`)
 
@@ -971,9 +996,10 @@ raises the level by itself.
 A test-support crate, never linked into the plugin. It runs fixed synthetic
 signals through the broadcast chain per preset and compares a fixed set of
 numbers with a checked-in baseline (`baseline.json`). All signals are
-generated in code with fixed seeds. The programme generators of
-`tests/broadcast.rs` live in `tests/programme_support/` and are shared with
-the harness.
+generated in code with fixed seeds. The programme generators of the chain
+tests (`tests/broadcast.rs`, `tests/governor.rs`,
+`tests/broadcast_latency.rs`) live in one place, `tests/programme_support/`,
+and are shared with the harness.
 
 - **Signals:** sine; exponential sweep (A. Farina, "Simultaneous
   measurement of impulse response and distortion with a swept-sine
@@ -996,6 +1022,10 @@ the harness.
   - clip depth (removed energy per 10 ms block relative to the programme,
     own definition) and gain reduction split into "on peaks" and "on
     programme" around known event frames (own definition);
+  - the chain's own meters per case: final clipper depth, bass clipper
+    gain reduction and IM feedback, expander gain reduction, governor
+    budget excess, density and deficit (reported as the chain reports
+    them);
   - noise-to-mask ratio after K. Brandenburg, "Evaluation of quality for
     audio encoding at low bit rates", AES 82nd Convention, 1987, with our
     own simple masking model: integer Bark bands (Zwicker & Terhardt's
