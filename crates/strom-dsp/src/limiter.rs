@@ -2,9 +2,9 @@
 //!
 //! # Signal flow
 //!
-//! The audio is delayed by the lookahead `L` frames. The gain is computed from
-//! the *undelayed* input, so it is already down when a peak reaches the output.
-//! All channels share one gain (linked), computed from the frame peak
+//! The audio is delayed by the lookahead `L` frames ([`DelayLine`]). The gain is
+//! computed from the *undelayed* input, so it is already down when a peak reaches
+//! the output. All channels share one gain (linked), computed from the frame peak
 //! `p[j] = max_ch |x_ch[j]|`.
 //!
 //! For every input frame `j` the limiter stores the *required gain*
@@ -16,11 +16,12 @@
 //!
 //! With attack length `A ≤ L` frames, split as `A = A1 + A2`:
 //!
-//! 1. **Sliding minimum** `h[m] = min { r[j] : m − L ≤ j ≤ m − L + A }`
+//! 1. **Sliding minimum** ([`SlidingMin`])
+//!    `h[m] = min { r[j] : m − L ≤ j ≤ m − L + A }`
 //!    (a window of `A + 1` required gains, ending `L − A` frames in the past, so
 //!    it is causal). Computed with a monotonic deque: O(1) amortised per frame.
-//! 2. **Two cascaded moving averages** (boxes) of lengths `A1 + 1` and `A2 + 1`
-//!    over `h`. Their combined kernel is a trapezoid/triangle spanning offsets
+//! 2. **Two cascaded moving averages** ([`RampSmoother`]) of lengths `A1 + 1` and
+//!    `A2 + 1` over `h`. Their combined kernel is a trapezoid/triangle spanning offsets
 //!    `0 … A`, so a step in `h` becomes a smooth S-shaped ramp of `A` frames.
 //! 3. **Release**: `g[n] = t[n]` when the box output `t[n]` is below the previous
 //!    gain (follow downwards instantly; the ramp is already smooth), otherwise a
@@ -34,11 +35,11 @@
 //! exactly when the peak is output, starting `A` frames earlier.
 //!
 //! To make this hold *exactly* in floating point the box stage works on
-//! integers: `h` is quantised downwards to a fixed-point value with 44
-//! fractional bits, the running sums are exact, and each mean is an integer
-//! division (rounding down). Rounding down only ever lowers the gain. The ceiling
-//! itself is the largest `f32` not above `10^(dB/20)`, so the final `f64 → f32`
-//! rounding of `g · x` cannot cross it.
+//! integers: `h` is quantised downwards to a fixed-point value with
+//! [`RAMP_FRAC_BITS`](crate::dynamics::RAMP_FRAC_BITS) fractional bits, the running sums are exact, and each mean
+//! is an integer division (rounding down). Rounding down only ever lowers the
+//! gain. The ceiling itself is the largest `f32` not above `10^(dB/20)`, so the
+//! final `f64 → f32` rounding of `g · x` cannot cross it.
 //!
 //! With lookahead 0 the windows degenerate to `A = 0`: the gain drops instantly
 //! to `r[n]` (a hard limiter with smooth release).
@@ -60,6 +61,10 @@
 //!   cover both taps (`[m − Lhi, m − Llo + A]`), so the gain is at most the required
 //!   gain of *both* samples being mixed and the guarantee still holds. A further
 //!   change during a cross-fade is queued until it completes.
+//! - Between `configure`/`reset` and the first processed frame, `set_params`
+//!   applies instantly (no cross-fade from the previous lookahead), so the
+//!   result does not depend on whether parameters were set before or after
+//!   `configure`.
 //!
 //! # Safety clip
 //!
@@ -69,12 +74,20 @@
 //! A NaN output sample (only possible from NaN/Inf input) is replaced by 0 and
 //! counted.
 //!
+//! # Efficiency
+//!
+//! Outside a lookahead cross-fade, processing runs in blocks of
+//! [`BLOCK_FRAMES`]: per-frame peaks for the block, the serial gain pipeline,
+//! then a delay/gain/clip pass.
+//!
 //! # Denormals
 //!
 //! The only recursive state is the release gain, which approaches its target
 //! from below; once the gap is under 1e-15 it snaps to the target, so it never
 //! decays through the subnormal range. The box stage is integer arithmetic.
 
+use crate::dynamics::frame::{frame_peak, frame_peaks, BLOCK_FRAMES};
+use crate::dynamics::{DelayLine, RampSmoother, SlidingMin};
 use crate::util::{db_to_lin, one_pole_coef, DENORMAL_FLUSH};
 use crate::Processor;
 
@@ -86,10 +99,6 @@ pub const MAX_LOOKAHEAD_MS: f32 = 20.0;
 const XFADE_MS: f64 = 5.0;
 /// Time for the gain to ramp from 0 to 1 when the limiter is disabled (ms).
 const BYPASS_RAMP_MS: f64 = 10.0;
-/// Fixed-point fractional bits of the box stage.
-const GAIN_FRAC_BITS: u32 = 44;
-const GAIN_ONE: u64 = 1 << GAIN_FRAC_BITS;
-const GAIN_SCALE: f64 = GAIN_ONE as f64;
 /// Frame counter start, so `now − delay` never underflows.
 const TIME_ORIGIN: u64 = 1 << 32;
 /// Sample-rate clamp for `configure` (keeps fixed-point sums far from overflow).
@@ -122,106 +131,47 @@ impl Default for LimiterParams {
     }
 }
 
+/// Clamp into `[lo, hi]`; non-finite values become `def`.
+fn finite_clamp(v: f32, def: f32, lo: f32, hi: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(lo, hi)
+    } else {
+        def
+    }
+}
+
 impl LimiterParams {
     /// Clamp every field into its documented range; non-finite values fall
     /// back to the default.
     fn sanitized(&self) -> Self {
         let d = Self::default();
-        let fix = |v: f32, def: f32, lo: f32, hi: f32| {
-            if v.is_finite() {
-                v.clamp(lo, hi)
-            } else {
-                def
-            }
-        };
         Self {
             enabled: self.enabled,
-            threshold_db: fix(self.threshold_db, d.threshold_db, -60.0, 0.0),
-            attack_ms: fix(self.attack_ms, d.attack_ms, 0.01, 50.0),
-            release_ms: fix(self.release_ms, d.release_ms, 1.0, 2000.0),
-            lookahead_ms: fix(self.lookahead_ms, d.lookahead_ms, 0.0, MAX_LOOKAHEAD_MS),
+            threshold_db: finite_clamp(self.threshold_db, d.threshold_db, -60.0, 0.0),
+            attack_ms: finite_clamp(self.attack_ms, d.attack_ms, 0.01, 50.0),
+            release_ms: finite_clamp(self.release_ms, d.release_ms, 1.0, 2000.0),
+            lookahead_ms: finite_clamp(self.lookahead_ms, d.lookahead_ms, 0.0, MAX_LOOKAHEAD_MS),
         }
     }
 }
 
-/// Monotonic deque for a sliding-window minimum, in a preallocated ring.
-/// Values are non-decreasing from front to back; the front is the minimum.
-#[derive(Debug, Default)]
-struct MinDeque {
-    time: Vec<u64>,
-    value: Vec<f64>,
-    mask: usize,
-    head: usize,
-    len: usize,
-}
-
-impl MinDeque {
-    fn allocate(&mut self, capacity_pow2: usize) {
-        self.time = vec![0; capacity_pow2];
-        self.value = vec![1.0; capacity_pow2];
-        self.mask = capacity_pow2 - 1;
-        self.clear();
-    }
-
-    fn clear(&mut self) {
-        self.head = 0;
-        self.len = 0;
-    }
-
-    #[inline]
-    fn push(&mut self, t: u64, v: f64) {
-        // Drop entries that can never be the minimum again.
-        while self.len > 0 {
-            let back = (self.head + self.len - 1) & self.mask;
-            if self.value[back] >= v {
-                self.len -= 1;
-            } else {
-                break;
-            }
-        }
-        let slot = (self.head + self.len) & self.mask;
-        self.time[slot] = t;
-        self.value[slot] = v;
-        self.len += 1;
-    }
-
-    /// Remove entries older than `oldest`.
-    #[inline]
-    fn expire(&mut self, oldest: u64) {
-        while self.len > 0 && self.time[self.head] < oldest {
-            self.head = (self.head + 1) & self.mask;
-            self.len -= 1;
-        }
-    }
-
-    #[inline]
-    fn min(&self) -> f64 {
-        if self.len > 0 {
-            self.value[self.head]
-        } else {
-            1.0
-        }
+/// Sample rate as the limiter uses it after `configure(sample_rate, _)`.
+fn effective_rate(sample_rate: f32) -> f64 {
+    if sample_rate.is_finite() && sample_rate > 0.0 {
+        (sample_rate as f64).min(MAX_SAMPLE_RATE)
+    } else {
+        48_000.0
     }
 }
 
-/// Exact integer moving average over the last `len` values, ring indexed by
-/// absolute frame time.
-#[derive(Debug, Default)]
-struct BoxStage {
-    ring: Vec<u64>,
-    len: u64,
-    sum: u64,
-}
-
-impl BoxStage {
-    /// Add the value for frame `now` and return the floor of the window mean.
-    #[inline]
-    fn step(&mut self, now: u64, mask: usize, v: u64) -> u64 {
-        let old = self.ring[(now - self.len) as usize & mask];
-        self.sum = self.sum + v - old;
-        self.ring[now as usize & mask] = v;
-        self.sum / self.len
-    }
+/// Latency in frames of a limiter configured at `sample_rate` (Hz) with
+/// `lookahead_ms`: exactly the value [`Processor::latency_frames`] reports,
+/// i.e. `round(lookahead_ms · fs / 1000)` after the same clamping of both
+/// arguments (lookahead to `0 … MAX_LOOKAHEAD_MS`, non-finite → default).
+pub fn lookahead_frames(lookahead_ms: f32, sample_rate: f32) -> usize {
+    let d = LimiterParams::default();
+    let ms = finite_clamp(lookahead_ms, d.lookahead_ms, 0.0, MAX_LOOKAHEAD_MS);
+    ms_to_frames(ms as f64, effective_rate(sample_rate))
 }
 
 /// Cross-fade state between two delay taps.
@@ -251,20 +201,17 @@ pub struct Limiter {
     xfade_frames: usize,
     attack_dirty: bool,
 
-    // Delay line (interleaved frames, power-of-two frame count).
-    delay: Vec<f32>,
-    delay_mask: usize,
-    // Per-input-frame history: required gain and ceiling.
+    delay: DelayLine,
+    // Per-input-frame history: required gain and ceiling, indexed by frame time.
     req_hist: Vec<f64>,
     ceil_hist: Vec<f32>,
     hist_mask: usize,
 
     // Gain pipeline.
-    deque: MinDeque,
+    window_min: SlidingMin,
     win_hi: u64,
     win_push_delay: u64,
-    box1: BoxStage,
-    box2: BoxStage,
+    ramp: RampSmoother,
     gain: f64,
 
     // Running state.
@@ -272,6 +219,8 @@ pub struct Limiter {
     lookahead: usize,
     xfade: Option<Crossfade>,
     safety_clips: u64,
+    /// True from configure/reset until the first frame: parameters apply instantly.
+    fresh: bool,
 }
 
 impl Default for Limiter {
@@ -295,32 +244,39 @@ impl Limiter {
             attack_frames: 0,
             xfade_frames: 1,
             attack_dirty: false,
-            delay: Vec::new(),
-            delay_mask: 0,
+            delay: DelayLine::default(),
             req_hist: Vec::new(),
             ceil_hist: Vec::new(),
             hist_mask: 0,
-            deque: MinDeque::default(),
+            window_min: SlidingMin::default(),
             win_hi: 0,
             win_push_delay: 0,
-            box1: BoxStage::default(),
-            box2: BoxStage::default(),
+            ramp: RampSmoother::default(),
             gain: 1.0,
             now: TIME_ORIGIN,
             lookahead: 0,
             xfade: None,
             safety_clips: 0,
+            fresh: true,
         };
         l.set_params(&LimiterParams::default());
         l
     }
 
     /// Update parameters. Never allocates. Out-of-range values are clamped.
+    ///
+    /// Between `configure`/`reset` and the first processed frame the new
+    /// lookahead and attack apply instantly (no cross-fade).
     pub fn set_params(&mut self, params: &LimiterParams) {
         let p = params.sanitized();
         self.params = p;
         self.ceiling = ceiling_f32(p.threshold_db);
         self.update_derived();
+        if self.fresh && self.is_configured() {
+            self.lookahead = self.target_lookahead;
+            self.xfade = None;
+            self.rebuild();
+        }
     }
 
     /// Current (sanitised) parameters.
@@ -343,6 +299,10 @@ impl Limiter {
     /// Gain (linear) applied to the most recently output frame.
     pub fn current_gain(&self) -> f64 {
         self.gain
+    }
+
+    fn is_configured(&self) -> bool {
+        self.channels != 0 && !self.req_hist.is_empty()
     }
 
     fn update_derived(&mut self) {
@@ -373,8 +333,6 @@ impl Limiter {
         self.attack_dirty = false;
         let (lo, hi) = self.taps();
         let a = self.attack_frames.min(lo);
-        let a1 = a.div_ceil(2);
-        let a2 = a / 2;
         let d = (lo - a) as u64;
         let hi = hi as u64;
         let mask = self.hist_mask;
@@ -382,35 +340,21 @@ impl Limiter {
         self.win_hi = hi;
         self.win_push_delay = d;
 
-        // h (quantised) for t in [m-1-a, m-1].
+        // Replay h for t in [m-1-a, m-1]: the ramp's output depends only on
+        // its last a+1 inputs, so this restores its exact state.
         let start = m - 1 - a as u64;
-        self.deque.clear();
+        self.window_min.clear();
+        self.ramp.reset(a, 1.0);
         let mut next = start - hi;
         for t in start..m {
             while next + d <= t {
-                self.deque.push(next, self.req_hist[next as usize & mask]);
+                self.window_min
+                    .push(next, self.req_hist[next as usize & mask]);
                 next += 1;
             }
-            self.deque.expire(t - hi);
-            self.box1.ring[t as usize & mask] = quantize(self.deque.min());
+            self.window_min.expire(t - hi);
+            self.ramp.step(self.window_min.min().unwrap_or(1.0));
         }
-
-        // First box means for t in [m-1-a2, m-1].
-        let len1 = a1 as u64 + 1;
-        let len2 = a2 as u64 + 1;
-        let first = m - 1 - a2 as u64;
-        let mut s: u64 = (first - a1 as u64..=first)
-            .map(|t| self.box1.ring[t as usize & mask])
-            .sum();
-        self.box2.ring[first as usize & mask] = s / len1;
-        for t in first + 1..m {
-            s = s + self.box1.ring[t as usize & mask] - self.box1.ring[(t - len1) as usize & mask];
-            self.box2.ring[t as usize & mask] = s / len1;
-        }
-        self.box1.len = len1;
-        self.box1.sum = s;
-        self.box2.len = len2;
-        self.box2.sum = (first..m).map(|t| self.box2.ring[t as usize & mask]).sum();
     }
 
     fn start_crossfade_if_needed(&mut self) {
@@ -420,6 +364,108 @@ impl Limiter {
                 pos: 0,
             });
             self.rebuild();
+        }
+    }
+
+    /// Serial gain pipeline for input frame `now` with linked peak `peak`:
+    /// stores the required gain, advances the window minimum, ramp and release,
+    /// and returns the gain for the output frame `now`.
+    #[inline]
+    fn gain_step(&mut self, peak: f64, enabled: bool, rise: f64) -> f64 {
+        let m = self.now;
+        let hmask = self.hist_mask;
+        let c = self.ceiling as f64;
+        let (req, ceil) = if enabled {
+            (if peak > c { c / peak } else { 1.0 }, self.ceiling)
+        } else {
+            (1.0, f32::INFINITY)
+        };
+        self.req_hist[m as usize & hmask] = req;
+        self.ceil_hist[m as usize & hmask] = ceil;
+
+        // Sliding minimum of required gain, then the two-box ramp.
+        let pushed = m - self.win_push_delay;
+        self.window_min
+            .push(pushed, self.req_hist[pushed as usize & hmask]);
+        self.window_min.expire(m - self.win_hi);
+        let target = self.ramp.step(self.window_min.min().unwrap_or(1.0));
+
+        // Release.
+        let g = self.gain;
+        self.gain = if target <= g {
+            target
+        } else {
+            let up = if enabled {
+                g + rise * (target - g)
+            } else {
+                g + self.bypass_step
+            };
+            if target - up < DENORMAL_FLUSH {
+                target
+            } else {
+                up
+            }
+        };
+        self.gain
+    }
+
+    /// One frame, frame by frame (used around lookahead cross-fades, where the
+    /// tap geometry can change between frames).
+    fn process_frame(&mut self, frame: &mut [f32], enabled: bool, rise: f64) {
+        let peak = frame_peak(frame) as f64;
+        let g = self.gain_step(peak, enabled, rise);
+        self.delay.write(frame);
+        let m = self.now;
+        let hmask = self.hist_mask;
+        let mut clips = 0;
+        let Some(xf) = self.xfade.as_mut() else {
+            let lim = self.ceil_hist[(m - self.lookahead as u64) as usize & hmask];
+            for (y, &x) in frame.iter_mut().zip(self.delay.read(self.lookahead)) {
+                *y = safety((g * x as f64) as f32, lim, &mut clips);
+            }
+            self.safety_clips += clips;
+            self.now += 1;
+            return;
+        };
+        xf.pos += 1;
+        let (to, pos) = (xf.to, xf.pos);
+        let w =
+            0.5 - 0.5 * (std::f64::consts::PI * pos as f64 / (self.xfade_frames + 1) as f64).cos();
+        let tap_a = m - self.lookahead as u64;
+        let tap_b = m - to as u64;
+        let lim =
+            self.ceil_hist[tap_a as usize & hmask].max(self.ceil_hist[tap_b as usize & hmask]);
+        for ((y, &xa), &xb) in frame
+            .iter_mut()
+            .zip(self.delay.read(self.lookahead))
+            .zip(self.delay.read(to))
+        {
+            let v = (g * ((1.0 - w) * xa as f64 + w * xb as f64)) as f32;
+            *y = safety(v, lim, &mut clips);
+        }
+        self.safety_clips += clips;
+        self.now += 1;
+        if pos >= self.xfade_frames {
+            // Cross-fade done: the new tap is now the only one.
+            self.lookahead = to;
+            self.xfade = None;
+            self.rebuild();
+            self.start_crossfade_if_needed();
+        }
+    }
+}
+
+/// Final guard: clip `v` to `±lim`, counting interventions (NaN → 0).
+#[inline]
+fn safety(v: f32, lim: f32, clips: &mut u64) -> f32 {
+    if v.abs() <= lim {
+        v
+    } else {
+        *clips += 1;
+        if v.is_nan() {
+            0.0
+        } else {
+            lim.copysign(v)
         }
     }
 }
@@ -443,41 +489,28 @@ fn ms_to_frames(ms: f64, fs: f64) -> usize {
     }
 }
 
-/// Fixed-point gain, rounded down (so it never exceeds the real value).
-#[inline]
-fn quantize(g: f64) -> u64 {
-    // `as` truncates towards zero (floor for g ≥ 0) and saturates; g ∈ [0, 1].
-    (g * GAIN_SCALE) as u64
-}
-
 impl Processor for Limiter {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
-        let fs = if sample_rate.is_finite() && sample_rate > 0.0 {
-            (sample_rate as f64).min(MAX_SAMPLE_RATE)
-        } else {
-            48_000.0
-        };
+        let fs = effective_rate(sample_rate);
         self.sample_rate = fs;
         self.channels = channels;
         if channels == 0 {
-            self.delay = Vec::new();
+            self.delay = DelayLine::default();
+            self.req_hist = Vec::new();
             return;
         }
         self.max_frames = ms_to_frames(MAX_LOOKAHEAD_MS as f64, fs);
         self.xfade_frames = ms_to_frames(XFADE_MS, fs).max(1);
 
-        let delay_frames = (self.max_frames + 1).next_power_of_two();
-        self.delay = vec![0.0; delay_frames * channels];
-        self.delay_mask = delay_frames - 1;
+        self.delay.allocate(self.max_frames, channels);
 
         // History must reach back 2·Lmax + 1 frames for a rebuild.
         let hist = (2 * self.max_frames + 2).next_power_of_two();
         self.req_hist = vec![1.0; hist];
         self.ceil_hist = vec![f32::INFINITY; hist];
         self.hist_mask = hist - 1;
-        self.deque.allocate(hist);
-        self.box1.ring = vec![GAIN_ONE; hist];
-        self.box2.ring = vec![GAIN_ONE; hist];
+        self.window_min.allocate(hist);
+        self.ramp.allocate(self.max_frames);
 
         self.attack_frames = usize::MAX; // force recomputation
         let p = self.params;
@@ -486,10 +519,10 @@ impl Processor for Limiter {
     }
 
     fn reset(&mut self) {
-        if self.channels == 0 || self.delay.is_empty() {
+        if !self.is_configured() {
             return;
         }
-        self.delay.fill(0.0);
+        self.delay.clear();
         self.req_hist.fill(1.0);
         self.ceil_hist.fill(f32::INFINITY);
         self.gain = 1.0;
@@ -497,6 +530,7 @@ impl Processor for Limiter {
         self.lookahead = self.target_lookahead;
         self.xfade = None;
         self.safety_clips = 0;
+        self.fresh = true;
         self.rebuild();
     }
 
@@ -506,127 +540,51 @@ impl Processor for Limiter {
 
     fn process(&mut self, samples: &mut [f32]) {
         let ch = self.channels;
-        if ch == 0 || self.delay.is_empty() {
+        if !self.is_configured() || samples.len() < ch {
             return;
         }
+        self.fresh = false;
         if self.attack_dirty {
             self.rebuild();
         }
         self.start_crossfade_if_needed();
 
         let enabled = self.params.enabled;
-        let ceiling = self.ceiling;
-        let c = ceiling as f64;
-        let hmask = self.hist_mask;
-        let dmask = self.delay_mask;
         let rise = 1.0 - self.release_coef;
+        let hmask = self.hist_mask;
+        let mut peaks = [0.0f32; BLOCK_FRAMES];
+        let mut gains = [0.0f64; BLOCK_FRAMES];
 
-        for frame in samples.chunks_exact_mut(ch) {
-            let m = self.now;
-
-            // Detector on the undelayed input.
-            let mut peak = 0.0f32;
-            for &x in frame.iter() {
-                peak = peak.max(x.abs());
-            }
-            let peak = peak as f64;
-            let (req, ceil) = if enabled {
-                (if peak > c { c / peak } else { 1.0 }, ceiling)
-            } else {
-                (1.0, f32::INFINITY)
-            };
-            self.req_hist[m as usize & hmask] = req;
-            self.ceil_hist[m as usize & hmask] = ceil;
-            let dpos = (m as usize & dmask) * ch;
-            self.delay[dpos..dpos + ch].copy_from_slice(frame);
-
-            // Sliding minimum of required gain.
-            let pushed = m - self.win_push_delay;
-            self.deque
-                .push(pushed, self.req_hist[pushed as usize & hmask]);
-            self.deque.expire(m - self.win_hi);
-            let h = quantize(self.deque.min());
-
-            // Two exact moving averages.
-            let s1 = self.box1.step(m, hmask, h);
-            let s2 = self.box2.step(m, hmask, s1);
-            let target = s2 as f64 / GAIN_SCALE;
-
-            // Release.
-            let g = self.gain;
-            self.gain = if target <= g {
-                target
-            } else {
-                let up = if enabled {
-                    g + rise * (target - g)
-                } else {
-                    g + self.bypass_step
-                };
-                if target - up < DENORMAL_FLUSH {
-                    target
-                } else {
-                    up
+        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+            if self.xfade.is_some() {
+                for frame in block.chunks_exact_mut(ch) {
+                    self.process_frame(frame, enabled, rise);
                 }
-            };
-            let g = self.gain;
-
-            // Delayed output, possibly cross-fading two taps.
-            let tap_a = m - self.lookahead as u64;
-            let a_pos = (tap_a as usize & dmask) * ch;
-            match self.xfade {
-                None => {
-                    let lim = self.ceil_hist[tap_a as usize & hmask];
-                    for (i, y) in frame.iter_mut().enumerate() {
-                        let v = (g * self.delay[a_pos + i] as f64) as f32;
-                        *y = self.safety(v, lim);
-                    }
-                }
-                Some(ref mut xf) => {
-                    xf.pos += 1;
-                    let (to, pos) = (xf.to, xf.pos);
-                    let w = 0.5
-                        - 0.5
-                            * (std::f64::consts::PI * pos as f64 / (self.xfade_frames + 1) as f64)
-                                .cos();
-                    let tap_b = m - to as u64;
-                    let b_pos = (tap_b as usize & dmask) * ch;
-                    let lim = self.ceil_hist[tap_a as usize & hmask]
-                        .max(self.ceil_hist[tap_b as usize & hmask]);
-                    for (i, y) in frame.iter_mut().enumerate() {
-                        let xa = self.delay[a_pos + i] as f64;
-                        let xb = self.delay[b_pos + i] as f64;
-                        let v = (g * ((1.0 - w) * xa + w * xb)) as f32;
-                        *y = self.safety(v, lim);
-                    }
-                    if pos >= self.xfade_frames {
-                        // Cross-fade done: the new tap is now the only one.
-                        self.lookahead = to;
-                        self.xfade = None;
-                        self.now += 1;
-                        self.rebuild();
-                        self.start_crossfade_if_needed();
-                        continue;
-                    }
-                }
+                continue;
             }
-            self.now += 1;
-        }
-    }
-}
-
-impl Limiter {
-    /// Final guard: clip to the ceiling and count interventions.
-    #[inline]
-    fn safety(&mut self, v: f32, lim: f32) -> f32 {
-        if v.abs() <= lim {
-            v
-        } else {
-            self.safety_clips += 1;
-            if v.is_nan() {
-                0.0
-            } else {
-                lim.copysign(v)
+            // No cross-fade can start inside a block, so the tap is fixed here.
+            let n = block.len() / ch;
+            let (peaks, gains) = (&mut peaks[..n], &mut gains[..n]);
+            let m0 = self.now;
+            frame_peaks(block, ch, peaks);
+            for (g, &p) in gains.iter_mut().zip(peaks.iter()) {
+                *g = self.gain_step(p as f64, enabled, rise);
+                self.now += 1;
             }
+
+            // Delay, gain and safety clip.
+            let la = self.lookahead;
+            let mut clips = 0;
+            let mut tap = m0.wrapping_sub(la as u64);
+            for (frame, &g) in block.chunks_exact_mut(ch).zip(gains.iter()) {
+                self.delay.write(frame);
+                let lim = self.ceil_hist[tap as usize & hmask];
+                for (y, &x) in frame.iter_mut().zip(self.delay.read(la)) {
+                    *y = safety((g * x as f64) as f32, lim, &mut clips);
+                }
+                tap = tap.wrapping_add(1);
+            }
+            self.safety_clips += clips;
         }
     }
 }

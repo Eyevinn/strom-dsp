@@ -766,3 +766,80 @@ fn no_allocation_in_process_or_set_params() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Call order and latency helper.
+
+#[test]
+fn set_params_before_or_after_configure_is_identical() {
+    let fs = 48_000.0f32;
+    for p in [
+        params(-6.0, 2.0, 50.0, 3.0),
+        params(-12.0, 0.5, 20.0, 0.0),
+        params(-3.0, 10.0, 200.0, 17.0),
+        LimiterParams {
+            enabled: false,
+            ..params(-6.0, 2.0, 50.0, 12.0)
+        },
+    ] {
+        let input = white_noise(20_000, 2, 4.0, 9);
+        let a = make(fs, 2, &p);
+        let mut b = Limiter::new();
+        b.configure(fs, 2);
+        b.set_params(&p);
+        let mut c = Limiter::new();
+        c.configure(fs, 2);
+        c.process(&mut input.clone());
+        c.reset();
+        c.set_params(&p);
+        assert_eq!(a.latency_frames(), b.latency_frames());
+        let mut outs = Vec::new();
+        for mut l in [a, b, c] {
+            let mut y = input.clone();
+            run(&mut l, &mut y, 2);
+            outs.push(y);
+        }
+        for y in &outs[1..] {
+            assert!(
+                outs[0]
+                    .iter()
+                    .zip(y)
+                    .all(|(u, v)| u.to_bits() == v.to_bits()),
+                "{p:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lookahead_frames_matches_reported_latency() {
+    for fs in RATES
+        .into_iter()
+        .chain([22_050.0, 11_025.0, 1.0e6, f32::NAN])
+    {
+        for ms in [
+            0.0,
+            0.01,
+            1.0,
+            2.5,
+            3.3,
+            5.0,
+            12.345,
+            20.0,
+            25.0,
+            -1.0,
+            f32::NAN,
+        ] {
+            let mut l = Limiter::new();
+            l.configure(fs, 1);
+            l.set_params(&params(-1.0, 1.0, 100.0, ms));
+            assert_eq!(
+                strom_dsp::limiter::lookahead_frames(ms, fs),
+                l.latency_frames(),
+                "fs={fs} ms={ms}"
+            );
+        }
+    }
+    assert_eq!(strom_dsp::limiter::lookahead_frames(5.0, 48_000.0), 240);
+    assert_eq!(strom_dsp::limiter::lookahead_frames(3.0, 44_100.0), 132); // 132.3
+}
