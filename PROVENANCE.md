@@ -437,6 +437,33 @@ base-rate hard clip at drives 0 … 4 dB. The NMR is a test metric only (own
 Bark-band model after Brandenburg 1987 and Zwicker & Fastl); nothing in the
 processing path uses a masking model.
 
+### Clip budget governor (`src/governor.rs`)
+
+**References.**
+- Slow integrating loops with conditional integration (anti-windup),
+  freeze and hysteresis: Åström & Murray, *Feedback Systems*; Åström &
+  Hägglund, *PID Controllers*, ch. 3 (as for the output-referenced trim).
+- Allowing more clipping on some material than on other, as a control
+  input rather than a fixed setting, is in expired US 4,241,266. *Expired;
+  status not legally reviewed.* The governor uses only the general idea of
+  a budget; its measures and law are our own.
+
+**Own design choices.**
+- One operator number, the clip budget in dB (0 … 6), mapped to three
+  allowances: clip depth `−40 + 5·B` dB, limiter mean gain reduction
+  `B/2` dB, touched share `0.2 %·2^(B/2)`. The largest "budget used" of the
+  three, over a gated 3 s window, is compared with `B`.
+- Law: over budget, hold the trim from adding gain, give back density,
+  then cut the AGC target (τ = 8 s, rate-limited); release below a 0.4 dB
+  hysteresis band. Density (band thresholds lowered with compensating
+  makeup) is used only where budget is left and the trim and the AGC are
+  at a bound. Frozen in pauses and below the gate, like the trim.
+- Why density is not the first resort when over budget: measured on our
+  own percussive test programme (documented in the module).
+
+No masking model and no candidate gain curves are used anywhere in the
+governor or the clipper.
+
 ### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
 **The chain** is our own composition of existing parts, not a new algorithm:

@@ -43,6 +43,7 @@ pub mod dynamics;
 pub mod equalizer;
 pub mod filter;
 pub mod gate;
+pub mod governor;
 pub mod limiter;
 pub mod meter;
 pub mod multiband;
