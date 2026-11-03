@@ -21,7 +21,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agc;
 pub mod biquad;
+pub mod broadcast;
 pub mod cleanup;
 pub mod compressor;
 pub mod deesser;
@@ -33,11 +35,13 @@ pub mod filter;
 pub mod gate;
 pub mod limiter;
 pub mod meter;
+pub mod multiband;
 pub mod oversample;
 pub mod resample;
 pub mod simd;
 pub mod stereo;
 pub mod stft;
+pub mod truepeak;
 pub mod util;
 
 mod lanes;

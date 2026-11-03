@@ -84,3 +84,19 @@ harness = false
 [[bench]]
 name = "ducker"
 harness = false
+
+[[bench]]
+name = "agc"
+harness = false
+
+[[bench]]
+name = "multiband"
+harness = false
+
+[[bench]]
+name = "truepeak"
+harness = false
+
+[[bench]]
+name = "broadcast"
+harness = false
