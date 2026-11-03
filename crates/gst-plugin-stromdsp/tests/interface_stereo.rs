@@ -1,4 +1,4 @@
-//! Interface test for `stromdsp-stereotools` (phase 1b spec 3.5), modelled on
+//! Interface test for `stromdsp-stereo` (phase 1b spec 3.5), modelled on
 //! `tests/interface.rs`: every property's name, GLib type, range or enum
 //! values, default and flags, no extra properties, klass, 2-channel pads, and
 //! that the element is never a BaseTransform passthrough.
@@ -9,7 +9,7 @@ use gst::glib;
 use gst::prelude::*;
 use gst_base::prelude::BaseTransformExt;
 
-const FACTORY: &str = "stromdsp-stereotools";
+const FACTORY: &str = "stromdsp-stereo";
 
 fn gst_flags(flags: glib::ParamFlags) -> glib::ParamFlags {
     [
@@ -94,10 +94,10 @@ fn enumeration(e: &gst::Element, name: &str, type_name: &str, values: &[(i32, &s
 }
 
 #[test]
-fn stereotools_interface() {
+fn stereo_interface() {
     util::init();
     let e = gst::ElementFactory::make(FACTORY).build().unwrap();
-    assert_eq!(e.type_().name(), "StromDspStereoTools");
+    assert_eq!(e.type_().name(), "StromDspStereo");
     let f = e.factory().unwrap();
     assert_eq!(f.metadata("klass"), Some("Filter/Effect/Audio"));
 

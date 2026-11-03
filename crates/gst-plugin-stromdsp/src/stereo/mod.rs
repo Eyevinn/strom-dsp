@@ -1,4 +1,4 @@
-//! `stromdsp-stereotools`: stereo mode matrix, polarity, constant-power
+//! `stromdsp-stereo`: stereo mode matrix, polarity, constant-power
 //! balance and M/S width for two-channel audio.
 
 use gst::glib;
@@ -7,8 +7,8 @@ use gst::prelude::*;
 mod imp;
 
 glib::wrapper! {
-    /// Stereo tools element (`stromdsp-stereotools`).
-    pub struct StromDspStereoTools(ObjectSubclass<imp::StromDspStereoTools>)
+    /// Stereo element (`stromdsp-stereo`).
+    pub struct StromDspStereo(ObjectSubclass<imp::StromDspStereo>)
         @extends gst_base::BaseTransform, gst::Element, gst::Object;
 }
 
@@ -82,14 +82,14 @@ impl From<MonoLaw> for strom_dsp::stereo::MonoLaw {
     }
 }
 
-/// Register `stromdsp-stereotools` with `plugin`.
+/// Register `stromdsp-stereo` with `plugin`.
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     StereoMode::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     MonoLaw::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     gst::Element::register(
         Some(plugin),
-        "stromdsp-stereotools",
+        "stromdsp-stereo",
         gst::Rank::NONE,
-        StromDspStereoTools::static_type(),
+        StromDspStereo::static_type(),
     )
 }

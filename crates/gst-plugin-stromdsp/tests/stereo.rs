@@ -1,4 +1,4 @@
-//! Harness tests for `stromdsp-stereotools`: output matches the library
+//! Harness tests for `stromdsp-stereo`: output matches the library
 //! through mode switches and parameter changes, the defaults and
 //! `enabled=false` are bit-exact, routing modes are bit-exact, caps other than
 //! 2 channels are refused, and the latency query is unchanged.
@@ -8,13 +8,13 @@ mod util;
 use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
-use gststromdsp::stereotools::{MonoLaw, StereoMode};
-use strom_dsp::stereo::{StereoParams, StereoTools};
+use gststromdsp::stereo::{MonoLaw, StereoMode};
+use strom_dsp::stereo::{Stereo, StereoParams};
 use util::Action;
 
 const FORMATS: [u32; 2] = [48_000, 22_050];
 
-fn on_set(dsp: &mut StereoTools, name: &str, value: &glib::Value) {
+fn on_set(dsp: &mut Stereo, name: &str, value: &glib::Value) {
     let mut p = *dsp.params();
     match name {
         "enabled" => p.enabled = value.get().unwrap(),
@@ -30,7 +30,7 @@ fn on_set(dsp: &mut StereoTools, name: &str, value: &glib::Value) {
 }
 
 #[test]
-fn stereotools_matches_library() {
+fn stereo_matches_library() {
     util::init();
     for rate in FORMATS {
         let input = util::test_signal(rate, 2, rate as usize);
@@ -57,16 +57,8 @@ fn stereotools_matches_library() {
             (13, Action::SetProperty("enabled", true.to_value())),
             (14, Action::SetProperty("balance", 1.0f32.to_value())),
         ];
-        let out = util::run_element(
-            "stromdsp-stereotools",
-            &props,
-            rate,
-            2,
-            &input,
-            1024,
-            &actions,
-        );
-        let mut dsp = StereoTools::new();
+        let out = util::run_element("stromdsp-stereo", &props, rate, 2, &input, 1024, &actions);
+        let mut dsp = Stereo::new();
         dsp.set_params(&StereoParams {
             width: 1.5,
             balance: -0.25,
@@ -84,14 +76,14 @@ fn defaults_and_disabled_are_bit_exact() {
         let mut input = util::test_signal(rate, 2, rate as usize / 2);
         input[7] = f32::from_bits(0x7fc0_0042); // NaN with payload
         input[8] = -0.0;
-        let out = util::run_element("stromdsp-stereotools", &[], rate, 2, &input, 480, &[]);
+        let out = util::run_element("stromdsp-stereo", &[], rate, 2, &input, 480, &[]);
         util::assert_bit_exact(&out, &input);
         let props = vec![
             ("enabled", false.to_value()),
             ("mode", StereoMode::Mono.to_value()),
             ("width", 2.0f32.to_value()),
         ];
-        let out = util::run_element("stromdsp-stereotools", &props, rate, 2, &input, 480, &[]);
+        let out = util::run_element("stromdsp-stereo", &props, rate, 2, &input, 480, &[]);
         util::assert_bit_exact(&out, &input);
     }
 }
@@ -104,7 +96,7 @@ fn routing_is_bit_exact() {
         ("mode", StereoMode::Swap.to_value()),
         ("invert-left", true.to_value()),
     ];
-    let out = util::run_element("stromdsp-stereotools", &props, 48_000, 2, &input, 480, &[]);
+    let out = util::run_element("stromdsp-stereo", &props, 48_000, 2, &input, 480, &[]);
     for (o, i) in out.chunks_exact(2).zip(input.chunks_exact(2)) {
         // invert-left acts on the input, then swap: L out = R in, R out = −L in.
         assert_eq!(o[0].to_bits(), i[1].to_bits());
@@ -115,7 +107,7 @@ fn routing_is_bit_exact() {
 #[test]
 fn enum_properties_from_strings() {
     util::init();
-    let e = gst::ElementFactory::make("stromdsp-stereotools")
+    let e = gst::ElementFactory::make("stromdsp-stereo")
         .build()
         .unwrap();
     for (nick, v) in [
@@ -140,7 +132,7 @@ fn enum_properties_from_strings() {
 fn refuses_other_channel_counts() {
     util::init();
     for channels in [1usize, 3] {
-        let mut h = Harness::new("stromdsp-stereotools");
+        let mut h = Harness::new("stromdsp-stereo");
         h.set_src_caps_str(&util::caps_str(48_000, channels));
         h.play();
         let buf = gst::Buffer::from_mut_slice(vec![0u8; 64 * channels * 4]);
@@ -151,7 +143,7 @@ fn refuses_other_channel_counts() {
 #[test]
 fn latency_query_is_unchanged() {
     util::init();
-    let mut h = Harness::new("stromdsp-stereotools");
+    let mut h = Harness::new("stromdsp-stereo");
     let upstream = gst::ClockTime::from_mseconds(7);
     h.set_upstream_latency(upstream);
     h.set_src_caps_str(&util::caps_str(48_000, 2));

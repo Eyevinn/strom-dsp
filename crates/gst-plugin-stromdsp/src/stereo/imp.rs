@@ -1,4 +1,4 @@
-//! `stromdsp-stereotools` implementation.
+//! `stromdsp-stereo` implementation.
 //!
 //! - Caps: interleaved F32LE, any rate, **exactly 2 channels**.
 //! - `mode` and `mono-law` are GLib enums ([`super::StereoMode`],
@@ -16,16 +16,16 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::subclass::prelude::*;
-use strom_dsp::stereo::{StereoParams, StereoTools};
+use strom_dsp::stereo::{Stereo, StereoParams};
 
 use super::{MonoLaw, StereoMode};
 use crate::common::{self, EngineSlot, SharedSettings};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
-        "stromdsp-stereotools",
+        "stromdsp-stereo",
         gst::DebugColorFlags::empty(),
-        Some("strom-dsp stereo tools"),
+        Some("strom-dsp stereo"),
     )
 });
 
@@ -71,12 +71,12 @@ impl Settings {
 }
 
 #[derive(Debug, Default)]
-pub struct StromDspStereoTools {
+pub struct StromDspStereo {
     settings: SharedSettings<Settings>,
-    engine: EngineSlot<StereoTools>,
+    engine: EngineSlot<Stereo>,
 }
 
-fn apply(dsp: &mut StereoTools, s: &Settings) {
+fn apply(dsp: &mut Stereo, s: &Settings) {
     dsp.set_params(&s.params());
 }
 
@@ -99,13 +99,13 @@ where
 }
 
 #[glib::object_subclass]
-impl ObjectSubclass for StromDspStereoTools {
-    const NAME: &'static str = "StromDspStereoTools";
-    type Type = super::StromDspStereoTools;
+impl ObjectSubclass for StromDspStereo {
+    const NAME: &'static str = "StromDspStereo";
+    type Type = super::StromDspStereo;
     type ParentType = gst_base::BaseTransform;
 }
 
-impl ObjectImpl for StromDspStereoTools {
+impl ObjectImpl for StromDspStereo {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
             let d = StereoParams::default();
@@ -192,13 +192,13 @@ impl ObjectImpl for StromDspStereoTools {
     }
 }
 
-impl GstObjectImpl for StromDspStereoTools {}
+impl GstObjectImpl for StromDspStereo {}
 
-impl ElementImpl for StromDspStereoTools {
+impl ElementImpl for StromDspStereo {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static META: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "strom-dsp stereo tools",
+                "strom-dsp stereo",
                 "Filter/Effect/Audio",
                 "Stereo utility for 2 channels: mode (stereo, mono with -3/-6 dB law, \
                  left/right to both, swap, M/S encode/decode), input polarity, \
@@ -238,7 +238,7 @@ impl ElementImpl for StromDspStereoTools {
     }
 }
 
-impl BaseTransformImpl for StromDspStereoTools {
+impl BaseTransformImpl for StromDspStereo {
     const MODE: gst_base::subclass::BaseTransformMode =
         gst_base::subclass::BaseTransformMode::AlwaysInPlace;
     const PASSTHROUGH_ON_SAME_CAPS: bool = false;
@@ -255,7 +255,7 @@ impl BaseTransformImpl for StromDspStereoTools {
         if channels != 2 {
             return Err(gst::loggable_error!(
                 CAT,
-                "stereo tools need 2 channels, got {channels}"
+                "the stereo element needs 2 channels, got {channels}"
             ));
         }
         gst::debug!(CAT, imp = self, "configuring for {rate} Hz");
