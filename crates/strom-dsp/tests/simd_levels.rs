@@ -203,6 +203,7 @@ fn compressor_detector_modes_are_bit_identical() {
                     CompressorDetector::Rms
                 });
                 c.set_rms_window(1.0 + (k % 9) as f32 * 7.0);
+                c.set_auto_makeup(k % 5 < 3);
                 c.set_params(&CompressorParams {
                     threshold: [0.1f32, 0.5, 0.02][k % 3],
                     ratio: 1.0 + (k % 7) as f32 * 3.0,

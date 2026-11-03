@@ -284,6 +284,7 @@ fn no_allocation_in_new_setters_and_process() {
             CompressorDetector::Peak
         });
         c.set_rms_window(1.0 + i as f32);
+        c.set_auto_makeup(i % 2 == 0);
         c.set_params(&CompressorParams {
             threshold: 0.1,
             ratio: 4.0,

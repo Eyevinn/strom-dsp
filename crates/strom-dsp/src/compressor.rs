@@ -115,6 +115,26 @@
 //! old one held (a peak `p` becomes the power `p²` and vice versa), so the
 //! detector level is continuous at the switch; differences between the two
 //! readings afterwards are followed with the attack/release times.
+//!
+//! # Auto-makeup
+//!
+//! [`Compressor::set_auto_makeup`] (default off) adds a makeup gain derived
+//! from the static curve, so the perceived level stays roughly constant while
+//! threshold, ratio and knee change: the static gain reduction at the
+//! reference level `x_ref =` [`AUTO_MAKEUP_REFERENCE_DB`] (−18 dB,
+//! sine-calibrated: the EBU R68 alignment level) is made up,
+//!
+//! `M_auto = r(x_ref)` dB, i.e. `r = 0`, `S·(x_ref − T + W/2)²/(2W)` or
+//! `S·(x_ref − T)` by the knee region (the gain computer of step 2),
+//!
+//! so a signal reading `x_ref` leaves the compressor at its input level
+//! (Giannoulis et al. 2012 derive automatic makeup the same way, with the
+//! reference at 0 dBFS; a reference at the alignment level keeps typical
+//! programme, rather than full-scale peaks, at its level). The output gain is
+//! `10^((M_auto − y)/20) · makeup`: the explicit `makeup_gain` applies on top.
+//! `M_auto` is part of the makeup that glides (see "Parameter smoothing"), so
+//! switching it and changing threshold, ratio or knee with it on are
+//! click-free.
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{
@@ -122,6 +142,7 @@ use crate::dynamics::{
     SegmentedMin,
 };
 use crate::simd::{detect, Level};
+use crate::util::db_to_lin;
 use crate::Processor;
 use fearless_simd::dispatch;
 use fearless_simd::prelude::*;
@@ -150,6 +171,17 @@ pub enum CompressorDetector {
 pub const DEFAULT_RMS_WINDOW_MS: f32 = 10.0;
 /// Range of the RMS averaging time (ms).
 pub const RMS_WINDOW_RANGE: (f32, f32) = (1.0, 100.0);
+
+/// Reference detector level (dB, sine-calibrated) of the automatic makeup:
+/// the static gain reduction at this level is made up (see "Auto-makeup" in
+/// the module docs).
+pub const AUTO_MAKEUP_REFERENCE_DB: f64 = -18.0;
+
+/// Automatic makeup gain (dB, ≥ 0) of the static curve `gc`: its gain
+/// reduction at [`AUTO_MAKEUP_REFERENCE_DB`].
+pub fn auto_makeup_db(gc: &GainComputer) -> f64 {
+    gc.reduction_db(AUTO_MAKEUP_REFERENCE_DB)
+}
 
 /// Largest sample rate `configure` accepts (Hz); also sizes the hold window.
 const MAX_SAMPLE_RATE: f64 = 1.0e6;
@@ -246,12 +278,22 @@ struct Curve {
 
 impl Curve {
     fn from_params(p: &CompressorParams) -> Self {
+        Self::with_auto_makeup(p, false)
+    }
+
+    /// Curve with the makeup gain, including the automatic makeup when `auto`.
+    fn with_auto_makeup(p: &CompressorParams, auto: bool) -> Self {
         let gc = GainComputer::from_linear(p.threshold as f64, p.ratio as f64, p.knee as f64);
+        let auto_gain = if auto {
+            db_to_lin(auto_makeup_db(&gc))
+        } else {
+            1.0
+        };
         Self {
             threshold_db: gc.threshold_db,
             slope: gc.slope,
             knee_db: gc.knee_db,
-            makeup: p.makeup_gain as f64,
+            makeup: p.makeup_gain as f64 * auto_gain,
         }
     }
 
@@ -329,6 +371,8 @@ pub struct Compressor {
     rms_window_ms: f32,
     /// Mean-square envelope of the RMS detector.
     mean_square: MeanSquareEnvelope,
+    /// Automatic makeup on (see "Auto-makeup" in the module docs).
+    auto_makeup: bool,
     /// Smoothed gain reduction (dB, ≥ 0).
     reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
@@ -374,6 +418,7 @@ impl Compressor {
             detector: CompressorDetector::Peak,
             rms_window_ms: DEFAULT_RMS_WINDOW_MS,
             mean_square: MeanSquareEnvelope::default(),
+            auto_makeup: false,
             reduction: AttackRelease::default(),
             fresh: true,
             level: Level::baseline(),
@@ -482,6 +527,29 @@ impl Compressor {
     /// Current (clamped) RMS averaging time (ms).
     pub fn rms_window(&self) -> f32 {
         self.rms_window_ms
+    }
+
+    /// Switch the automatic makeup gain on or off (see "Auto-makeup" in the
+    /// module docs). The explicit `makeup_gain` still applies on top. The
+    /// change glides like any makeup change. Never allocates.
+    pub fn set_auto_makeup(&mut self, on: bool) {
+        self.auto_makeup = on;
+        self.update_coefficients();
+    }
+
+    /// Whether the automatic makeup gain is on.
+    pub fn auto_makeup(&self) -> bool {
+        self.auto_makeup
+    }
+
+    /// Makeup gain (dB) the automatic makeup currently targets for the
+    /// current parameters (0 when it is off), excluding `makeup_gain`.
+    pub fn auto_makeup_gain_db(&self) -> f64 {
+        if self.auto_makeup {
+            auto_makeup_db(&self.target.computer())
+        } else {
+            0.0
+        }
     }
 
     /// Smoothed gain reduction (dB, ≥ 0) after the most recently processed frame,
@@ -639,7 +707,7 @@ impl Compressor {
                 self.hold.push(-self.held);
             }
         }
-        self.target = Curve::from_params(&self.params);
+        self.target = Curve::with_auto_makeup(&self.params, self.auto_makeup);
         if self.fresh {
             self.glide.jump(&self.target);
             self.current = self.target;
