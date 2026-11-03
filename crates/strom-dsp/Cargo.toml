@@ -13,11 +13,17 @@ rust-version.workspace = true
 # (`tests/rtsan.rs`). Run with `RTSAN_ENABLE=1`, see docs/PERFORMANCE.md.
 # The library code never uses the dependency; without RTSAN_ENABLE it is a no-op.
 rtsan = ["dep:rtsan-standalone"]
+# Bench-only: instruction-count benchmarks (`benches/strip_gungraun.rs`).
+# Needs Valgrind and a matching `gungraun-runner` (Linux only), see
+# docs/PERFORMANCE.md.
+gungraun = ["dep:gungraun"]
 
 [dependencies]
-# Optional so it can be gated by the `rtsan` feature (dev-dependencies cannot
-# be optional). Not used by the library itself.
+# Optional so they can be gated by features (dev-dependencies cannot be
+# optional). Neither is used by the library code itself.
 rtsan-standalone = { version = "0.3", optional = true }
+# Keep in lockstep with the `gungraun-runner` version installed in CI.
+gungraun = { version = "=0.20.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -26,6 +32,11 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "strip"
 harness = false
+
+[[bench]]
+name = "strip_gungraun"
+harness = false
+required-features = ["gungraun"]
 
 [[test]]
 name = "rtsan"
