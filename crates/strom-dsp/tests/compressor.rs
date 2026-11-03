@@ -527,3 +527,41 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Call order: set_params before or after configure/reset gives identical output.
+
+#[test]
+fn set_params_before_or_after_configure_is_identical() {
+    let p = CompressorParams {
+        threshold: 0.1,
+        ratio: 8.0,
+        attack_ms: 1.0,
+        release_ms: 30.0,
+        makeup_gain: 2.0,
+        knee: 0.25,
+    };
+    let mut rng = Rng(11);
+    let input: Vec<f32> = (0..2 * 9_600)
+        .map(|i| rng.next_f32() * if (i / 2400) % 2 == 0 { 0.9 } else { 0.01 })
+        .collect();
+
+    let mut a = Compressor::new();
+    a.set_params(&p);
+    a.configure(48_000.0, 2);
+    let mut b = Compressor::new();
+    b.configure(48_000.0, 2);
+    b.set_params(&p);
+    let mut c = Compressor::new();
+    c.configure(48_000.0, 2);
+    c.process(&mut input.clone());
+    c.reset();
+    c.set_params(&p);
+
+    let (mut ya, mut yb, mut yc) = (input.clone(), input.clone(), input.clone());
+    a.process(&mut ya);
+    b.process(&mut yb);
+    c.process(&mut yc);
+    assert!(ya.iter().zip(&yb).all(|(x, y)| x.to_bits() == y.to_bits()));
+    assert!(ya.iter().zip(&yc).all(|(x, y)| x.to_bits() == y.to_bits()));
+}
