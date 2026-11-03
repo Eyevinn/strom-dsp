@@ -340,6 +340,49 @@ A feed-forward loudness rider, per phase 2 spec §2.3.
   - 10 s pauses move the gain by ≤ 0.1 dB, with no overshoot afterwards.
 - No commercial processor material was used.
 
+### True-peak limiter (`src/truepeak.rs`, phase 2)
+
+**Measurement concept.** ITU-R BS.1770-4/-5 Annex 2 defines the true peak as
+the maximum absolute value of the signal oversampled 4×.
+
+**Detector.**
+- Interpolation: our phase 1b polyphase half-band `Oversampler` at 4×, taking
+  the max |·| over sub-samples and channels (linked).
+- High-frequency term (own design): κ·|Δ⁶x|/64. The finite difference has gain
+  sin⁶(πf/fs) (J. O. Smith III).
+- Each term passes through a sliding maximum over ±8 frames (van Herk /
+  Gil–Werman, `SegmentedMin`).
+
+**Gain stage.** The phase 1 limiter's gain pipeline, reused through
+crate-internal hooks. `Limiter` is unchanged and bit-identical. Attack equals
+the lookahead.
+
+**Latency.** round(lookahead·fs/1000) + 24 + 8 frames, constant. With
+`enabled = false` the output is a bit-exact delay of the same length.
+
+**Guarantee.**
+- Proven: every output frame near an interpolated peak has gain ≤ c/|x̂|, and
+  the output sample peak is ≤ c.
+- Bounded and tested, not proven: gain modulation between neighbouring
+  samples.
+
+**Why the high-frequency term (own design choice).**
+- A BS.1770 meter's interpolator (tested with the `ebur128` crate) reads
+  near-Nyquist content higher than our half-band does. Without the term,
+  clicks exceeded the ceiling by up to 0.78 dB.
+- κ = 0.45 gives about 30 % headroom over the largest value an adversarial
+  search needed. Measuring against an implementation of a standard is allowed
+  by phase 2 spec §1.
+- Cost: extra limiting on HF-heavy material. About 1 dB at 15 kHz; full-band
+  white noise ends about 1.9 dB under the ceiling.
+- The term is a conservative detector margin. It is not a clipping or
+  distortion-cancellation method.
+
+**Measured.** The worst true-peak excess over the ceiling is +0.004 dB (meter
+ripple), within the +0.1 dB requirement.
+
+No commercial-processor material and no patent-driven method was used.
+
 ### Multiband compressor (`src/multiband.rs`, phase 2)
 
 This is our own composition of existing parts, not a new algorithm. The
