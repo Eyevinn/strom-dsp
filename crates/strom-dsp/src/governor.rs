@@ -25,7 +25,7 @@
 //! |---|---|---|
 //! | clip depth | `−40 + 5·B` dB (−40 at 0, −30 at 2, −10 at 6) | `(depth + 40)/5` |
 //! | limiter mean gain reduction | `B/2` dB (0 at 0, 1 at 2, 3 at 6) | `2·gr` |
-//! | touched share | `0.2 % · 2^(B/2)` (0.4 % at 2, 1.6 % at 6) | `2·log2(share / 0.2 %)` |
+//! | touched share | `0.5 % · 2^(B/2)` (1 % at 2, 4 % at 6) | `2·log2(share / 0.5 %)` |
 //!
 //! The excess `e = used − B` (dB of budget) drives the loop.
 //!
@@ -38,8 +38,10 @@
 //!   The loudness deficit this causes is accepted and reported instead of
 //!   distortion.
 //! - **While a cut is applied** the trim stays held; the cut is released
-//!   (at half its rate) only well under budget (`e < −0.4`, a hysteresis
-//!   band), so it does not chatter around the budget.
+//!   under budget, past a small dead band (`e < −0.1`), by
+//!   `(e + 0.1)·dt/8 s` at the same rate limit: an integrator in both
+//!   directions, so the mean budget used settles at the budget instead of
+//!   below it.
 //! - **Budget left but the target out of reach** (no cut, `e < −0.2`, and
 //!   the gated output more than 0.5 LU under target, i.e. the trim and the
 //!   AGC are at a bound): **density** rises: every band's threshold is
@@ -73,9 +75,9 @@
 //! (τ = 8 s) behind the 3 s measurement window (group delay 1.5 s), so the
 //! trim's margins apply (phase margin ≥ 79°). Density acts only while the
 //! trim is at a bound (not moving): again a single integrator (τ = 10 s)
-//! on the loudness error. Hysteresis (cut released below −0.4, density
-//! raised below −0.2, both in budget dB) and the rate limits stop small
-//! limit cycles; the 10-minute step test in `tests/governor.rs` checks for
+//! on the loudness error. The dead band (cut released below −0.1, density
+//! raised below −0.2 and released only on target, all in budget dB) and the
+//! rate limits stop small limit cycles; the 10-minute step test in `tests/governor.rs` checks for
 //! them.
 
 use crate::clipper::ClipStats;
@@ -87,7 +89,7 @@ pub const BUDGET_RANGE_DB: (f32, f32) = (0.0, 6.0);
 const WINDOW_MS: f64 = 3000.0;
 /// Hysteresis band (budget dB) below the budget: the cut and the density
 /// are released only below it.
-const RELEASE_BAND: f64 = 0.4;
+const RELEASE_BAND: f64 = 0.1;
 /// Density rises only with at least this much budget left (budget dB).
 const DENSITY_HEADROOM: f64 = 0.2;
 /// Loudness deficit (LU) above which density rises near the budget.
@@ -105,7 +107,7 @@ const DEPTH_AT_ZERO_DB: f64 = -40.0;
 const DEPTH_PER_BUDGET_DB: f64 = 5.0;
 const GR_AT_ZERO_DB: f64 = 0.0;
 const GR_PER_BUDGET_DB: f64 = 0.5;
-const TOUCH_AT_ZERO: f64 = 0.002;
+const TOUCH_AT_ZERO: f64 = 0.005;
 
 /// What the governor is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -326,7 +328,7 @@ impl ClipBudgetGovernor {
         } else if e < -RELEASE_BAND && self.cut_db > 0.0 {
             // Well under budget: release the cut first.
             let under = -(e + RELEASE_BAND);
-            self.cut_db = (self.cut_db - 0.5 * cut_step(under)).max(0.0);
+            self.cut_db = (self.cut_db - cut_step(under)).max(0.0);
             GovernorState::Release
         } else if self.cut_db > 0.0 {
             GovernorState::Hold
@@ -466,7 +468,7 @@ mod tests {
             assert!((g.budget_used_db() - b).abs() < 1e-6);
         }
         assert!((limiter_target_db(6.0) - 3.0).abs() < 1e-12);
-        assert!((touched_target(2.0) - 0.004).abs() < 1e-12);
+        assert!((touched_target(2.0) - 0.01).abs() < 1e-12);
     }
 
     #[test]
