@@ -101,7 +101,7 @@ const SLACK: usize = 128;
 
 /// Zeroth-order modified Bessel function of the first kind, `I0(x)`, from its
 /// power series `Σ ((x/2)^k / k!)²`, summed until the terms stop mattering.
-fn bessel_i0(x: f64) -> f64 {
+pub(crate) fn bessel_i0(x: f64) -> f64 {
     let q = 0.25 * x * x;
     let mut term = 1.0;
     let mut sum = 1.0;

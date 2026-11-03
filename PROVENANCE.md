@@ -392,6 +392,51 @@ ripple), within the +0.1 dB requirement.
 
 No commercial-processor material and no patent-driven method was used.
 
+### Final clipper (`src/clipper.rs`)
+
+**References.**
+- Differential clipping, where only the clipped-off part is resampled and
+  filtered and then subtracted from the delayed programme: US 6,337,999
+  (oversampled clipping with filtered clippings) and US 4,208,548 (filtering
+  the clipped-off part so the clipper's distortion stays out of a band).
+  *Expired; status not legally reviewed.*
+- Overshoot compensation after band-limiting the clippings: US 4,460,871.
+  *Expired; status not legally reviewed.*
+- Repeated clip-and-filter to control peak regrowth: J. Armstrong,
+  Electronics Letters 38(5), 2002.
+- First-order antiderivative antialiasing: Bilbao, Esqueda, Parker &
+  Välimäki, IEEE SPL 24(7), 2017.
+- Window-method FIR design (Kaiser window): Oppenheim & Schafer §7.5–7.6.
+- Delay-complementary filter pairs `H = 1 − L`: the complementary-filter
+  literature (e.g. Higgins, IEEE Trans. AES 11(3), 1975), with the bilinear
+  transform pre-warped at the corner.
+
+**Own design choices.**
+- Curve: identity to `T − knee`, then `k + w·tanh(e/w)`; closed-form
+  antiderivative `e²/2 − w²·ln cosh(e/w)` for the antialiasing.
+- 8× oversampling (the shared `Oversampler`): at 4× a 15 kHz tone 6 dB over
+  the threshold left a −75 … −80 dBFS alias, at 8× −94 dBFS.
+- The shaping FIR's passband `1 + a·(f/f_b)²`, `a = 1`, found by measuring
+  sample-peak overshoot on our own synthetic signals for a ∈ {0, 0.3, 0.6,
+  1, 1.5}. The FIR is centred half a high-rate sample early to undo the
+  antialiasing's delay.
+- Low cut `H(s) = s²(s + 3)/(s + 1)³` (complement of
+  `L = (1 + 3s)/(1 + s)³`), −3 dB at the bass crossover: 12 dB/octave below
+  it, no latency, near-zero phase error well above it.
+- Two passes; early-out on a hard bound of the interpolator's gain (exact,
+  with the interpolator primed from a short input history on return).
+- Activity statistics (clip depth as removed/input energy, share of
+  touched high-rate samples) for the clip budget and for stages before the
+  clipper.
+
+**Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −93.9
+dBFS; sample peaks within +0.26 dB of the threshold on band-limited signals
+driven 2 and 4 dB (+1.6 dB without the compensation); a lower NMR and
+equal or higher loudness than the true-peak limiter alone and than a
+base-rate hard clip at drives 0 … 4 dB. The NMR is a test metric only (own
+Bark-band model after Brandenburg 1987 and Zwicker & Fastl); nothing in the
+processing path uses a masking model.
+
 ### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
 **The chain** is our own composition of existing parts, not a new algorithm:
