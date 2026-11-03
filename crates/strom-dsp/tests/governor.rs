@@ -2,16 +2,19 @@
 //! ([`strom_dsp::governor`], [`strom_dsp::broadcast::BroadcastProcessor`]).
 //! All signals are synthetic with fixed seeds.
 //!
+//! Loudness compliance comes first: the governor never takes the output
+//! below the target to stay within the clip budget.
+//!
 //! - Peaky programme with a budget below what it naturally uses: the
-//!   governor holds the clip depth within the budget and the limiter's
-//!   mean gain reduction under 2 dB; with the governor off the clip depth
-//!   exceeds the budget (guard). The loudness cost is measured and
-//!   documented.
+//!   output lands within ±1 LU of the target, the governor reports the
+//!   budget excess (no loudness deficit), and the limiter's mean gain
+//!   reduction stays under 2 dB.
 //! - A step from speech-like to dense programme: no overshoot of the
-//!   short-term loudness, no limit cycle over 10 minutes.
-//! - 10 s of silence leave density and cut unchanged.
-//! - An unreachable case (brickwalled input, target too high) reports a
-//!   loudness deficit instead of exceeding the budget.
+//!   short-term loudness, on target, no limit cycle over 10 minutes.
+//! - 10 s of silence leave density and excess unchanged.
+//! - An unreachable budget (brickwalled input, target −5 LUFS): the
+//!   output reaches the target and the governor reports the budget
+//!   excess, not a deficit.
 
 mod agc_support;
 mod programme_support;
@@ -69,6 +72,8 @@ struct Peaky {
     depth: f64,
     limiter_gr: f64,
     deficit: f64,
+    /// Mean budget excess over the measured part (dB).
+    excess: f64,
 }
 
 /// The peaky programme (a click every 1.1 s) through `p` at `input_lufs`
@@ -80,7 +85,7 @@ fn peaky_run(p: &BroadcastParams, input_lufs: f64) -> Peaky {
     let mut m = meter();
     let mut looper = Looper::new(&x);
     let mut buf = vec![0.0f32; BLOCK * 2];
-    let (mut depths, mut gr, mut deficit) = (Vec::new(), 0.0, 0.0);
+    let (mut depths, mut gr, mut deficit, mut excess) = (Vec::new(), 0.0, 0.0f64, 0.0);
     let (from, to) = (30 * PER_S, 90 * PER_S);
     for i in 0..to {
         looper.fill(&mut buf);
@@ -90,7 +95,8 @@ fn peaky_run(p: &BroadcastParams, input_lufs: f64) -> Peaky {
             m.process(&buf);
             depths.push(meters.clip_depth_db);
             gr += meters.limiter_gain_reduction_db;
-            deficit = meters.loudness_deficit_lu;
+            deficit = deficit.max(meters.loudness_deficit_lu);
+            excess += meters.budget_excess_db;
         }
     }
     Peaky {
@@ -98,32 +104,28 @@ fn peaky_run(p: &BroadcastParams, input_lufs: f64) -> Peaky {
         depth: mean_depth(&depths),
         limiter_gr: gr / (to - from) as f64,
         deficit,
+        excess: excess / (to - from) as f64,
     }
 }
 
 /// Budget for the peaky test: below the ~2.0 dB this programme uses in the
-/// streaming preset (clip depth about −31 dB), so the governor has to
-/// act.
+/// streaming preset with the spike guard off (clip depth about −31 dB).
 const PEAKY_BUDGET_DB: f32 = 1.5;
-/// Integrated output (LUFS) with the governor on, per input level, as
-/// measured when the test was written (see the test docs).
-const PEAKY_MEASURED: [(f64, f64); 3] = [(-35.0, -17.41), (-23.0, -17.76), (-10.0, -18.03)];
 
 /// Streaming preset, budget 1.5 dB, peaky programme at −35, −23 and −10
-/// LUFS input. With the governor on, the mean clip depth stays within the
-/// budget's allowance (−32.5 dB) and the limiter's mean gain reduction under
-/// 2 dB; with it off the clip depth exceeds the allowance (guard).
+/// LUFS input (spike guard off, so the clicks load the clipper). The
+/// programme needs more than the budget at the target: its peaks are
+/// transients the band compressors cannot catch. With the governor on, the
+/// output lands within ±1 LU of the target, the governor reports the
+/// budget excess (mean over the run > 0) and no loudness deficit, and the
+/// limiter's mean gain reduction stays under 2 dB. With the governor off
+/// the clip depth is over the allowance too (the case is over budget).
 ///
-/// The loudness cost of holding the budget is documented, not bounded by
-/// ±1 LU: the peaks of this programme are transients that the band
-/// compressors cannot catch, so the only lever left is a cut of the AGC
-/// target. The governor acts on 3 s windows, and windows with more hits or
-/// clicks set the cut, so the run's mean clip depth ends 0.8 … 2.0 dB under
-/// the allowance and the output 1.4 … 2.0 LU under the target (each value
-/// within 0.5 LU of the recorded one). The reported deficit must match the
-/// shortfall.
+/// Guard: the earlier law cut the AGC target to hold the budget and missed
+/// the target by 1.4 … 2.0 LU here (−17.41, −17.76, −18.03 LUFS against
+/// −16).
 #[test]
-fn peaky_programme_within_budget() {
+fn peaky_programme_holds_target_and_reports_excess() {
     let base = BroadcastParams {
         clip_budget_db: PEAKY_BUDGET_DB,
         ..BroadcastParams::preset(BroadcastPreset::Streaming, 4)
@@ -131,7 +133,7 @@ fn peaky_programme_within_budget() {
     let allowed = depth_target_db(PEAKY_BUDGET_DB as f64);
     let target = base.target_loudness_lufs as f64;
     let mut failures = Vec::new();
-    for (input, recorded) in PEAKY_MEASURED {
+    for input in [-35.0, -23.0, -10.0] {
         let on = peaky_run(&base, input);
         let off = peaky_run(
             &BroadcastParams {
@@ -142,41 +144,37 @@ fn peaky_programme_within_budget() {
         );
         println!(
             "peaky at {input} LUFS: governor on {:.2} LUFS, depth {:.1} dB (allowed {allowed}), \
-             limiter {:.2} dB, deficit {:.2} LU; off {:.2} LUFS, depth {:.1} dB, limiter {:.2} dB",
+             limiter {:.2} dB, excess {:.2} dB, deficit {:.2} LU; off {:.2} LUFS, depth {:.1} dB, \
+             limiter {:.2} dB",
             on.integrated,
             on.depth,
             on.limiter_gr,
+            on.excess,
             on.deficit,
             off.integrated,
             off.depth,
             off.limiter_gr
         );
-        if on.depth > allowed {
-            failures.push(format!("{input}: depth {:.1} over {allowed}", on.depth));
+        if (on.integrated - target).abs() > 1.0 {
+            failures.push(format!("{input}: governor on {:.2} LUFS", on.integrated));
+        }
+        if on.excess <= 0.0 {
+            failures.push(format!("{input}: no budget excess reported"));
+        }
+        if on.deficit > 0.0 {
+            failures.push(format!("{input}: deficit {:.2} LU", on.deficit));
         }
         if on.limiter_gr > 2.0 {
             failures.push(format!("{input}: limiter {:.2} dB", on.limiter_gr));
         }
         if off.depth <= allowed {
             failures.push(format!(
-                "{input}: guard: governor off depth {:.1}",
+                "{input}: the case is within budget: governor off depth {:.1}",
                 off.depth
             ));
         }
         if (off.integrated - target).abs() > 1.0 {
             failures.push(format!("{input}: governor off {:.2} LUFS", off.integrated));
-        }
-        if (on.integrated - recorded).abs() > 0.5 {
-            failures.push(format!(
-                "{input}: governor on {:.2} LUFS, recorded {recorded}",
-                on.integrated
-            ));
-        }
-        if on.deficit <= 0.0 || (on.deficit - (target - on.integrated)).abs() > 1.0 {
-            failures.push(format!(
-                "{input}: deficit {:.2} for {:.2} LUFS",
-                on.deficit, on.integrated
-            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -210,11 +208,13 @@ fn dense() -> Vec<f32> {
 }
 
 /// One minute of speech-like programme, then nine minutes of dense
-/// programme, streaming preset with a 0.5 dB budget (so the governor works
-/// on the dense part) at −23 LUFS input. After the step the short-term
-/// loudness overshoots the target by at most 1 LU; over the last five
-/// minutes the governor's density and cut stay within 0.5 dB (no limit
-/// cycle).
+/// programme, streaming preset with a 0.5 dB budget (so the dense part is
+/// over budget) at −23 LUFS input. After the step the short-term loudness
+/// overshoots the target by at most 1 LU; over the last five minutes the
+/// short-term loudness stays within ±1 LU of the target, the governor
+/// reports an excess at times (the dense part is over budget), and its
+/// density stays within 0.5 dB (no limit cycle; density is the only value
+/// the governor moves, the excess is a reading of the programme).
 #[test]
 fn step_to_dense_programme_does_not_oscillate() {
     let p = BroadcastParams {
@@ -233,8 +233,7 @@ fn step_to_dense_programme_does_not_oscillate() {
     let step = 60 * PER_S;
     let end = 600 * PER_S;
     let mut max_after = f64::NEG_INFINITY;
-    let mut max_cut = 0.0f64;
-    let (mut cut, mut density) = (Vec::new(), Vec::new());
+    let (mut excess, mut density, mut short) = (Vec::new(), Vec::new(), Vec::new());
     let mut states = Vec::new();
     for i in 0..end {
         if i < step {
@@ -247,34 +246,43 @@ fn step_to_dense_programme_does_not_oscillate() {
         let meters = bp.take_meters();
         if i >= step {
             max_after = max_after.max(m.short_term());
-            max_cut = max_cut.max(bp.governor().cut_db());
         }
         if i >= 300 * PER_S && i % PER_S == 0 {
-            cut.push(bp.governor().cut_db());
+            excess.push(meters.budget_excess_db);
             density.push(bp.governor().density_db());
+            short.push(m.short_term());
             states.push(meters.governor_state);
         }
     }
     let span = |v: &[f64]| {
         v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
     };
+    let lo = short.iter().cloned().fold(f64::MAX, f64::min);
+    let hi = short.iter().cloned().fold(f64::MIN, f64::max);
     println!(
-        "step: max short-term after {max_after:.2} LUFS (target {target}); largest cut \
-         {max_cut:.2} dB; last 5 min: cut from {:.2} dB, span {:.3} dB, density span {:.3} dB, \
-         last state {:?}",
-        cut[0],
-        span(&cut),
+        "step: max short-term after {max_after:.2} LUFS (target {target}); last 5 min: \
+         short-term {lo:.2} … {hi:.2} LUFS, excess from {:.2} dB, span {:.3} dB, density span \
+         {:.3} dB, last state {:?}",
+        excess[0],
+        span(&excess),
         span(&density),
         states.last()
     );
     assert!(max_after <= target + 1.0, "overshoot {max_after}");
-    assert!(max_cut > 0.0, "the governor should work on the dense part");
-    assert!(span(&cut) <= 0.5, "cut moves {}", span(&cut));
+    assert!(
+        lo >= target - 1.0 && hi <= target + 1.0,
+        "short-term {lo} … {hi}"
+    );
+    assert!(
+        excess.iter().any(|&e| e > 0.0),
+        "the dense part should be over budget"
+    );
     assert!(span(&density) <= 0.5, "density moves {}", span(&density));
 }
 
-/// Ten seconds of silence leave the governor's density and cut exactly as
-/// they were 200 ms into the silence, and it reports itself frozen.
+/// Ten seconds of silence leave the governor's density and budget excess
+/// exactly as they were 200 ms into the silence, and it reports itself
+/// frozen.
 #[test]
 fn silence_leaves_governor_unchanged() {
     let p = BroadcastParams {
@@ -296,49 +304,77 @@ fn silence_leaves_governor_unchanged() {
         buf.fill(0.0);
         bp.process(&mut buf);
     }
-    let (cut, density) = (bp.governor().cut_db(), bp.governor().density_db());
-    assert!(cut > 0.0, "the governor should be working here");
+    let (excess, density) = (bp.governor().budget_excess_db(), bp.governor().density_db());
+    assert!(excess > 0.0, "the governor should be working here");
     for _ in 20..10 * PER_S {
         buf.fill(0.0);
         bp.process(&mut buf);
     }
-    assert_eq!(bp.governor().cut_db(), cut);
+    assert_eq!(bp.governor().budget_excess_db(), excess);
     assert_eq!(bp.governor().density_db(), density);
     assert_eq!(bp.take_meters().governor_state, GovernorState::Frozen);
 }
 
-/// A brickwalled, square-like input (hard-clipped noise) with the target
-/// at −5 LUFS: the chain cannot get there within the budget, so the
-/// governor reports a deficit and holds the budget instead.
-#[test]
-fn unreachable_target_reports_deficit() {
+/// Brickwalled, square-like input (hard-clipped noise) through the
+/// streaming preset with a target the clip budget cannot hold.
+///
+/// - Target −7 LUFS: reachable, but only well over the 2 dB budget.
+///   Loudness comes first: the output reaches the target (within 1 LU,
+///   from 60 s), the governor reports the budget excess and the state
+///   `over-budget`, and no loudness deficit. The earlier law cut the AGC
+///   target here and reported a deficit instead.
+/// - Target −5 LUFS: out of reach under the −1 dBTP ceiling even with all
+///   density. The governor reports the excess and, with its density used
+///   up, the remaining deficit (a shortfall it does not cause).
+fn brickwalled(target: f32) -> (f64, strom_dsp::broadcast::BroadcastMeters, f64) {
     let p = BroadcastParams {
-        target_loudness_lufs: -5.0,
+        target_loudness_lufs: target,
         clip_budget_db: 2.0,
         ..BroadcastParams::preset(BroadcastPreset::Streaming, 4)
     };
     let mut x = pink(1 << 18, 2, FS as f64, 61);
     x.iter_mut().for_each(|v| *v = (*v * 4.0).clamp(-0.9, 0.9));
     let mut bp = processor(&p);
+    let mut m = meter();
     let mut looper = Looper::new(&x);
     let mut buf = vec![0.0f32; BLOCK * 2];
     let mut last = bp.take_meters();
-    for _ in 0..120 * PER_S {
+    for i in 0..120 * PER_S {
         looper.fill(&mut buf);
         bp.process(&mut buf);
+        if i >= 60 * PER_S {
+            m.process(&buf);
+        }
         last = bp.take_meters();
     }
     let g = bp.governor();
     println!(
-        "unreachable: deficit {:.2} LU, state {:?}, used {:.2} of 2 dB, cut {:.2}, depth {:.1}",
+        "brickwalled, target {target}: output {:.2} LUFS, excess {:.2} dB, deficit {:.2} LU, \
+         state {:?}, used {:.2} of 2 dB, density {:.2} dB, depth {:.1} dB",
+        m.integrated(),
+        last.budget_excess_db,
         last.loudness_deficit_lu,
         last.governor_state,
         g.budget_used_db(),
-        g.cut_db(),
+        g.density_db(),
         g.window_depth_db()
     );
-    assert!(last.loudness_deficit_lu > 0.0);
-    assert!(g.budget_used_db() <= 2.0 + 0.5, "{}", g.budget_used_db());
+    (m.integrated(), last, g.density_db())
+}
+
+#[test]
+fn unreachable_budget_reports_excess() {
+    let (out, last, _) = brickwalled(-7.0);
+    assert!((out + 7.0).abs() <= 1.0, "{out}");
+    assert!(last.budget_excess_db > 0.0);
+    assert_eq!(last.loudness_deficit_lu, 0.0);
+    assert_eq!(last.governor_state, GovernorState::OverBudget);
+
+    let (out, last, density) = brickwalled(-5.0);
+    assert!(out < -6.0, "{out}: expected out of reach");
+    assert!(last.budget_excess_db > 0.0);
+    assert_eq!(density, strom_dsp::governor::DENSITY_MAX_DB);
+    assert!(last.loudness_deficit_lu > 0.5);
 }
 
 /// With the governor off it reports `Off`, no deficit, and does nothing.
@@ -360,9 +396,10 @@ fn governor_off_is_neutral() {
         let m = bp.take_meters();
         assert_eq!(m.governor_state, GovernorState::Off);
         assert_eq!(m.loudness_deficit_lu, 0.0);
+        assert_eq!(m.budget_excess_db, 0.0);
     }
     assert_eq!(
-        (bp.governor().cut_db(), bp.governor().density_db()),
+        (bp.governor().budget_excess_db(), bp.governor().density_db()),
         (0.0, 0.0)
     );
 }

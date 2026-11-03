@@ -388,8 +388,10 @@ fn float_specs() -> &'static [FloatSpec] {
         v.push(s(
             "clip-budget",
             "Clip budget",
-            "How much clipping and limiting the governor allows (dB, 0 = cleanest); over it, the \
-             governor gives up loudness instead (reported as loudness-deficit)",
+            "How much clipping and limiting the governor aims for (dB, 0 = cleanest). Loudness \
+             comes first: when the budget cannot be met at the target loudness, the output stays \
+             at the target and the excess is reported (budget-excess, governor-state \
+             over-budget)",
             CLIP_BUDGET_RANGE_DB,
             FloatField::ClipBudget,
         ));
@@ -702,6 +704,7 @@ fn meter_structure(
         .field("bass-clip-gr", reduction(m.bass_clip_gain_reduction_db))
         .field("clip-depth", level(m.clip_depth_db))
         .field("loudness-deficit", reduction(m.loudness_deficit_lu))
+        .field("budget-excess", reduction(m.budget_excess_db))
         .field("governor-state", m.governor_state.nick())
         .build()
 }
@@ -920,7 +923,9 @@ impl ObjectImpl for StromDspBroadcastProcessor {
             v.push(common::bool_prop(
                 "governor-enabled",
                 "Governor enabled",
-                "Keep the clipper and the limiter within clip-budget, trading loudness when needed",
+                "Watch the clipper and the limiter against clip-budget: stop the output trim from \
+                 adding gain over budget at the target, add multiband density when the target is \
+                 out of reach; never lowers the loudness below the target",
                 d.governor_enabled,
             ));
             v.push(float("clip-budget"));

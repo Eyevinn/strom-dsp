@@ -155,8 +155,9 @@
 //! | `band-expander-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of expander attenuation, one per active band, lowest first |
 //! | `bass-clip-gr` | `gdouble` | dB | positive dB of bass-clipper reduction, largest since the last message |
 //! | `clip-depth` | `gdouble` | dB | energy the final clipper removed relative to its input, since the last message (−200 when nothing) |
-//! | `loudness-deficit` | `gdouble` | LU | how far the governor lets the output fall short of the target (≥ 0) |
-//! | `governor-state` | `gchararray` | | `off`, `frozen`, `free`, `hold`, `density`, `cut` or `release` |
+//! | `loudness-deficit` | `gdouble` | LU | how far the output stays under the target with all of the governor's density used (the AGC or trim range is the limit; ≥ 0) |
+//! | `budget-excess` | `gdouble` | dB | how far the clipper's and limiter's work is over `clip-budget` at the target loudness (≥ 0) |
+//! | `governor-state` | `gchararray` | | `off`, `frozen`, `free`, `hold`, `density`, `over-budget` or `release` |
 //!
 //! Silence (and anything not yet measured) reads [`SILENCE_DB`] (−200),
 //! never NaN or −∞.

@@ -1152,7 +1152,7 @@ fn reference_meters(
     out
 }
 
-const FIELDS: [&str; 18] = [
+const FIELDS: [&str; 19] = [
     "running-time",
     "stream-time",
     "input-momentary",
@@ -1170,6 +1170,7 @@ const FIELDS: [&str; 18] = [
     "bass-clip-gr",
     "clip-depth",
     "loudness-deficit",
+    "budget-excess",
     "governor-state",
 ];
 
@@ -1225,6 +1226,8 @@ fn check_message(r: &Received, m: &BroadcastMeters, num_bands: usize) {
     assert!((get_f64(s, "clip-depth") - clean(m.clip_depth_db)).abs() < 1e-9);
     let deficit = s.get::<f64>("loudness-deficit").unwrap();
     assert!(deficit >= 0.0 && (deficit - m.loudness_deficit_lu.max(0.0)).abs() < 1e-9);
+    let excess = s.get::<f64>("budget-excess").unwrap();
+    assert!(excess >= 0.0 && (excess - m.budget_excess_db.max(0.0)).abs() < 1e-9);
     assert_eq!(
         s.get::<&str>("governor-state").unwrap(),
         m.governor_state.nick(),

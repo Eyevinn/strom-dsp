@@ -38,7 +38,7 @@
 //! | `bass_im_db` | bass clipper IM feedback (dB of threshold reduction), mean |
 //! | `expander_gr_mean_db` | expander gain reduction (dB), mean over the active bands and the buffers |
 //! | `governor_deficit_lu` | loudness deficit the governor reports at the end |
-//! | `governor_cut_db`, `governor_density_db` | the governor's cut of the AGC target and its density at the end (dB) |
+//! | `governor_excess_db`, `governor_density_db` | the governor's budget excess and its density at the end (dB) |
 //!
 //! Spectral metrics are floored at [`SPECTRAL_FLOOR_DB`] and NMR at
 //! [`NMR_FLOOR_DB`]: below those a result is clean, and the exact value is
@@ -229,7 +229,7 @@ pub struct ChainRun {
     pub meters: Vec<BroadcastMeters>,
     /// The bass clipper's IM feedback (dB) after every buffer.
     pub bass_im: Vec<f64>,
-    /// Governor (cut dB, density dB) at the end.
+    /// Governor (budget excess dB, density dB) at the end.
     pub governor: (f64, f64),
     /// Event frames of the input.
     pub marks: Vec<usize>,
@@ -291,7 +291,7 @@ pub fn run_chain(params: &BroadcastParams, input: Vec<f32>, marks: Vec<usize>) -
         meters.push(m);
         bass_im.push(bp.bass_im_reduction_db());
     }
-    let governor = (bp.governor().cut_db(), bp.governor().density_db());
+    let governor = (bp.governor().budget_excess_db(), bp.governor().density_db());
     ChainRun {
         input,
         output,
@@ -450,7 +450,7 @@ fn stage_numbers(p: &BroadcastParams, run: &ChainRun, skip: usize, n: &mut Numbe
         "governor_deficit_lu",
         m.last().map_or(0.0, |x| x.loudness_deficit_lu),
     );
-    put("governor_cut_db", run.governor.0);
+    put("governor_excess_db", run.governor.0);
     put("governor_density_db", run.governor.1);
 }
 

@@ -142,9 +142,10 @@
 //! the limiter did (see [`crate::governor`] for the measures, the budget
 //! mapping and the law). Its outputs act here:
 //!
-//! - **Trim hold:** while the governor holds, the trim takes no positive
-//!   steps.
-//! - **Cut:** the AGC target offset is `trim − cut`.
+//! - **Trim hold:** while the governor holds (over budget with the output
+//!   on target), the trim takes no positive steps. Below the target it
+//!   never holds: loudness comes first, and the governor never lowers the
+//!   AGC target.
 //! - **Density:** every band's threshold is lowered by `density` and its
 //!   makeup raised by `density·(1 − 1/ratio)` before the parameters reach
 //!   the multiband (passed on in steps of at least 0.01 dB; the band
@@ -152,8 +153,8 @@
 //!
 //! The governor is frozen while the AGC, the clipper or the chain is
 //! bypassed or fading, and in pauses and below the gate (the trim's rule).
-//! Switching it off drops density and cut at once; the AGC's rates and the
-//! compressors' glides make that smooth.
+//! Switching it off drops density at once; the compressors' glides make
+//! that smooth.
 //!
 //! # Meters
 //!
@@ -170,7 +171,7 @@
 //! | bass-clip gain reduction | largest since the last read ([`crate::multiband::MultibandCompressor::take_bass_clip_gain_reduction_db`]) | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
 //! | clip depth | the clipper's removed / input energy since the last read | O(1) |
-//! | loudness deficit, governor state | [`crate::governor::ClipBudgetGovernor`] | O(1) |
+//! | loudness deficit, budget excess, governor state | [`crate::governor::ClipBudgetGovernor`] | O(1) |
 //!
 //! The input meters show what actually comes in: they are measured before
 //! the input gain, so `input_gain_db` does not change them.
@@ -583,8 +584,13 @@ pub struct BroadcastMeters {
     /// relative to the clipper's input; [`SILENCE_DB`] when nothing was
     /// removed.
     pub clip_depth_db: f64,
-    /// Loudness deficit the governor accepts (LU, ≥ 0).
+    /// Loudness deficit (LU, ≥ 0): how far the output stays under the
+    /// target although the governor has used all its density (the AGC
+    /// range or the trim's range are the limit); 0 otherwise.
     pub loudness_deficit_lu: f64,
+    /// Budget excess (dB of clip budget, ≥ 0): how far the clipper's and
+    /// the limiter's work is over the clip budget at the target loudness.
+    pub budget_excess_db: f64,
     /// What the governor is doing.
     pub governor_state: GovernorState,
 }
@@ -607,6 +613,7 @@ impl Default for BroadcastMeters {
             bass_clip_gain_reduction_db: 0.0,
             clip_depth_db: SILENCE_DB,
             loudness_deficit_lu: 0.0,
+            budget_excess_db: 0.0,
             governor_state: GovernorState::Off,
         }
     }
@@ -850,8 +857,6 @@ struct TrimInputs {
     max_cut_db: f64,
     /// Slower of the AGC's up and down rates (dB/s).
     slower_rate_db_s: f64,
-    /// The governor's cut of the AGC target (dB, ≥ 0).
-    cut_db: f64,
     /// The governor forbids adding gain.
     hold_up: bool,
 }
@@ -907,7 +912,7 @@ impl OutputTrim {
         let measured = lufs_from_mean_square(self.energy_sum.sum() / count);
         let error = p.target_lufs - measured;
         // Anti-windup: stop integrating into an AGC gain bound.
-        let want = p.target_lufs + self.trim_db - p.cut_db - agc.measured_lufs();
+        let want = p.target_lufs + self.trim_db - agc.measured_lufs();
         if (error > 0.0 && want >= p.max_gain_db) || (error < 0.0 && want <= -p.max_cut_db) {
             return self.trim_db;
         }
@@ -1412,7 +1417,7 @@ impl BroadcastProcessor {
         });
     }
 
-    /// The clip budget governor (for inspection: density, cut, state).
+    /// The clip budget governor (for inspection: density, excess, state).
     pub fn governor(&self) -> &ClipBudgetGovernor {
         &self.governor
     }
@@ -1491,6 +1496,11 @@ impl BroadcastProcessor {
                 SILENCE_DB
             },
             loudness_deficit_lu: if on { self.governor.deficit_lu() } else { 0.0 },
+            budget_excess_db: if on {
+                self.governor.budget_excess_db()
+            } else {
+                0.0
+            },
             governor_state: self.governor.state(),
         };
         self.meter_clip = ClipStats::default();
@@ -1668,7 +1678,6 @@ impl BroadcastProcessor {
                 .params
                 .agc_rate_up_db_s
                 .min(self.params.agc_rate_down_db_s) as f64,
-            cut_db: self.governor.cut_db(),
             hold_up: self.governor.holds_trim(),
         };
         let mut rest: &[f32] = chunk;
@@ -1680,9 +1689,7 @@ impl BroadcastProcessor {
                     .trim
                     .on_sub_block(&self.output_detector, &self.agc.inner, &trim_in);
                 self.on_governor_sub_block(&trim_in);
-                self.agc
-                    .inner
-                    .set_target_offset_db(trim - self.governor.cut_db());
+                self.agc.inner.set_target_offset_db(trim);
             }
             rest = tail;
         }
@@ -1715,7 +1722,6 @@ impl BroadcastProcessor {
             target_lufs: trim_in.target_lufs,
             output_lufs: self.trim.measured,
             density_available: self.multiband_fade.is_wet(),
-            slower_agc_rate_db_s: trim_in.slower_rate_db_s,
         };
         self.governor.on_sub_block(&inputs);
         self.sub_clip = ClipStats::default();
