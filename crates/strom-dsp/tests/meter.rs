@@ -16,7 +16,8 @@ use std::cell::Cell;
 use std::f64::consts::PI;
 
 use strom_dsp::meter::{
-    ChannelLayout, ChannelRole, LoudnessConfig, LoudnessMeter, MeterError, MAX_LOUDNESS_CHANNELS,
+    ChannelLayout, ChannelRole, CorrelationMeter, LoudnessConfig, LoudnessMeter, MeterError,
+    MAX_LOUDNESS_CHANNELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -698,4 +699,136 @@ fn ebur128_default_mode_allocates_histogram_mode_does_not() {
     );
     assert!(read_q > 0, "queue mode: loudness_range allocates");
     assert_eq!((add_h, read_h), (0, 0), "histogram mode never allocates");
+}
+
+// ---------------------------------------------------------------------------
+// Correlation meter.
+
+/// xorshift32 white noise, uniform in [-1, 1).
+struct Noise(u32);
+
+impl Noise {
+    fn next(&mut self) -> f32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+    }
+}
+
+fn sine(n: usize, f: f64, phase: f64) -> f32 {
+    (0.5 * (2.0 * PI * f * n as f64 / FS + phase).sin()) as f32
+}
+
+#[test]
+fn correlation_identical_inverted_independent() {
+    let n = 48_000;
+    let mut noise = Noise(1);
+    let x: Vec<f32> = (0..n).map(|_| noise.next() * 0.5).collect();
+    let neg: Vec<f32> = x.iter().map(|v| -v).collect();
+    let mut noise2 = Noise(0xdead_beef);
+    let y: Vec<f32> = (0..n).map(|_| noise2.next() * 0.5).collect();
+
+    let mut m = CorrelationMeter::new(FS as f32, 300.0);
+    m.process_pair(&x, &x);
+    assert_near("identical", m.correlation(), 1.0, 1e-12);
+    assert!(m.side_mid_ratio_db() <= -99.0);
+
+    m.reset();
+    m.process_pair(&x, &neg);
+    assert_near("inverted", m.correlation(), -1.0, 1e-12);
+    assert!(m.side_mid_ratio_db() >= 99.0);
+
+    m.reset();
+    m.process_pair(&x, &y);
+    assert!(
+        m.correlation().abs() < 0.05,
+        "independent: {}",
+        m.correlation()
+    );
+    assert_near("independent S/M", m.side_mid_ratio_db(), 0.0, 0.5);
+
+    // Interleaved path gives the same result.
+    let inter: Vec<f32> = x.iter().zip(&y).flat_map(|(&a, &b)| [a, b, 0.3]).collect();
+    let mut m2 = CorrelationMeter::new(FS as f32, 300.0);
+    m2.process_interleaved(&inter, 3);
+    assert_eq!(m2.correlation(), m.correlation());
+}
+
+#[test]
+fn correlation_of_phase_shifted_sines_is_cos_phi() {
+    for deg in [0.0f64, 60.0, 90.0, 120.0, 180.0] {
+        let mut m = CorrelationMeter::new(FS as f32, 300.0);
+        for n in 0..96_000 {
+            m.push(sine(n, 997.0, 0.0), sine(n, 997.0, deg.to_radians()));
+        }
+        assert_near(
+            &format!("{deg}°"),
+            m.correlation(),
+            deg.to_radians().cos(),
+            0.01,
+        );
+    }
+}
+
+#[test]
+fn correlation_silent_channel_is_zero() {
+    let mut m = CorrelationMeter::new(FS as f32, 300.0);
+    assert_eq!(m.correlation(), 0.0, "fresh meter");
+    for n in 0..48_000 {
+        m.push(sine(n, 1000.0, 0.0), 0.0);
+    }
+    assert_eq!(m.correlation(), 0.0, "right silent");
+    m.reset();
+    for n in 0..48_000 {
+        m.push(0.0, sine(n, 1000.0, 0.0));
+    }
+    assert_eq!(m.correlation(), 0.0, "left silent");
+    m.reset();
+    for _ in 0..48_000 {
+        m.push(0.0, 0.0);
+    }
+    assert_eq!(m.correlation(), 0.0, "both silent");
+    assert_eq!(m.side_mid_ratio_db(), 0.0);
+}
+
+#[test]
+fn correlation_integration_time_and_side_mid_ratio() {
+    // After a switch from identical to inverted noise, with constant channel
+    // energies ⟨LR⟩ decays as P·(2e^(−t/τ) − 1), so r(τ) = 2/e − 1.
+    let tau_ms = 50.0;
+    let mut m = CorrelationMeter::new(FS as f32, tau_ms);
+    let mut noise = Noise(7);
+    for _ in 0..48_000 {
+        let v = noise.next();
+        m.push(v, v);
+    }
+    let tau = (tau_ms * 0.001 * FS as f32) as usize;
+    for _ in 0..tau {
+        let v = noise.next();
+        m.push(v, -v);
+    }
+    assert_near(
+        "r(τ)",
+        m.correlation(),
+        2.0 / std::f64::consts::E - 1.0,
+        0.03,
+    );
+    assert_eq!(m.integration_ms(), 50.0);
+
+    // R = L/2: S = L/4, M = 3L/4, so ⟨S²⟩/⟨M²⟩ = 1/9 = −9.54 dB.
+    let mut m = CorrelationMeter::new(FS as f32, 300.0);
+    for n in 0..48_000 {
+        let v = sine(n, 440.0, 0.0);
+        m.push(v, 0.5 * v);
+    }
+    assert_near(
+        "S/M",
+        m.side_mid_ratio_db(),
+        20.0 * (1.0f64 / 3.0).log10(),
+        1e-6,
+    );
+    assert_near("r", m.correlation(), 1.0, 1e-9);
 }
