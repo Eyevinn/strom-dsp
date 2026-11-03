@@ -102,8 +102,7 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
         "agc-enabled" | "multiband-enabled" | "limiter-enabled" => true.to_value(),
-        // ebu-r128 keeps the element defaults (±12 dB); the others are wider/faster.
-        "agc-max-gain" | "agc-max-cut" if nick == "ebu-r128" => f(12.0),
+        // Every preset has ±24 dB of AGC range; ebu-r128 rides slower.
         "agc-max-gain" | "agc-max-cut" => f(24.0),
         "agc-rate-up" if nick == "ebu-r128" => f(1.0),
         "agc-rate-up" => f(3.0),

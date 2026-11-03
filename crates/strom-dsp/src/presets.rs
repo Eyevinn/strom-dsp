@@ -157,7 +157,7 @@ impl LimiterParams {
 ///
 /// | Preset | target | ceiling | AGC max gain / cut | AGC rate up / down | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` |
 /// |---|---|---|---|---|---|---|---|---|
-/// | `EbuR128` | −23 LUFS | −1 dBTP | 12 / 12 dB | 1 / 3 dB/s | −50 | −18 dB | 2 | 200 |
+/// | `EbuR128` | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 | −18 dB | 2 | 200 |
 /// | `AtscA85` | −24 LKFS | −2 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −19 dB | 2 | 200 |
 /// | `Streaming` | −16 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −11 dB | 2 | 200 |
 /// | `Speech` | −18 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −40 | −11 dB | 1.5 | 150 |
@@ -166,15 +166,19 @@ impl LimiterParams {
 ///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
 ///   TD1008 range for streaming (−16 LUFS, −1 dBTP) and strom-dsp's own
 ///   speech target (−18 LUFS, −1 dBTP).
-/// - **AGC range and rates.** `EbuR128` is the element's default, so it
-///   keeps the element's documented defaults: ±12 dB covers programme delivered
-///   between −35 and −11 LUFS for its −23 LUFS target, and 1 dB/s up,
-///   3 dB/s down is a slow "fader", not a compressor (well below the
-///   syllable rate), cutting faster than boosting so a sudden loud item comes
-///   down within seconds while a quiet one rises gently. The other presets
-///   sit further from typical delivery levels (streaming −16 LUFS is 7 LU
-///   above broadcast-level input; ATSC A/85 needs more than 12 dB of cut
-///   for −10 LUFS input), so they get ±24 dB and 3 / 6 dB/s: still a slow
+/// - **AGC range and rates.** Every preset gets ±24 dB of range: the AGC
+///   must cover the input-to-target distance (12 dB for −35 LUFS input to
+///   −23 LUFS) *plus* the level the multiband and limiter take away after
+///   it, which the output-referenced trim adds to the AGC target (up to
+///   6 dB). With ±12 dB, −35 LUFS input to `EbuR128` used the whole range
+///   just to reach the target and had no room left for that make-up.
+///   `EbuR128` keeps 1 dB/s up, 3 dB/s down: a slow "fader", not a
+///   compressor (well below the syllable rate), cutting faster than
+///   boosting so a sudden loud item comes down within seconds while a quiet
+///   one rises gently. The other presets sit further from typical delivery
+///   levels (streaming −16 LUFS is 7 LU above broadcast-level input; ATSC
+///   A/85 needs more than 12 dB of cut for −10 LUFS input), so they also
+///   get 3 / 6 dB/s: still a slow
 ///   rider (a 12 dB correction takes 2 … 4 s), fast enough to land within
 ///   the first 10 s of a programme at −35 … −10 LUFS input. All four pass
 ///   the chain acceptance test (60 s programme at −35, −23
@@ -269,7 +273,7 @@ impl BroadcastPreset {
     /// See the type docs.
     fn agc_range(self) -> (f32, f32, f32, f32) {
         match self {
-            Self::EbuR128 => (12.0, 12.0, 1.0, 3.0),
+            Self::EbuR128 => (24.0, 24.0, 1.0, 3.0),
             Self::AtscA85 | Self::Streaming | Self::Speech => (24.0, 24.0, 3.0, 6.0),
         }
     }
@@ -487,7 +491,7 @@ mod tests {
         assert_eq!(p.target_loudness_lufs, -23.0);
         assert_eq!(p.true_peak_ceiling_dbtp, -1.0);
         assert!(p.agc_enabled && p.multiband_enabled && p.limiter_enabled);
-        assert_eq!((p.agc_max_gain_db, p.agc_max_cut_db), (12.0, 12.0));
+        assert_eq!((p.agc_max_gain_db, p.agc_max_cut_db), (24.0, 24.0));
         assert_eq!((p.agc_rate_up_db_s, p.agc_rate_down_db_s), (1.0, 3.0));
         assert_eq!(p.agc_gate_lufs, -50.0);
         assert_eq!(p.multiband_drive_db, 0.0);

@@ -20,8 +20,8 @@
 //! | `target-loudness` | Float | LUFS | −40 … −5 | −23 | PLAYING |
 //! | `true-peak-ceiling` | Float | dBTP | −12 … 0 | −1 | PLAYING |
 //! | `agc-enabled` | Boolean | | | `true` | PLAYING |
-//! | `agc-max-gain` | Float | dB | 0 … 30 | 12 | PLAYING |
-//! | `agc-max-cut` | Float | dB | 0 … 30 | 12 | PLAYING |
+//! | `agc-max-gain` | Float | dB | 0 … 30 | 24 | PLAYING |
+//! | `agc-max-cut` | Float | dB | 0 … 30 | 24 | PLAYING |
 //! | `agc-rate-up` | Float | dB/s | 0.1 … 20 | 1 | PLAYING |
 //! | `agc-rate-down` | Float | dB/s | 0.1 … 40 | 3 | PLAYING |
 //! | `agc-gate` | Float | LUFS | −80 … −20 | −50 | PLAYING |
