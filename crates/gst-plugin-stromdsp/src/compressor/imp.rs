@@ -7,7 +7,11 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
-use strom_dsp::compressor::{CompressorDetector, DEFAULT_RMS_WINDOW_MS, RMS_WINDOW_RANGE};
+use strom_dsp::compressor::{CompressorDetector, RMS_WINDOW_RANGE};
+use strom_dsp::presets::{
+    COMPRESSOR_BROADCAST_AUTO_MAKEUP, COMPRESSOR_BROADCAST_DETECTOR,
+    COMPRESSOR_BROADCAST_RMS_WINDOW_MS,
+};
 use strom_dsp::{Compressor, CompressorParams};
 
 use super::StromDspCompressorDetector;
@@ -31,7 +35,7 @@ impl common::Bypassable for Settings {
 struct Settings {
     enabled: bool,
     params: CompressorParams,
-    /// Level detector (default peak).
+    /// Level detector (default rms).
     detector: StromDspCompressorDetector,
     /// RMS averaging time (ms, 1 … 100).
     rms_window: f32,
@@ -39,15 +43,25 @@ struct Settings {
     auto_makeup: bool,
 }
 
+/// The element's defaults are the library's broadcast preset
+/// (`strom_dsp::presets`), not `CompressorParams::default()`.
 impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
-            params: CompressorParams::default(),
-            detector: StromDspCompressorDetector::Peak,
-            rms_window: DEFAULT_RMS_WINDOW_MS,
-            auto_makeup: false,
+            params: CompressorParams::broadcast(),
+            detector: broadcast_detector(),
+            rms_window: COMPRESSOR_BROADCAST_RMS_WINDOW_MS,
+            auto_makeup: COMPRESSOR_BROADCAST_AUTO_MAKEUP,
         }
+    }
+}
+
+/// [`COMPRESSOR_BROADCAST_DETECTOR`] as the GLib enum.
+fn broadcast_detector() -> StromDspCompressorDetector {
+    match COMPRESSOR_BROADCAST_DETECTOR {
+        CompressorDetector::Peak => StromDspCompressorDetector::Peak,
+        CompressorDetector::Rms => StromDspCompressorDetector::Rms,
     }
 }
 
@@ -77,7 +91,7 @@ impl ObjectSubclass for StromDspCompressor {
 impl ObjectImpl for StromDspCompressor {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            let d = CompressorParams::default();
+            let d = CompressorParams::broadcast();
             vec![
                 common::bool_prop(
                     "enabled",
@@ -136,27 +150,24 @@ impl ObjectImpl for StromDspCompressor {
                     d.knee,
                 ),
                 // Additions after the listening tests (phase 1b).
-                glib::ParamSpecEnum::builder_with_default(
-                    "detector",
-                    StromDspCompressorDetector::Peak,
-                )
-                .nick("Detector")
-                .blurb(
-                    "Level detector: peak (linked sample peak) or rms (RMS over \
+                glib::ParamSpecEnum::builder_with_default("detector", broadcast_detector())
+                    .nick("Detector")
+                    .blurb(
+                        "Level detector: peak (linked sample peak) or rms (RMS over \
                      rms-window, the classic programme/speech choice). Both read a \
                      steady sine at its peak, so the threshold means the same in both",
-                )
-                .readwrite()
-                .controllable()
-                .mutable_playing()
-                .build(),
+                    )
+                    .readwrite()
+                    .controllable()
+                    .mutable_playing()
+                    .build(),
                 common::float_prop(
                     "rms-window",
                     "RMS window",
                     "Averaging time of the rms detector (ms); ignored by the peak detector",
                     RMS_WINDOW_RANGE.0,
                     RMS_WINDOW_RANGE.1,
-                    DEFAULT_RMS_WINDOW_MS,
+                    COMPRESSOR_BROADCAST_RMS_WINDOW_MS,
                 ),
                 common::bool_prop(
                     "auto-makeup",
@@ -164,7 +175,7 @@ impl ObjectImpl for StromDspCompressor {
                     "Add the static gain reduction at -18 dBFS (sine peak) as makeup, \
                      so the level stays roughly constant when threshold, ratio or knee \
                      change; makeup-gain applies on top",
-                    false,
+                    COMPRESSOR_BROADCAST_AUTO_MAKEUP,
                 ),
             ]
         });

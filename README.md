@@ -35,12 +35,12 @@ the loudest channel and applied to all, so the stereo image never moves.
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
 | `enabled` | bool | | | `true` |
-| `open-threshold` | float | dB | −80 … 0 | −20 |
-| `close-threshold` | float | dB | −80 … 0 | −30 |
-| `attack` | float | ms | 0.01 … 200 | 5 |
-| `hold` | float | ms | 0 … 1000 | 50 |
-| `release` | float | ms | 1 … 2000 | 100 |
-| `reduction` | float | dB | −80 … 0 | −60 |
+| `open-threshold` | float | dB | −80 … 0 | −45 |
+| `close-threshold` | float | dB | −80 … 0 | −50 |
+| `attack` | float | ms | 0.01 … 200 | 3 |
+| `hold` | float | ms | 0 … 1000 | 120 |
+| `release` | float | ms | 1 … 2000 | 200 |
+| `reduction` | float | dB | −80 … 0 | −35 |
 
 Phase 1b additions (additive; every phase 1 property is unchanged):
 
@@ -78,22 +78,42 @@ expansion:
 - hysteresis, hold and the fades work as in gate mode;
 - `mode=gate` is bit-identical to the phase 1 behaviour.
 
+**Why these defaults.** The defaults make the gate close cleanly in speech
+pauses on its own. They are strom-dsp's own choice from textbook and broadcast
+practice (`strom_dsp::presets`, see `PROVENANCE.md`). The levels assume EBU
+R68/R128 alignment, where speech averages around −20 dBFS.
+- `open-threshold` −45 / `close-threshold` −50: well below speech, so quiet
+  word endings keep the gate open, and above a typical studio noise floor
+  (< −50 dBFS). The 5 dB hysteresis stops breaths or room tone near the
+  threshold from making the gate chatter.
+- `attack` 3 ms: faster than a consonant or plosive onset (about 5–10 ms), so
+  word starts are not clipped, but not so fast that the gain rise clicks.
+- `hold` 120 ms: bridges the short gaps inside and between words (under about
+  100 ms), so the gate does not chatter mid-sentence.
+- `release` 200 ms: closes the full 35 dB range in 200 ms, a gentle fade that
+  follows a natural room decay and is done well inside a speech pause.
+- `reduction` −35 dB: a −50 dBFS noise floor drops to −85 dBFS, which is
+  inaudible, without the "dead air" contrast and pumping of a full mute.
+- `mode` `gate`, `ratio` 2: a plain gate is the predictable choice out of the
+  box. 1:2 is the gentlest textbook expansion slope, ready for anyone who
+  switches to `expander`.
+
 ### `stromdsp-compressor`: feed-forward compressor with soft knee
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
 | `enabled` | bool | | | `true` |
-| `threshold` | float | linear amplitude | 0 … 1 | 0.5 |
-| `ratio` | float | ratio (4 = 4:1) | 1 … 100 | 1 |
-| `attack` | float | ms | 0.01 … 10000 | 20 |
-| `release` | float | ms | 0.01 … 10000 | 100 |
+| `threshold` | float | linear amplitude | 0 … 1 | 0.125 (−18 dBFS) |
+| `ratio` | float | ratio (4 = 4:1) | 1 … 100 | 3 |
+| `attack` | float | ms | 0.01 … 10000 | 10 |
+| `release` | float | ms | 0.01 … 10000 | 150 |
 | `makeup-gain` | float | linear multiplier | 0 … 100 | 1 |
-| `knee` | float | linear factor | 0 … 1 | 0.0625 |
+| `knee` | float | linear factor | 0 … 1 | 0.5 |
 
 **Knee definition.**
 - `knee` is a linear amplitude factor `k`.
 - The soft-knee region spans from `threshold · k` to `threshold / k`, so the
-  knee width in dB is `W = −40·log10(k)`. The default 0.0625 gives about 48 dB.
+  knee width in dB is `W = −40·log10(k)`. The default 0.5 gives about 12 dB.
 - `k = 1` is a hard knee. Values below 0.001 are treated as 0.001.
 - Inside the knee the gain follows the quadratic interpolation of Giannoulis,
   Massberg & Reiss (JAES 2012).
@@ -105,7 +125,7 @@ in PLAYING.
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
-| `detector` | enum `StromDspCompressorDetector` | `peak` (0), `rms` (1) | | `peak` |
+| `detector` | enum `StromDspCompressorDetector` | `peak` (0), `rms` (1) | | `rms` |
 | `rms-window` | float | ms | 1 … 100 | 10 |
 | `auto-makeup` | bool | | | `false` |
 
@@ -120,6 +140,29 @@ in PLAYING.
 - **Detector hold:** the detector holds its level for min(20 ms, release)
   after the level falls, so bass is not distorted at fast attack and release
   times. The release starts after that hold.
+
+**Why these defaults.** The defaults make the compressor do gentle speech and
+programme levelling out of the box. They are strom-dsp's own choice from
+textbook and broadcast practice (`strom_dsp::presets`, see `PROVENANCE.md`).
+- `threshold` 0.125 (−18.06 dBFS): the EBU R68 alignment level. Speech at
+  −23 LUFS (EBU R128) sits around it, so loud syllables are compressed and
+  quiet speech is not. The value 2⁻³ is exact in `f32`.
+- `ratio` 3: a moderate ratio for speech and programme. It levels audibly
+  without the flattened sound of 4:1 and above.
+- `attack` 10 ms: lets the first few milliseconds of a transient through,
+  which keeps articulation, while still catching each syllable.
+- `release` 150 ms: shorter than the syllable spacing (200–250 ms), so the
+  gain recovers between syllables. It is long compared with bass periods
+  (20 ms at 50 Hz), so it neither distorts nor pumps.
+- `knee` 0.5 (≈ 12 dB, from −24 to −12 dBFS): compression sets in gradually
+  (Giannoulis et al. 2012).
+- `makeup-gain` 1: inserting the element does not raise the level.
+- `detector` `rms`, `rms-window` 10 ms: an average level follows perceived
+  loudness better than the sample peak, the classic choice for speech and
+  programme. 10 ms covers a period of 100 Hz and matches the gate's detector.
+- `auto-makeup` `false`: the element never raises the level by itself. The
+  automatic makeup is being redesigned, and this default may be revisited
+  after that lands.
 
 ### `stromdsp-equalizer`: parametric EQ, up to 8 biquad bands
 
@@ -156,6 +199,14 @@ shelves as well. `gain` applies to peaking and the shelves only. Frequency is
 clamped just below Nyquist. Parameter changes glide smoothly, and type changes
 crossfade, so there are no clicks.
 
+**Why these defaults.** The equalizer is neutral by default: every band is
+`off` (type 0) with 0 dB gain, so the element is a transparent pass-through
+until an operator shapes it. Any built-in curve would be wrong for most sources,
+and equalisation is always a decision for a specific microphone, room or
+programme. The parked band settings make a first edit easy: 1000 Hz is the
+middle of the speech band, Q 0.707 is the Butterworth value (a moderate width
+for shelves and peaks), and 4 bands is a common size for a channel-strip EQ.
+
 ### `stromdsp-limiter`: lookahead peak limiter
 
 | Property | Type | Unit | Range | Default |
@@ -163,7 +214,7 @@ crossfade, so there are no clicks.
 | `enabled` | bool | | | `true` |
 | `threshold` | float | dB (ceiling) | −60 … 0 | −1 |
 | `attack` | float | ms | 0.01 … 50 | 1 |
-| `release` | float | ms | 1 … 2000 | 100 |
+| `release` | float | ms | 1 … 2000 | 200 |
 | `lookahead` | float | ms | 0 … 20 | 5 |
 
 **Ceiling guarantee.** No output sample exceeds `threshold`, for any input and
@@ -180,6 +231,19 @@ material.
 
 **Disabled behaviour.** With `enabled=false` the limiter applies unity gain but
 **keeps the delay**, so the latency does not jump when an operator toggles it.
+
+**Why these defaults.** The defaults give a programme-safe peak ceiling. They
+are strom-dsp's own choice from textbook and broadcast practice
+(`strom_dsp::presets`, see `PROVENANCE.md`).
+- `threshold` −1 dBFS: the EBU R128 maximum true-peak level (−1 dBTP). This is
+  a sample-peak ceiling, so inter-sample peaks can still exceed it slightly.
+- `attack` 1 ms: a smooth gain ramp instead of a step on each peak. It fits
+  well inside the lookahead, so the ceiling still holds.
+- `release` 200 ms: suited to programme material. It is long compared with
+  bass periods, so there is no low-frequency distortion, and short enough to
+  recover between phrases without audible pumping.
+- `lookahead` 5 ms: 5 ms of latency, which Strom relies on. It covers the
+  attack with margin.
 
 ## Phase 1b elements
 

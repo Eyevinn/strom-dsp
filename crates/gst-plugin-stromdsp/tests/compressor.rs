@@ -4,7 +4,7 @@ mod util;
 
 use gst::glib;
 use gst::prelude::*;
-use strom_dsp::{Compressor, CompressorParams};
+use strom_dsp::{presets, Compressor, CompressorParams};
 use util::{Action, FORMATS, TOL};
 
 fn params() -> CompressorParams {
@@ -51,7 +51,12 @@ fn compressor_matches_library() {
             fpb,
             &actions,
         );
+        // The element starts from the broadcast preset for the setter-based
+        // properties it does not set here (detector, rms-window, auto-makeup).
         let mut dsp = Compressor::new();
+        dsp.set_detector(presets::COMPRESSOR_BROADCAST_DETECTOR);
+        dsp.set_rms_window(presets::COMPRESSOR_BROADCAST_RMS_WINDOW_MS);
+        dsp.set_auto_makeup(presets::COMPRESSOR_BROADCAST_AUTO_MAKEUP);
         dsp.set_params(&p);
         let reference = util::run_reference(
             dsp,

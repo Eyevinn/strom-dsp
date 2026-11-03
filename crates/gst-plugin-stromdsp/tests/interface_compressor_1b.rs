@@ -1,9 +1,10 @@
 //! Interface test of the compressor additions after the listening tests:
-//! `detector` (GLib enum `StromDspCompressorDetector`, `peak` = 0 default,
-//! `rms` = 1), `rms-window` (Float, ms, 1 … 100, default 10) and
-//! `auto-makeup` (Boolean, default false). All readable, writable,
-//! controllable and mutable in PLAYING. The phase 1 properties are checked,
-//! unchanged, by `tests/interface.rs`.
+//! `detector` (GLib enum `StromDspCompressorDetector`, `peak` = 0,
+//! `rms` = 1 default), `rms-window` (Float, ms, 1 … 100, default 10) and
+//! `auto-makeup` (Boolean, default false). The defaults are the broadcast
+//! preset (`strom_dsp::presets`). All readable, writable,
+//! controllable and mutable in PLAYING. The phase 1 properties are checked
+//! by `tests/interface.rs`.
 
 mod util;
 
@@ -73,7 +74,7 @@ fn compressor_detector_property() {
         .expect("a GLib enum");
     assert_eq!(
         ps.default_value::<StromDspCompressorDetector>().unwrap(),
-        StromDspCompressorDetector::Peak
+        StromDspCompressorDetector::Rms
     );
     let values: Vec<(i32, &str)> = ps
         .enum_class()
@@ -85,12 +86,12 @@ fn compressor_detector_property() {
 
     assert_eq!(
         e.property::<StromDspCompressorDetector>("detector"),
-        StromDspCompressorDetector::Peak
+        StromDspCompressorDetector::Rms
     );
-    e.set_property("detector", StromDspCompressorDetector::Rms);
+    e.set_property("detector", StromDspCompressorDetector::Peak);
     assert_eq!(
         e.property::<StromDspCompressorDetector>("detector"),
-        StromDspCompressorDetector::Rms
+        StromDspCompressorDetector::Peak
     );
     // Settable by nick, as from gst-launch-1.0.
     for (nick, v) in [
