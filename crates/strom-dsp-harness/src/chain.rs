@@ -8,8 +8,10 @@
 //! - **Programme cases** (AGC on): the signal is scaled to the preset's
 //!   target loudness (pre-levelled, so the AGC need not travel and the run
 //!   can stay short), then the preset runs as it is.
-//! - **Low-latency cases** (`*_low_latency`): the same with the shortest
-//!   lookaheads (spike guard: none).
+//! - **Low-latency cases** (`*_low_latency`): the same in the low latency
+//!   mode ([`LatencyMode::Low`]: no spike guard or bass clipper lookahead,
+//!   the clipper's low setting, 0.6 ms limiter lookahead). Every other case
+//!   runs in the standard mode.
 //! - **Drive cases** (AGC off): the signal's sample peak is set this many dB
 //!   over the true-peak ceiling, so the multiband and the limiter work hard
 //!   on a steady signal (aliasing and intermodulation).
@@ -21,7 +23,7 @@
 //!
 //! | Key | Meaning |
 //! |---|---|
-//! | `latency_ms` | total latency of the chain (ms) in this configuration |
+//! | `latency_ms` | total latency of the chain (ms) in this configuration (its latency mode) |
 //! | `loudness_error_lu` | integrated output − target (programme cases) |
 //! | `lra_lu` | loudness range of the output |
 //! | `max_true_peak_dbtp` | largest output true peak |
@@ -31,6 +33,12 @@
 //! | `alias_spur_db` | [`metrics::alias_spur_db`] (15 kHz tone) |
 //! | `smpte_imd_db`, `ccif_imd_db` | [`metrics::smpte_imd_db`], [`metrics::ccif_imd_db`] |
 //! | `sideband_50hz_dbc`, `sideband_100hz_dbc` | [`metrics::sideband_dbc`] at 3 kHz ± 50 / ± 100 Hz (bass into highs) |
+//! | `clip_depth_db`, `clip_depth_max_db` | final clipper: removed / input energy over the measured part (the mean of the chain's per-buffer clip depth, energy-weighted), and the largest per-buffer value; floored at [`CLIP_DEPTH_FLOOR_DB`] |
+//! | `bass_clip_gr_mean_db`, `bass_clip_gr_max_db` | bass clipper gain reduction (dB, largest per buffer): mean and largest |
+//! | `bass_im_db` | bass clipper IM feedback (dB of threshold reduction), mean |
+//! | `expander_gr_mean_db` | expander gain reduction (dB), mean over the active bands and the buffers |
+//! | `governor_deficit_lu` | loudness deficit the governor reports at the end |
+//! | `governor_cut_db`, `governor_density_db` | the governor's cut of the AGC target and its density at the end (dB) |
 //!
 //! Spectral metrics are floored at [`SPECTRAL_FLOOR_DB`] and NMR at
 //! [`NMR_FLOOR_DB`]: below those a result is clean, and the exact value is
@@ -62,9 +70,9 @@
 
 use std::collections::BTreeMap;
 
-use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
+use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::presets::BroadcastPreset;
-use strom_dsp::spike_guard::{self, SpikeGuard, SpikeGuardParams};
+use strom_dsp::spike_guard::{SpikeGuard, SpikeGuardParams};
 use strom_dsp::Processor;
 
 use crate::agc_support::reference_loudness;
@@ -77,6 +85,8 @@ use strom_dsp::meter::ChannelLayout;
 pub const SPECTRAL_FLOOR_DB: f64 = -120.0;
 /// Floor of the NMR numbers (dB), for the same reason.
 pub const NMR_FLOOR_DB: f64 = -80.0;
+/// Floor of the clip depth numbers (dB): below it nothing was clipped.
+pub const CLIP_DEPTH_FLOOR_DB: f64 = -120.0;
 
 /// Sample rate of every case.
 pub const FS: f64 = 48_000.0;
@@ -172,16 +182,17 @@ pub fn case_params(preset: BroadcastPreset, case: &Case) -> BroadcastParams {
         p.agc_enabled = false;
     }
     if case.low_latency {
-        p.spike_guard_lookahead_ms = spike_guard::LOW_LATENCY_LOOKAHEAD_MS;
+        LatencyMode::Low.apply(&mut p);
     }
     p
 }
 
-/// `p` with every dynamic stage neutral: spike guard, AGC and limiter
-/// bypassed (their
-/// dry paths are exact delays), the multiband kept at ratio 1 with no
-/// drive or makeup (an all-pass with the same crossovers), input gain 0.
-/// The output is the input with the chain's delay and phase only.
+/// `p` with every dynamic stage neutral: spike guard, AGC, clipper and
+/// limiter bypassed (their dry paths are exact delays), the governor off,
+/// the multiband kept at ratio 1 with no drive or makeup, no expansion and
+/// the bass clipper off (an all-pass with the same crossovers and the same
+/// bass delay), input gain 0. The output is the input with the chain's
+/// delay and phase only.
 pub fn linear_params(p: &BroadcastParams) -> BroadcastParams {
     let mut q = *p;
     q.input_gain_db = 0.0;
@@ -193,6 +204,12 @@ pub fn linear_params(p: &BroadcastParams) -> BroadcastParams {
         b.ratio = 1.0;
         b.makeup_db = 0.0;
     }
+    for e in &mut q.band_expanders {
+        e.ratio = 1.0;
+    }
+    q.bass_clipper_enabled = false;
+    q.clipper_enabled = false;
+    q.governor_enabled = false;
     q.limiter_enabled = false;
     q
 }
@@ -208,6 +225,12 @@ pub struct ChainRun {
     pub latency: usize,
     /// Limiter gain reduction (dB) after every [`BLOCK`]-frame buffer.
     pub limiter_gr: Vec<f64>,
+    /// The chain's meters after every [`BLOCK`]-frame buffer.
+    pub meters: Vec<BroadcastMeters>,
+    /// The bass clipper's IM feedback (dB) after every buffer.
+    pub bass_im: Vec<f64>,
+    /// Governor (cut dB, density dB) at the end.
+    pub governor: (f64, f64),
     /// Event frames of the input.
     pub marks: Vec<usize>,
     /// The input through [`linear_params`] (aligned with `output`).
@@ -257,16 +280,26 @@ pub fn run_chain(params: &BroadcastParams, input: Vec<f32>, marks: Vec<usize>) -
     bp.configure(FS as f32, CH);
     let latency = bp.latency_frames();
     let mut output = input.clone();
-    let mut limiter_gr = Vec::with_capacity(output.len() / (BLOCK * CH) + 1);
+    let blocks = output.len() / (BLOCK * CH) + 1;
+    let mut limiter_gr = Vec::with_capacity(blocks);
+    let mut meters = Vec::with_capacity(blocks);
+    let mut bass_im = Vec::with_capacity(blocks);
     for c in output.chunks_mut(BLOCK * CH) {
         bp.process(c);
-        limiter_gr.push(bp.take_meters().limiter_gain_reduction_db);
+        let m = bp.take_meters();
+        limiter_gr.push(m.limiter_gain_reduction_db);
+        meters.push(m);
+        bass_im.push(bp.bass_im_reduction_db());
     }
+    let governor = (bp.governor().cut_db(), bp.governor().density_db());
     ChainRun {
         input,
         output,
         latency,
         limiter_gr,
+        meters,
+        bass_im,
+        governor,
         marks,
         linear: Vec::new(),
     }
@@ -357,7 +390,68 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
         bih.then(|| metrics::sideband_dbc(o, CH, FS, from, 3_000.0, 100.0)),
     );
     spike_numbers(p, run, skip, &mut n);
+    stage_numbers(p, run, skip, &mut n);
     n
+}
+
+/// The clipper's, bass clipper's, expanders' and governor's numbers
+/// (module docs), from the chain's meters over the measured part.
+fn stage_numbers(p: &BroadcastParams, run: &ChainRun, skip: usize, n: &mut Numbers) {
+    let from = (skip / BLOCK).min(run.meters.len());
+    let m = &run.meters[from..];
+    let count = m.len().max(1) as f64;
+    // `+ 0.0` turns a negative zero (no reduction) into 0.
+    let mut put = |k: &str, v: f64| {
+        n.insert(k.to_string(), Some(v + 0.0));
+    };
+    let floor = |d: f64| d.max(CLIP_DEPTH_FLOOR_DB);
+    let energy = m
+        .iter()
+        .map(|x| 10f64.powf(x.clip_depth_db / 10.0))
+        .sum::<f64>()
+        / count;
+    put("clip_depth_db", floor(10.0 * energy.max(1e-30).log10()));
+    put(
+        "clip_depth_max_db",
+        floor(
+            m.iter()
+                .map(|x| x.clip_depth_db)
+                .fold(f64::NEG_INFINITY, f64::max),
+        ),
+    );
+    put(
+        "bass_clip_gr_mean_db",
+        m.iter().map(|x| x.bass_clip_gain_reduction_db).sum::<f64>() / count,
+    );
+    put(
+        "bass_clip_gr_max_db",
+        m.iter()
+            .map(|x| x.bass_clip_gain_reduction_db)
+            .fold(0.0, f64::max),
+    );
+    put(
+        "bass_im_db",
+        run.bass_im[from..].iter().sum::<f64>() / count,
+    );
+    let bands = p.num_bands.max(1);
+    put(
+        "expander_gr_mean_db",
+        m.iter()
+            .map(|x| {
+                x.band_expander_gain_reduction_db[..bands]
+                    .iter()
+                    .sum::<f64>()
+                    / bands as f64
+            })
+            .sum::<f64>()
+            / count,
+    );
+    put(
+        "governor_deficit_lu",
+        m.last().map_or(0.0, |x| x.loudness_deficit_lu),
+    );
+    put("governor_cut_db", run.governor.0);
+    put("governor_density_db", run.governor.1);
 }
 
 /// The spike guard's numbers (module docs), `None` when it is off.
