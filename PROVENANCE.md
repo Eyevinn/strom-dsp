@@ -108,6 +108,30 @@ notch, APF, peakingEQ, lowShelf and highShelf (cookbook Q form, not S).
   Biquad outputs are denormal-flushed below 1e-15, and output is clamped to the
   finite f32 range.
 
+### Dynamics building blocks (`crates/strom-dsp/src/dynamics/`)
+
+Public, reusable primitives; the gate, compressor and limiter are built from
+them. Time constants everywhere: `a = exp(−1/(τ·fs))` (63.2 % after τ).
+
+| Block | What | Reference |
+|---|---|---|
+| `OnePole` | one-pole smoother toward a target, snaps exactly when close | J. O. Smith III, one-pole low-pass (impulse-invariant RC) |
+| `AttackRelease` | one-pole with separate rise/fall coefficients | Giannoulis et al. 2012, "branching" smoother |
+| `PeakEnvelope` | peak follower, instant attack, exponential release, denormal flush | Giannoulis et al. 2012, level detection |
+| `GainComputer` | static soft-knee curve, knee per spec 3.3 | Giannoulis et al. 2012 |
+| `GateStateMachine` | hysteresis thresholds + hold counter | Zölzer, *DAFX*, dynamics chapter |
+| `DelayLine` | multichannel interleaved ring buffer | standard circular buffer, own design |
+| `SlidingMin` | sliding-window minimum, monotonic deque in a preallocated ring | standard ascending-minima technique |
+| `BoxAverage` | exact integer moving average, floor-rounded | J. O. Smith III, moving average |
+| `RampSmoother` | two cascaded `BoxAverage`s in fixed point; output never exceeds any bound holding for its last A+1 inputs | own derivation (limiter ceiling proof) |
+| `frame` | linked-channel peak / gain-apply helpers with mono/stereo paths | own design |
+
+Gate and compressor work in 64-frame blocks (peaks → serial envelope chain →
+apply gains). While parameters are steady, the compressor skips `log10` below
+the knee and `exp` at zero reduction. Between `configure`/`reset` and the first
+processed frame, `set_params` applies instantly (no glide, no cross-fade), so
+the call order never changes the output.
+
 ### Limiter (`crates/strom-dsp/src/limiter.rs`)
 
 Linked lookahead sample-peak limiter, derived from first principles from the
