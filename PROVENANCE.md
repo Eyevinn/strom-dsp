@@ -151,6 +151,36 @@ types, and the per-level `mul_add` semantics.
   bands-as-lanes for mono, both textbook pipelining ideas implemented from
   first principles (see `docs/PERFORMANCE.md`).
 
+### Explicit SIMD: dynamics (`src/dynamics/frame.rs`, `vmath.rs`, `SegmentedMin`)
+
+The gate, compressor and limiter dispatch at runtime through `fearless_simd`
+(written from its docs and source).
+
+- **Exactness:** vector kernels use only IEEE-exact operations: add, sub, mul,
+  div, compare/select, round-to-integer and bit operations, with no FMA. Every
+  level, including the scalar fallback, is therefore bit-identical, which
+  `tests/simd_levels.rs` verifies. Linked peaks use a compare-select maximum
+  that ignores NaN.
+- **`20·log10(x)`** (`vmath.rs`): split exponent and mantissa from the IEEE
+  fields, centre the mantissa in [√½, √2), then ln m = 2·atanh(s) with
+  s = (m−1)/(m+1), as a power series through s¹⁵/15 (Abramowitz & Stegun,
+  *Handbook of Mathematical Functions*, 4.1.27).
+- **`10^(−y/20)`:** computed as 2^t with t = n + f and n = round(t). 2^f =
+  e^(f·ln 2) is a Taylor series through u¹¹/11!, and 2^n goes directly into
+  the exponent field (textbook range reduction).
+- **Accuracy:** tested against `f64::log10`/`exp`. Maximum errors are 2.3e-13
+  dB (log) and 4.3e-13 dB (gain); the test asserts < 1e-9 dB.
+- **Sliding minimum (`SegmentedMin`):** prefix and suffix minima over segments
+  of the window length, following M. van Herk, *Pattern Recognition Letters*
+  13(7), 1992, and J. Gil & M. Werman, *IEEE Trans. PAMI* 15(5), 1993. It uses
+  comparisons only, so it is the exact minimum and the limiter's ceiling proof
+  is unchanged. Chosen for its flat worst-case cost: about 28 % faster than
+  the deque under heavy limiting and about 7 % slower on light material.
+- **`AttackRelease::step_block`:** the same one-pole written as `a·y + k·x`, to
+  shorten the loop-carried dependency (own design).
+- **Considered and rejected:** division by invariant integers via
+  multiplication (Granlund & Montgomery, PLDI 1994); no measurable gain.
+
 ### Dynamics building blocks (`crates/strom-dsp/src/dynamics/`)
 
 Public, reusable primitives; the gate, compressor and limiter are built from
