@@ -30,3 +30,12 @@ debug = "line-tables-only"
 # keep profiler and callgrind output attributable to source lines.
 [profile.bench]
 debug = "line-tables-only"
+
+# The test suite runs long signals (seconds of audio, THD and loudness grids,
+# proptests). Unoptimised it takes over 10 minutes; opt-level 2 keeps
+# debug-assertions and overflow checks on but makes it practical in CI.
+[profile.test]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2
