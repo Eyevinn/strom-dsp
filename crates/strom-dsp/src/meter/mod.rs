@@ -10,6 +10,9 @@
 //! - [`BandCorrelation`]: the same correlation in a low, a mid and a high
 //!   band, split by identical Linkwitz-Riley LR4 crossovers
 //!   ([`crate::filter::Crossover`]) on L and R.
+//! - [`LoudnessDetector`]: our own real-time BS.1770 detector (K-weighting
+//!   designed for any sample rate, O(1) momentary and short-term readings
+//!   from 10 ms sub-block running sums), for driving a gain every block.
 //! - [`MonoDetector`]: classifies a stereo pair as [`StereoState::Mono`],
 //!   [`StereoState::Stereo`] or [`StereoState::Inverted`], with hysteresis.
 //!
@@ -19,8 +22,16 @@
 
 mod band;
 mod correlation;
+mod kweighting;
 mod loudness;
 mod mono;
+
+pub use kweighting::{
+    k_weighting, k_weighting_prototypes, lufs_from_mean_square, mean_square_from_lufs,
+    AnalogBiquad, LoudnessDetector, BS1770_PRE_FILTER_48K, BS1770_RLB_48K, DETECTOR_RATE_RANGE,
+    LOUDNESS_OFFSET_DB, MOMENTARY_SUB_BLOCKS, SHORT_TERM_SUB_BLOCKS, SILENCE_LUFS, SUB_BLOCK_MS,
+};
+pub(crate) use kweighting::{History, WindowSum};
 
 pub use band::{BandCorrelation, CORRELATION_BANDS, DEFAULT_BAND_SPLITS_HZ};
 pub use correlation::{CorrelationMeter, DEFAULT_CORRELATION_MS};
