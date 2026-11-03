@@ -47,6 +47,27 @@ duration. For example, 5 µs per 10 ms buffer is 0.05 %. Results land in
 on the same machine. Wall-clock numbers depend on the machine and its load:
 compare runs only on the same, otherwise idle, machine.
 
+**Current numbers.** These are criterion medians on an Apple M5 Pro (NEON),
+48 kHz stereo, 480 frames (10 ms). The machine was under heavy unrelated load
+(load average about 12), so treat them as upper bounds.
+
+| Bench | Case | Time |
+|---|---|---|
+| `strip` | gate / compressor / limiter / strip | 2.19 / 7.91 / 5.72 / 18.3 µs |
+| `strip` | EQ 4-band mono / stereo / 8 ch / stereo automated | 2.06 / 2.16 / 8.26 / 5.91 µs |
+| `broadcast` | full chain, 4 bands, with meters | 78.3 µs |
+| `truepeak` | 5 ms lookahead | 18.8 µs |
+| `multiband` | 4 bands | 46.7 µs |
+| `agc` | detector / AGC / ebur128 read every block | 1.55 / 1.95 / 263 µs |
+| `filters` | Butterworth 4 / 8, LR4 crossover 3 / 5 bands | 1.46 / 2.18 / 7.37 / 13.6 µs |
+| `sampling` | oversampler 4× up+down, 4× peaks; STFT 1024/256 | 17.6 / 9.44 / 13.3 µs |
+| `meter` | loudness / + true peak / correlation / bands / mono detector | 10.7 / 17.4 / 1.23 / 12.2 / 1.70 µs |
+| `sidechain` | keyed compressor / expander / keyed expander | 9.32 / 3.42 / 4.53 µs |
+| `ducker` | mono key / proportional / 16 kHz key / no key | 4.52 / 5.29 / 2.52 / 3.04 µs |
+| `dynamics_1b` | de-esser split / wide | 12.7 / 12.6 µs |
+| `channel_tools` | delay 0 / 20 ms / 8 ch / crossfading; stereo default / width+balance | 0.16 / 0.22 / 3.42 / 3.24; 0.08 / 0.55 µs |
+| `cleanup` | off / DC + HP4 / 10 hum notches / all | 0.10 / 2.28 / 5.20 / 7.19 µs |
+
 ## Instruction counts (gungraun, Linux)
 
 | Bench | Covers |

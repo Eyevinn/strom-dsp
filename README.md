@@ -871,11 +871,28 @@ true-peak limiter, broadcast chain). Run a single one with
 `cargo bench -p strom-dsp --bench <name>`. "% of one core" is the time per
 buffer divided by the buffer's duration (480 frames at 48 kHz are 10 ms).
 
-<!-- BENCHMARK NUMBERS -->
+These are criterion medians on an Apple M5 Pro (aarch64, NEON) at 48 kHz
+stereo with 480-frame (10 ms) buffers. They were measured while the machine
+was under heavy unrelated load (load average about 12), so treat them as
+upper bounds. Re-run on an idle machine for exact figures.
 
-For the full benchmark list, instruction-count benchmarks (gungraun), the
-RealtimeSanitizer tests, SIMD design notes and the denormal policy, see
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+| Benchmark | Time per 10 ms buffer | % of one core |
+|---|---|---|
+| **Channel strip** (gate → compressor → 4-band EQ → limiter) | 18.3 µs | 0.18 % |
+| **Broadcast processor** (AGC → 4-band multiband → true-peak limiter, with meters) | 78.3 µs | 0.78 % |
+| Gate / compressor / 4-band EQ / limiter | 2.2 / 7.9 / 2.2 / 5.7 µs | 0.02–0.08 % |
+| True-peak limiter (5 ms lookahead) | 18.8 µs | 0.19 % |
+| Multiband compressor (4 bands) | 46.7 µs | 0.47 % |
+| AGC with BS.1770 detector | 2.0 µs | 0.02 % |
+| De-esser | 12.6 µs | 0.13 % |
+| Ducker (48 kHz mono key) | 4.5 µs | 0.05 % |
+| Cleanup (DC, 4th-order high-pass, 10 hum notches) | 7.2 µs | 0.07 % |
+| Delay (20 ms) / stereo (width + balance) | 0.2 / 0.5 µs | < 0.01 % |
+| Loudness meter (with true peak) | 17.4 µs | 0.17 % |
+
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, and covers
+the instruction-count benchmarks (gungraun) and the RealtimeSanitizer tests.
+The SIMD design and the denormal policy are in [PROVENANCE.md](PROVENANCE.md).
 
 ## Contributing
 
