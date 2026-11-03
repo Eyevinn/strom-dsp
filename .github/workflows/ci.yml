@@ -60,8 +60,83 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Default features only: the rtsan test and the gungraun bench are
+      # behind features (required-features), so this needs neither the
+      # sanitizer runtime nor Valgrind. They have their own jobs below.
       - name: Test
         run: cargo test --all
+
+      - name: Docs
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all
+
+  msrv:
+    name: MSRV (strom-dsp, Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      # Only the library: the plugin needs Rust 1.92 (gstreamer-rs 0.25), and
+      # some of its locked transitive dependencies need newer still.
+      - name: Check
+        run: cargo check -p strom-dsp --all-targets
+
+  rtsan:
+    name: RealtimeSanitizer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # Read by rtsan-standalone's build script: link the sanitizer runtime
+      # (pre-built, downloaded with curl) and turn the scopes on.
+      RTSAN_ENABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Real-time safety tests
+        run: cargo test -p strom-dsp --features rtsan --test rtsan
+      # The canary allocates inside a real-time scope. It must abort; if it
+      # passes, the sanitizer is not active and the step above proved nothing.
+      - name: Sanitizer canary (must fail)
+        shell: bash
+        run: |
+          if cargo test -p strom-dsp --features rtsan --test rtsan -- \
+               --ignored --exact canary_allocation_is_detected; then
+            echo "::error::RTSan canary passed: the sanitizer is not active"
+            exit 1
+          fi
+          echo "Canary aborted as expected: RTSan is active."
+
+  gungraun:
+    name: Instruction counts (gungraun)
+    runs-on: ubuntu-latest
+    env:
+      # Must match the `gungraun` version pinned in crates/strom-dsp/Cargo.toml.
+      GUNGRAUN_VERSION: 0.20.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+      - name: Install gungraun-runner
+        run: cargo install --locked gungraun-runner --version "$GUNGRAUN_VERSION"
+      - name: Clippy (feature-gated targets)
+        run: cargo clippy -p strom-dsp --features rtsan,gungraun --all-targets -- -D warnings
+      # Report-only for now: no regression limits are configured, so this
+      # step fails only if a benchmark cannot run.
+      - name: Benchmark
+        run: cargo bench -p strom-dsp --features gungraun --bench strip_gungraun
 
   licenses:
     name: cargo-deny licences
