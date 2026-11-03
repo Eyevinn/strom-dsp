@@ -5,8 +5,8 @@
 //! keeps the lookahead delay, so the latency does not jump when toggled.
 //!
 //! Latency: the LATENCY query is answered by adding the lookahead to upstream's
-//! min and max. The lookahead is converted the same way the library converts it
-//! (`round(lookahead_ms · rate / 1000)` frames) and then to time, rounded up, so
+//! min and max. The lookahead is converted to frames by the library's own
+//! `strom_dsp::limiter::lookahead_frames` and then to time, rounded up, so
 //! the reported latency is never smaller than the real delay. Before caps are
 //! known it is reported from the millisecond value directly. Timestamps pass
 //! through unchanged.
@@ -44,14 +44,14 @@ fn apply(dsp: &mut Limiter, p: &LimiterParams) {
     dsp.set_params(p);
 }
 
-/// Lookahead delay as time. With a known `rate` this mirrors the library's
-/// frame rounding, then rounds up to whole nanoseconds.
+/// Lookahead delay as time. With a known `rate` the frame count comes from the
+/// library (`lookahead_frames`), then it is rounded up to whole nanoseconds.
 pub(crate) fn lookahead_latency(lookahead_ms: f32, rate: u32) -> gst::ClockTime {
     let ms = f64::from(lookahead_ms.max(0.0));
     if rate == 0 {
         return gst::ClockTime::from_nseconds((ms * 1_000_000.0).ceil() as u64);
     }
-    let frames = (ms * f64::from(rate) / 1000.0).round() as u64;
+    let frames = strom_dsp::limiter::lookahead_frames(lookahead_ms, rate as f32) as u64;
     gst::ClockTime::from_nseconds(
         (frames * gst::ClockTime::SECOND.nseconds()).div_ceil(u64::from(rate)),
     )
