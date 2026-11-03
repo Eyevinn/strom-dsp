@@ -126,9 +126,30 @@ Public, reusable primitives; the equalizer is built from them.
 - `Biquad`: Direct Form I filter with f64 state for mono or interleaved
   multichannel data, with `set_coefficients` and `ramp_to` (stable throughout,
   because the stability triangle is convex). Never allocates after `new`.
-- Internal `Lanes<L>` (`lanes.rs`): element-wise `[f64; L]` wrapper that the
-  compiler vectorises, kept small so it can be swapped for an explicit SIMD
-  type.
+- Internal helpers in `lanes.rs`: thin wrappers over `fearless_simd` vectors,
+  used by the explicit kernels below.
+
+### Explicit SIMD: biquad/EQ kernels (`src/biquad/kernel.rs`, `src/lanes.rs`)
+
+Written from the documentation, source and examples of `fearless_simd` 1.2
+(Apache-2.0 OR MIT): `dispatch!`, `Simd::vectorize`, the `f64x2/f64x4/f64x8`
+types, and the per-level `mul_add` semantics.
+
+- **Dispatch:** the level is detected once in `configure`/`new` and dispatched
+  once per `process` call. `set_simd_level` lets hosts and tests override it.
+- **Lanes:** channels are lanes at the level's native f64 width (f64x2 on
+  NEON/SSE, f64x4 on AVX2, f64x8 on AVX-512), with padded remainder groups. The
+  structure-of-arrays state layout does not depend on the level, so the level
+  can change between calls.
+- **Evaluation order:** `s = x2·b2 + x1·b1 − y2·a2`, `t = x·b0 + s`,
+  `y = t − y1·a1`. The `y[n−1]` recurrence is a single multiply-add.
+- **FMA policy:** fused on NEON/AVX2/AVX-512, unfused on SSE. The scalar
+  fallback follows the platform baseline. Levels with the same policy are
+  bit-identical; tests check this for 1–64 channels through ramps,
+  crossfades and type changes.
+- **Rejected after measurement:** a skewed (software-pipelined) schedule and
+  bands-as-lanes for mono, both textbook pipelining ideas implemented from
+  first principles (see `docs/PERFORMANCE.md`).
 
 ### Dynamics building blocks (`crates/strom-dsp/src/dynamics/`)
 
