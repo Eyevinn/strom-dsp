@@ -28,6 +28,17 @@
 //! alternate the AR estimate and the interpolation; the caller chooses the
 //! number of rounds.
 //!
+//! With [`ArMethod::Burg`] the first estimate uses Burg's method (J. P.
+//! Burg, *Maximum entropy spectral analysis*, PhD thesis, Stanford 1975;
+//! S. M. Kay, *Modern Spectral Estimation*, 1988, ch. 7) on the known samples
+//! only: the forward and backward prediction errors run over each stretch of
+//! known samples between the unknowns, and the reflection coefficient of
+//! each order is `−2·Σ f·b / Σ (f² + b²)` summed over all stretches. The
+//! clipped values never enter the model, and Burg needs no data window,
+//! which biases short-window estimates towards a flatter spectrum. Later
+//! rounds use the autocorrelation method on the whole window with the
+//! interpolated values in it.
+//!
 //! **Constraints** (Abel & Smith 1991: a clipped sample's true value lies
 //! beyond the clip level, on the same side). Each unknown has a box
 //! `lo_i ≤ x_i ≤ hi_i`. The constrained least-squares problem is approximated
@@ -45,9 +56,28 @@ pub const WHITE_NOISE: f64 = 1e-5;
 /// Most solves in the active-set loop.
 pub const MAX_ACTIVE_SET_ROUNDS: usize = 4;
 
+/// How the AR coefficients are estimated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArMethod {
+    /// Autocorrelation method on the whole window (Hann window,
+    /// Levinson–Durbin), alternated with the interpolation.
+    #[default]
+    Autocorrelation,
+    /// Burg's method on the known samples only (the stretches between the
+    /// unknowns), summed over the stretches.
+    Burg,
+}
+
 /// Preallocated scratch for one interpolation problem.
 #[derive(Debug, Clone, Default)]
 pub struct LsarSolver {
+    /// Estimation method.
+    pub method: ArMethod,
+    /// Burg forward and backward prediction errors.
+    fwd: Vec<f64>,
+    bwd: Vec<f64>,
+    /// Stretches of known samples `(first, last)` for Burg.
+    segs: Vec<(usize, usize)>,
     p_max: usize,
     n_max: usize,
     m_max: usize,
@@ -89,6 +119,10 @@ impl LsarSolver {
     /// order up to `p_max`. Allocates.
     pub fn new(n_max: usize, m_max: usize, p_max: usize) -> Self {
         Self {
+            method: ArMethod::Autocorrelation,
+            fwd: vec![0.0; n_max],
+            bwd: vec![0.0; n_max],
+            segs: Vec::with_capacity(m_max + 1),
             p_max,
             n_max,
             m_max,
@@ -180,6 +214,69 @@ impl LsarSolver {
         Ok(p)
     }
 
+    /// Burg estimate of AR(`p`) coefficients into `self.a` from the known
+    /// samples of `w` (every index not in `unknown`), the reflection
+    /// coefficients summed over the stretches between the unknowns.
+    fn estimate_burg(&mut self, w: &[f64], unknown: &[usize], p: usize) -> Result<usize, LsarError> {
+        let n = w.len();
+        self.segs.clear();
+        let mut start = 0usize;
+        for &u in unknown.iter().chain(std::iter::once(&n)) {
+            if u > start && u - start > p {
+                self.segs.push((start, u - 1));
+            }
+            start = u + 1;
+        }
+        self.a[..=p].fill(0.0);
+        self.a[0] = 1.0;
+        self.fwd[..n].copy_from_slice(w);
+        self.bwd[..n].copy_from_slice(w);
+        let mut energy = 0.0;
+        for &(a, e) in &self.segs {
+            for v in &w[a..=e] {
+                energy += v * v;
+            }
+        }
+        if energy == 0.0 || self.segs.is_empty() {
+            return Ok(p);
+        }
+        if !energy.is_finite() {
+            return Err(LsarError::Numerical);
+        }
+        for m in 1..=p {
+            let (mut num, mut den) = (0.0, 0.0);
+            for &(a, e) in &self.segs {
+                for k in a + m..=e {
+                    num += self.fwd[k] * self.bwd[k - 1];
+                    den += self.fwd[k] * self.fwd[k] + self.bwd[k - 1] * self.bwd[k - 1];
+                }
+            }
+            let positive = den > 0.0;
+            if !positive {
+                break;
+            }
+            let k = -2.0 * num / den;
+            if !k.is_finite() || k.abs() >= 1.0 {
+                break;
+            }
+            for &(a, e) in &self.segs {
+                let mut j = e;
+                while j >= a + m {
+                    let f = self.fwd[j];
+                    self.fwd[j] = f + k * self.bwd[j - 1];
+                    self.bwd[j] = self.bwd[j - 1] + k * f;
+                    j -= 1;
+                }
+            }
+            self.tmp[..m].copy_from_slice(&self.a[..m]);
+            for j in 1..m {
+                self.a[j] = self.tmp[j] + k * self.tmp[m - j];
+            }
+            self.a[m] = k;
+        }
+        Ok(p)
+    }
+
     /// Interpolate the unknowns of `w` in place.
     ///
     /// `unknown[i]` are window indices (ascending, distinct), `lo[i] ≤ hi[i]`
@@ -213,8 +310,11 @@ impl LsarSolver {
         if m == 0 {
             return Ok(());
         }
-        for _ in 0..rounds.max(1) {
-            let p = self.estimate(w, p)?;
+        for round in 0..rounds.max(1) {
+            let p = match self.method {
+                ArMethod::Burg if round == 0 => self.estimate_burg(w, unknown, p)?,
+                _ => self.estimate(w, p)?,
+            };
             self.coef_autocorr(p);
             self.free.clear();
             self.free_slot.clear();
@@ -415,6 +515,36 @@ mod tests {
         let hi = vec![10.0; unknown.len()];
         let mut s = LsarSolver::new(n, 16, 16);
         s.interpolate(&mut w, &unknown, &lo, &hi, 16, 3).unwrap();
+        for &i in &unknown {
+            assert!(
+                (w[i] - truth[i]).abs() < 1e-2,
+                "{i}: {} vs {}",
+                w[i],
+                truth[i]
+            );
+        }
+    }
+
+    /// Burg on the known samples alone (one round) fills the same gap.
+    #[test]
+    fn burg_fills_gap_in_two_tones() {
+        let n = 200;
+        let truth: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                (0.07 * t).sin() + 0.5 * (0.31 * t + 1.0).sin()
+            })
+            .collect();
+        let mut w = truth.clone();
+        let unknown: Vec<usize> = (95..105).collect();
+        for &i in &unknown {
+            w[i] = 0.0;
+        }
+        let lo = vec![-10.0; unknown.len()];
+        let hi = vec![10.0; unknown.len()];
+        let mut s = LsarSolver::new(n, 16, 16);
+        s.method = ArMethod::Burg;
+        s.interpolate(&mut w, &unknown, &lo, &hi, 16, 1).unwrap();
         for &i in &unknown {
             assert!(
                 (w[i] - truth[i]).abs() < 1e-2,

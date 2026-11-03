@@ -903,7 +903,10 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
   Restoration*, Springer 1998, ch. 5 (the LSAR normal equations
   `(A_Uᵀ A_U)·x_U = −A_Uᵀ e₀`). AR coefficients by the autocorrelation method
   (Hann window, Levinson–Durbin), as in any linear-prediction textbook
-  (e.g. Rabiner & Schafer, *Digital Processing of Speech Signals*).
+  (e.g. Rabiner & Schafer, *Digital Processing of Speech Signals*), and
+  Burg's method (J. P. Burg, *Maximum entropy spectral analysis*, PhD
+  thesis, Stanford 1975; S. M. Kay, *Modern Spectral Estimation*,
+  Prentice Hall 1988, ch. 7).
 - **Constraint:** J. S. Abel, J. O. Smith III, "Restoring a clipped signal",
   ICASSP 1991: a clipped sample's true value lies beyond the clip level, on
   the same side. Also related: US 8,126,578 (expired; status not legally
@@ -950,10 +953,24 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
   - constrained least squares by a bounded active-set loop (≤ 4 solves; a
     bound is never released), then projection into the box; the box upper
     edge is a cap (default +12 dB over the clipped value);
-  - AR order 48 at 48 kHz (scaled with the rate, 12…64), 5 ms of context
-    on each side, 2 rounds of estimate and interpolation, up to 8 samples
-    of later runs in the window solved jointly; Cholesky in f64 with
-    1e-10 relative diagonal loading, 1e-5 white-noise correction on lag 0;
+  - AR order 48 at 48 kHz (scaled with the rate, 12…64), 10 ms of context
+    before a run and up to 5 ms after it, 2 rounds: Burg on the known
+    samples only (reflection coefficients summed over the stretches between
+    the unknowns), then the autocorrelation method on the window with the
+    rebuilt samples; up to 8 samples of later runs in the window solved
+    jointly; Cholesky in f64 with 1e-10 relative diagonal loading, 1e-5
+    white-noise correction on lag 0. Chosen by measurement on synthetic
+    material and recorded speech (VCTK, LibriSpeech, LibriVox) clipped 3, 6
+    and 10 dB: Burg first raised the mean SDR improvement on the clipped
+    samples of recorded speech from 12.4/8.9/7.3 dB to 13.6/9.7/7.5 dB, the
+    10 ms past context to 14.4/10.1/8.0 dB; AR orders 24, 32 and 64 and a
+    third round were no better overall. Consistency-constrained sparse
+    methods (consistent IHT, SPADE) were not built: they work on frames of
+    tens of milliseconds with many transform iterations each, beyond the
+    5 ms latency and the per-buffer CPU budget;
+  - latency setting 3, 5 (default) or 10 ms; a run is rebuilt once 5 ms of
+    future context has arrived, or when its first sample is about to leave
+    the delay line, whichever comes first;
   - runs longer than 2 ms (`max-run`) pass through unchanged and are
     counted.
 
