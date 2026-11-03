@@ -749,6 +749,44 @@ it relies on explicitly, so these defaults do not change Strom's sound. The
 compressor's `auto-makeup` default is `false`, so inserting the element never
 raises the level by itself.
 
+### Measurement harness (`crates/strom-dsp-harness`, tests only)
+
+A test-support crate, never linked into the plugin. It runs fixed synthetic
+signals through the broadcast chain per preset and compares a fixed set of
+numbers with a checked-in baseline (`baseline.json`). All signals are
+generated in code with fixed seeds. The programme generators of
+`tests/broadcast.rs` live in `tests/programme_support/` and are shared with
+the harness.
+
+- **Signals:** sine; exponential sweep (A. Farina, "Simultaneous
+  measurement of impulse response and distortion with a swept-sine
+  technique", AES 108th Convention, 2000: the phase law); the SMPTE
+  RP 120 pair (60 Hz + 7 kHz, 4:1); the CCIF twin tone (19 + 20 kHz); a
+  bass-into-highs pair (50 Hz + 3 kHz at −20 dB); a band-limited square
+  wave through a first-order high-pass (tilted tops), and a hard-clipped
+  sine synthesised from its Fourier series (no aliasing in the source);
+  speech-like noise (band-limited pink noise under an own word and
+  syllable envelope, with room tone between words), with and without
+  clicks; the music-like and sport-like programmes of the chain tests.
+- **Metrics:**
+  - loudness, LRA and true peak through `ebur128` (ITU-R BS.1770,
+    EBU Tech 3342);
+  - spectra with a 4-term Blackman-Harris window (F. J. Harris, "On the use
+    of windows for harmonic analysis with the discrete Fourier transform",
+    Proc. IEEE 66(1), 1978);
+  - SMPTE RP 120 and CCIF intermodulation, sidebands around a carrier, and
+    non-harmonic spurs of a tone (aliasing);
+  - clip depth (removed energy per 10 ms block relative to the programme,
+    own definition) and gain reduction split into "on peaks" and "on
+    programme" around known event frames (own definition);
+  - noise-to-mask ratio after K. Brandenburg, "Evaluation of quality for
+    audio encoding at low bit rates", AES 82nd Convention, 1987, with our
+    own simple masking model: integer Bark bands (Zwicker & Terhardt's
+    critical-band-rate formula, in Zwicker & Fastl, *Psychoacoustics*),
+    per-band least-squares gain matching, a spreading function of
+    −10/−25 dB per Bark and a 10 dB offset. **The masking model is a test
+    metric only**; nothing in the processing or control path uses it.
+
 ### Performance and real-time-safety tooling
 
 The `tests/rtsan*.rs` files use RealtimeSanitizer through `rtsan-standalone`, written
@@ -802,12 +840,13 @@ deliberately not set (see "Engineering policies").
 |---|---|---|
 | `fearless_simd` 1.2 | `strom-dsp` (SIMD with runtime dispatch) | Apache-2.0 OR MIT |
 | `ebur128` 0.1 | `strom-dsp` meter (BS.1770 loudness, gating, LRA, sample and true peak) | MIT |
-| `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT) | MIT / MIT OR Apache-2.0 |
+| `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT); harness spectra | MIT / MIT OR Apache-2.0 |
 | `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
 | `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
 | `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
 | `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
 | `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
+| `serde_json` 1 | measurement harness only (baseline file; already in the tree through `criterion`) | MIT OR Apache-2.0 |
 | `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
 | RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
 | `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |

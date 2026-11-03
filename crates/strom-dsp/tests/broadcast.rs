@@ -20,6 +20,7 @@
 //!   same bounds, and no short-term overshoot after the pause.
 
 mod agc_support;
+mod programme_support;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -927,23 +928,9 @@ mod acceptance {
         BroadcastParams::preset(BroadcastPreset::from_nick(name).unwrap(), 4)
     }
 
-    /// A music-like programme: pink noise with a 4 Hz level modulation, two
-    /// tones, and short speech-like gaps (a 10.9 s loop).
+    /// The music-like programme of [`programme_support::music_programme`].
     fn programme(ch: usize, fs: f64) -> Vec<f32> {
-        let frames = 1 << 19; // ~10.9 s at 48 kHz
-        let mut x = pink(frames, ch, fs, 21);
-        for n in 0..frames {
-            let t = n as f64 / fs;
-            // 4 Hz syllable-like envelope, with a 300 ms gap every 2.7 s.
-            let syl = 0.6 + 0.4 * (2.0 * PI * 4.0 * t).sin();
-            let gap = if (t % 2.7) < 0.3 { 0.05 } else { 1.0 };
-            let tones = 0.4 * (2.0 * PI * 110.0 * t).sin() + 0.2 * (2.0 * PI * 1_320.0 * t).sin();
-            for c in 0..ch {
-                let v = &mut x[n * ch + c];
-                *v = ((*v as f64 * 0.5 + tones) * syl * gap) as f32;
-            }
-        }
-        x
+        programme_support::music_programme(ch, fs)
     }
 
     /// Run the three input levels; assert ±1 LU and true peak ≤ ceiling +
@@ -1058,53 +1045,7 @@ mod peaky_acceptance {
     /// [`programme`] with a single-sample click every `click_s` seconds
     /// instead of every 1.1 s (same bed, hits and bursts).
     pub(super) fn programme_with_clicks(ch: usize, fs: f64, click_s: f64) -> Vec<f32> {
-        let frames = 1 << 19;
-        let mut x = pink(frames, ch, fs, 31);
-        x.iter_mut().for_each(|v| *v *= 0.12);
-        let mut rng = Rng::new(17);
-        // Hits: every 250 ms ± 20 ms.
-        let mut at = 0.0f64;
-        while at < frames as f64 / fs - 0.3 {
-            let start = (at * fs) as usize;
-            let amp = 0.42 + 0.18 * rng.uniform();
-            for k in 0..(0.25 * fs) as usize {
-                let n = start + k;
-                if n >= frames {
-                    break;
-                }
-                let t = k as f64 / fs;
-                let thump = (2.0 * PI * 60.0 * t).sin() * (-t / 0.06).exp();
-                let burst = (-t / 0.012).exp();
-                for c in 0..ch {
-                    let v = amp * (thump + burst * rng.bipolar());
-                    x[n * ch + c] += v as f32;
-                }
-            }
-            at += 0.25 + 0.04 * (rng.uniform() - 0.5);
-        }
-        // fs/4 bursts at 45° phase, 5 ms, every 2.3 s.
-        let burst_len = (0.005 * fs) as usize;
-        let mut start = (0.7 * fs) as usize;
-        while start + burst_len < frames {
-            for k in 0..burst_len {
-                let v = (1.2 * (PI / 2.0 * k as f64 + PI / 4.0).sin()) as f32;
-                for c in 0..ch {
-                    x[(start + k) * ch + c] += v;
-                }
-            }
-            start += (2.3 * fs) as usize;
-        }
-        // Single-sample clicks every `click_s`.
-        let mut n = (0.37 * fs) as usize;
-        let mut sign = 1.0f32;
-        while n < frames {
-            for c in 0..ch {
-                x[n * ch + c] += 4.0 * sign;
-            }
-            sign = -sign;
-            n += (click_s * fs) as usize;
-        }
-        x
+        programme_support::peaky_programme(ch, fs, click_s)
     }
 
     /// Run one preset at three input levels and check all three bounds;
