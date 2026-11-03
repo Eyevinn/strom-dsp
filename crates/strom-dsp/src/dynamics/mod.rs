@@ -13,6 +13,7 @@
 //! | [`OnePole`] | one-pole smoother toward a target (parameter glides, fades) |
 //! | [`AttackRelease`] | one-pole with separate rising/falling time constants |
 //! | [`PeakEnvelope`] | peak follower: instant attack, exponential release |
+//! | [`MeanSquareEnvelope`] | one-pole mean-square (RMS) average, sine-calibrated power |
 //! | [`GainComputer`] | static compressor curve with quadratic soft knee (dB in, dB out) |
 //! | [`GateStateMachine`] | open/close hysteresis with hold counter |
 //! | [`KeyDetector`] | sidechain front end: optional key filter (HPF/BPF) + linked key peak |
@@ -42,4 +43,4 @@ pub use gate_state::GateStateMachine;
 pub use key::{KeyDetector, KeyFilter, KEY_FILTER_MAX_HZ, KEY_FILTER_MIN_HZ, KEY_FILTER_Q_RANGE};
 pub use ramp::{BoxAverage, RampSmoother, RAMP_FRAC_BITS};
 pub use ring::{DelayLine, SegmentedMin, SlidingMin};
-pub use smoother::{AttackRelease, OnePole, PeakEnvelope};
+pub use smoother::{AttackRelease, MeanSquareEnvelope, OnePole, PeakEnvelope};

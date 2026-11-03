@@ -4,18 +4,33 @@
 //!
 //! 1. **Key level**: the largest absolute sample value over all channels of the
 //!    frame (channels are linked, so one gain is shared by all of them).
-//! 2. **Detector**: a peak envelope follower ([`PeakEnvelope`]) with
-//!    instantaneous attack and a fixed exponential release of [`DETECTOR_RELEASE_MS`]:
-//!    `e[n] = p[n]` if `p[n] > e[n-1]`, otherwise `e[n] = a_d·e[n-1] + (1-a_d)·p[n]`
-//!    with `a_d = exp(-1 / (τ_d·fs))`, `τ_d = DETECTOR_RELEASE_MS / 1000`. For a steady
-//!    sine the envelope sits at the sine's peak amplitude (ripple well below 1 dB above
-//!    ~200 Hz), so the thresholds compare against the **peak level in dBFS**.
+//! 2. **Detector**: a sine-calibrated RMS detector ([`MeanSquareEnvelope`]): a
+//!    one-pole average of the squared key level, `m[n] = a_m·m[n−1] + (1−a_m)·p[n]²`,
+//!    `a_m = exp(−1/(τ_m·fs))`, `τ_m =` [`DETECTOR_RMS_MS`] (10 ms), read as the
+//!    level `e = sqrt(2·m)`. The factor 2 (+3.01 dB) calibrates it so a steady
+//!    sine reads its **peak level in dBFS** (ripple about ±0.07 dB at 1 kHz,
+//!    ±0.35 dB at 100 Hz); noise reads its RMS + 3.01 dB, a constant `|x| = c`
+//!    reads `√2·c`. After the key stops, `e` decays with time constant
+//!    `2·τ_m =` [`DETECTOR_RELEASE_MS`] (20 ms). A step from silence to a level
+//!    `L` dB above a threshold crosses it after `−τ_m·ln(1 − 10^(−L/10))`
+//!    (0.1 ms at 20 dB, 1.1 ms at 10 dB, 4.3 ms at 3 dB).
+//!
+//!    Why RMS: the phase 1 detector was a peak follower with instant attack, so
+//!    single peaks of steady noise 10 dB *below* the threshold (crest factor
+//!    above 10 dB) opened the gate and it chattered in speech pauses. An average
+//!    over ~10 ms opens only on a sustained level (Zölzer, *DAFX*, dynamics
+//!    chapter: RMS level measurement for gates/expanders).
 //! 3. **State machine with hysteresis and hold** ([`GateStateMachine`]): a closed
 //!    gate opens when `e > open_threshold`. An open gate re-arms its hold counter
 //!    (`round(hold_ms·fs/1000)` frames) every frame where `e ≥ close_threshold`;
 //!    once `e` is below the close threshold the counter runs down, and when it is
 //!    exhausted the gate closes. If `close_threshold_db > open_threshold_db` the
-//!    close threshold is treated as equal to the open threshold.
+//!    close threshold is treated as equal to the open threshold. On top of
+//!    that, a built-in **minimum hysteresis** of [`MIN_HYSTERESIS_DB`] (1 dB)
+//!    applies: the effective close threshold is
+//!    `min(close_threshold_db, open_threshold_db − 1 dB)`, so open == close
+//!    (or close > open) still has 1 dB of hysteresis and a level hovering at
+//!    the threshold cannot toggle the gate every frame.
 //! 4. **Gain fade** ([`AttackRelease`] on the linear gain): the gain `g` follows its
 //!    target (1 when open, the linear `reduction` when closed) with a one-pole smoother,
 //!    `g[n] = g[n-1] + (1 - a)·(target - g[n-1])`, where `a = exp(-1 / (τ·fs))`,
@@ -75,7 +90,7 @@
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{
-    vmath, AttackRelease, GateStateMachine, KeyDetector, KeyFilter, PeakEnvelope,
+    vmath, AttackRelease, GateStateMachine, KeyDetector, KeyFilter, MeanSquareEnvelope,
 };
 use crate::simd::{detect, Level};
 use crate::util::db_to_lin;
@@ -99,8 +114,18 @@ pub const DEFAULT_EXPANDER_RATIO: f32 = 2.0;
 /// Expander ratio range.
 pub const EXPANDER_RATIO_RANGE: (f32, f32) = (1.0, 20.0);
 
-/// Release time constant (ms) of the gate's internal peak detector (attack is instantaneous).
-pub const DETECTOR_RELEASE_MS: f64 = 20.0;
+/// Averaging time constant (ms) of the gate's RMS detector (one-pole on the
+/// squared key level).
+pub const DETECTOR_RMS_MS: f64 = 10.0;
+
+/// Decay time constant (ms) of the detector *level* once the key stops:
+/// `2 ·` [`DETECTOR_RMS_MS`] (the mean square decays with `τ`, its square root
+/// with `2τ`).
+pub const DETECTOR_RELEASE_MS: f64 = 2.0 * DETECTOR_RMS_MS;
+
+/// Built-in minimum hysteresis (dB): the effective close threshold is at
+/// least this far below the open threshold.
+pub const MIN_HYSTERESIS_DB: f64 = 1.0;
 
 /// The gain snaps to its target within this distance (targets are ≥ 1e-4).
 const GAIN_SNAP: f64 = 1e-12;
@@ -169,7 +194,7 @@ pub struct Gate {
     channels: usize,
 
     reduction_lin: f64,
-    detector: PeakEnvelope,
+    detector: MeanSquareEnvelope,
     state: GateStateMachine,
     /// Linear gain: attack while rising (opening), release while falling.
     fade: AttackRelease,
@@ -215,7 +240,7 @@ impl Gate {
             sample_rate: 48_000.0,
             channels: 0,
             reduction_lin: 0.0,
-            detector: PeakEnvelope::default(),
+            detector: MeanSquareEnvelope::default(),
             state: GateStateMachine::default(),
             fade: AttackRelease::default().with_snap(GAIN_SNAP),
             fresh: true,
@@ -344,16 +369,18 @@ impl Gate {
     fn update_coefficients(&mut self) {
         let p = &self.params;
         let fs = self.sample_rate;
-        self.state.set_thresholds(
-            db_to_lin(p.open_threshold_db as f64),
-            db_to_lin(p.close_threshold_db as f64),
-        );
+        // The detector delivers sine-calibrated power, so the thresholds are
+        // squared amplitudes (10^(dB/10)).
+        let open_db = p.open_threshold_db as f64;
+        let close_db = (p.close_threshold_db as f64).min(open_db - MIN_HYSTERESIS_DB);
+        self.state
+            .set_thresholds(db_to_lin(2.0 * open_db), db_to_lin(2.0 * close_db));
         self.state
             .set_hold_frames((p.hold_ms as f64 * 0.001 * fs).round() as u64);
         self.reduction_lin = db_to_lin(p.reduction_db as f64);
         self.fade
             .set_times(p.attack_ms as f64, p.release_ms as f64, fs);
-        self.detector.set_release(DETECTOR_RELEASE_MS, fs);
+        self.detector.set_time(DETECTOR_RMS_MS, fs);
         self.expander = ExpanderCurve {
             threshold_db: p.open_threshold_db as f64,
             slope: self.ratio as f64 - 1.0,
@@ -428,7 +455,8 @@ impl Gate {
             lanes
         };
         for v in env[..curve_lanes].chunks_exact_mut(n) {
-            let x = vmath::lin_to_db(simd, S::f64s::from_slice(simd, v));
+            // Level in dB from the sine-calibrated power: 10·log10(P).
+            let x = vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)) * 0.5;
             // Reduction (dB, ≥ 0): slope·(T − x) below T, capped at the depth.
             let y = (S::f64s::splat(simd, c.threshold_db) - x) * c.slope;
             let y = y.simd_gt(zero).select(y, zero);

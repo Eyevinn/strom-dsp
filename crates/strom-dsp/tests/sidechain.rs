@@ -75,6 +75,12 @@ fn sine(amp: f32, freq: f64, frames: usize, ch: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Amplitude of a constant-magnitude signal that the gate's sine-calibrated
+/// RMS detector reads as `level_db` (it reads `|x| = c` as `√2·c`).
+fn detector_amp(level_db: f64) -> f32 {
+    (db_to_lin(level_db) / std::f64::consts::SQRT_2) as f32
+}
+
 /// Constant-magnitude signal `±amp` (alternating sign), so a peak detector
 /// reads exactly `amp` on every frame.
 fn square_nyquist(amp: f32, frames: usize) -> Vec<f32> {
@@ -400,7 +406,7 @@ fn expander_gain_db(p: GateParams, ratio: f32, x_db: f64) -> f64 {
     g.set_mode(GateMode::Expander);
     g.set_expander_ratio(ratio);
     let n = ms(1000.0);
-    let mut buf: Vec<f32> = square_nyquist(db_to_lin(x_db) as f32, n)
+    let mut buf: Vec<f32> = square_nyquist(detector_amp(x_db), n)
         .into_iter()
         .flat_map(|v| [v, PROBE])
         .collect();
@@ -455,7 +461,7 @@ fn expander_hysteresis_and_hold() {
     g.set_mode(GateMode::Expander);
     g.set_expander_ratio(3.0);
     let feed = |g: &mut Gate, x_db: f64, n: usize| -> Vec<f64> {
-        let mut buf: Vec<f32> = square_nyquist(db_to_lin(x_db) as f32, n)
+        let mut buf: Vec<f32> = square_nyquist(detector_amp(x_db), n)
             .into_iter()
             .flat_map(|v| [v, PROBE])
             .collect();

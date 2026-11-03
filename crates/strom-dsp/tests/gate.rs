@@ -170,11 +170,14 @@ fn hold_time() {
         let amp = 0.5f64;
         run_with_probe(&mut g, &vec![amp as f32; ms(100.0)]);
         let gains = run_with_probe(&mut g, &vec![0.0; ms(hold as f64 + 300.0)]);
-        // The detector decays from amp to the close threshold in
-        // τ_d·ln(amp/close) (discrete: n with a_d^n·amp < close), then hold runs.
+        // The (sine-calibrated RMS) detector reads a constant |x| = amp as
+        // √2·amp, and decays from there to the close threshold in
+        // τ_d·ln(√2·amp/close) (discrete: n with a_d^n·√2·amp < close), then
+        // hold runs.
+        let start = std::f64::consts::SQRT_2 * amp;
         let a_d = one_pole_coef(DETECTOR_RELEASE_MS, FS as f64);
         let close = db_to_lin(p.close_threshold_db as f64);
-        let decay = ((close / amp).ln() / a_d.ln()).ceil() as usize;
+        let decay = ((close / start).ln() / a_d.ln()).ceil() as usize;
         let expected = decay + ms(hold as f64);
         let first_drop = gains.iter().position(|&x| x < 1.0).unwrap();
         assert!(
@@ -194,10 +197,17 @@ fn attack_time_constant() {
         let mut g = gate(FS, 1, p);
         let red = db_to_lin(p.reduction_db as f64);
         let n = ms(attack as f64);
-        let mut buf = vec![0.5f32; n];
+        let mut buf = vec![0.5f32; n + ms(10.0)];
         g.process(&mut buf);
+        // The RMS detector needs a moment to reach the threshold (0.2 ms
+        // here); the attack fade starts on the first frame with a rising gain.
+        let start = buf
+            .iter()
+            .position(|&x| x as f64 / 0.5 > red * 1.001)
+            .unwrap();
+        assert!(start <= ms(1.0), "opened after {start} frames");
         // After τ the linear gain covered 1 − 1/e of the way from `red` to 1.
-        let gain = buf[n - 1] as f64 / 0.5;
+        let gain = buf[start + n - 1] as f64 / 0.5;
         let frac = (gain - red) / (1.0 - red);
         let expect = 1.0 - (-1.0f64).exp();
         assert!(
