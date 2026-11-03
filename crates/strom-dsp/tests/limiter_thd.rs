@@ -126,18 +126,24 @@ fn limiter_thd_fast_times_meets_targets() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The listening-test settings, reported for information (with the very fast
-/// 10 ms release the hold is 10 ms, half a 50 Hz cycle).
+/// The other listening-test settings (1 ms / 10 ms, 5 ms / 200 ms) and more
+/// frequencies, including ones whose period is not a whole number of frames.
+/// With a 10 ms release the hold is 10 ms, still at least one peak of `|x|`
+/// from 50 Hz up, so the gain is steady here too. Bound: 0.01 %.
 #[test]
-fn limiter_thd_report() {
+fn limiter_thd_other_settings() {
     for (attack_ms, release_ms) in [(1.0f32, 10.0f32), (5.0, 200.0)] {
-        for f in [50.0, 60.0, 100.0, 200.0] {
+        for f in [50.0, 55.0, 60.0, 100.0, 130.0, 200.0, 440.0] {
             let (t, peak, l) = measure(&params(attack_ms, release_ms), f);
             eprintln!(
                 "limiter {f} Hz ({attack_ms} ms / {release_ms} ms, lookahead 5 ms): THD {}",
                 pct(t)
             );
-            assert!(t.is_finite());
+            assert!(
+                t < 1e-4,
+                "{f} Hz, {attack_ms} / {release_ms} ms: {}",
+                pct(t)
+            );
             assert!(peak <= l.ceiling_linear());
             assert_eq!(l.safety_clip_count(), 0);
         }
