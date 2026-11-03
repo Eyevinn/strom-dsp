@@ -80,6 +80,34 @@ Analysis", JAES 60(6), 2012.
   `configure`/`reset`. States are f64 and denormal-flushed.
 
 
+### Equalizer (`crates/strom-dsp/src/equalizer.rs`)
+
+Up to 8 second-order bands in series. Coefficients from the equations of
+R. Bristow-Johnson, "Audio EQ Cookbook" (W3C Note, public domain):
+`w0 = 2π·f0/fs`, `α = sin(w0)/(2Q)`, `A = 10^(gain/40)`, for LPF, HPF, BPF
+(constant skirt gain, b0 = sin(w0)/2), BPF (constant 0 dB peak, b0 = α),
+notch, APF, peakingEQ, lowShelf and highShelf (cookbook Q form, not S).
+
+- **Numerics (own choice):** `1 − cos w0` and `1 + cos w0` are evaluated as
+  `2·sin²(w0/2)` and `2·cos²(w0/2)`, and the shelf terms are rewritten in terms
+  of `1 − cos w0`, to avoid cancellation at very low w0. All coefficients are
+  normalised by a0. A test checks them against the literal cookbook formulas.
+- **Structure:** Direct Form I (J. O. Smith III, *Introduction to Digital
+  Filters*), f64 coefficients and state per band and channel. DF-I keeps only
+  past inputs/outputs as state, so coefficient changes never leave a state
+  that is inconsistent with the coefficients.
+- **Clamping:** frequency to `[1 Hz, min(24 kHz, 0.499·fs)]`, gain ±60 dB,
+  Q 0.01…100; NaN/Inf parameters fall back to defaults.
+- **Parameter changes (own design):** frequency, gain and Q glide through a
+  10 ms one-pole in ln f, dB and ln Q; coefficients are recomputed every 32
+  frames and linearly interpolated per sample in between. Every intermediate
+  filter is stable, because the stability triangle in (a1, a2) is convex.
+  Type changes, enable/disable and `num_bands` changes use a 10 ms linear
+  crossfade between the old and new realisation (a second state bank).
+- Off, disabled and unused bands are skipped entirely (bit-exact, zero cost).
+  Biquad outputs are denormal-flushed below 1e-15, and output is clamped to the
+  finite f32 range.
+
 ## Dependencies
 
 | Crate | Used by | Licence |
