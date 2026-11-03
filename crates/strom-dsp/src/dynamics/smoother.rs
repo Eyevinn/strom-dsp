@@ -294,6 +294,16 @@ impl MeanSquareEnvelope {
         self.value = 0.0;
     }
 
+    /// Jump to the sine-calibrated power `power` (`2·m`, ≥ 0; e.g. to seed it
+    /// from another detector's reading). NaN or negative values give 0.
+    pub fn set_value(&mut self, power: f64) {
+        self.value = if power > 0.0 {
+            flush_denormal(0.5 * power.min(f64::MAX))
+        } else {
+            0.0
+        };
+    }
+
     /// Feed one amplitude sample (any sign) and return the new sine-calibrated
     /// power `2·m`. NaN input is treated as 0; ±∞ saturates at `f64::MAX`.
     #[inline]

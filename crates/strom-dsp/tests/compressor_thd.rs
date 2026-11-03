@@ -212,3 +212,21 @@ fn limiter_thd_report() {
         }
     }
 }
+
+/// The same targets in RMS detector mode (default rms-window).
+#[test]
+fn compressor_thd_rms_detector_meets_targets() {
+    use strom_dsp::compressor::CompressorDetector;
+    let mut failures = Vec::new();
+    for (f, limit) in [(50.0, 0.01), (60.0, 0.01), (100.0, 0.003), (200.0, 0.001)] {
+        let mut c = Compressor::new();
+        c.set_detector(CompressorDetector::Rms);
+        c.set_params(&listening_test_params());
+        let t = measure(&mut c, f);
+        eprintln!("compressor RMS {f} Hz (1 ms / 50 ms): THD {}", pct(t));
+        if t > limit {
+            failures.push(format!("{f} Hz: THD {} > {}", pct(t), pct(limit)));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

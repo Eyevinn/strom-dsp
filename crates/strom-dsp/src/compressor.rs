@@ -83,10 +83,43 @@
 //! steps 2–4 are unchanged.
 //! [`Processor::process`] never touches the key path and is bit-identical to
 //! the compressor without sidechain support.
+//!
+//! # Detector modes and calibration
+//!
+//! [`Compressor::set_detector`] selects what step 1 measures before the hold.
+//! Both readings are **sine-calibrated**: a steady sine reads its peak level,
+//! so the threshold means the same in both modes (and the same as the gate's
+//! thresholds).
+//!
+//! - [`CompressorDetector::Peak`] (default, phase 1 behaviour plus the hold):
+//!   the level is the linked peak `max_c |x_c|`. A sine reads its peak, a
+//!   constant `|x| = c` reads `c`, noise reads its largest peaks (RMS + crest
+//!   factor).
+//! - [`CompressorDetector::Rms`] (the classic choice for programme and
+//!   speech; Zölzer, *DAFX*, RMS level measurement): a one-pole mean square of
+//!   the linked peak, `m[n] = a·m[n−1] + (1−a)·p[n]²`, `a = exp(−1/(τ·fs))`,
+//!   `τ =` rms-window ([`Compressor::set_rms_window`], 1 … 100 ms, default
+//!   [`DEFAULT_RMS_WINDOW_MS`]), read as `sqrt(2·m)` (the gate's
+//!   [`MeanSquareEnvelope`]). The factor 2 (+3.01 dB) is the sine
+//!   calibration: a sine reads its peak, a constant `c` reads `√2·c`, noise
+//!   reads its RMS + 3.01 dB. The hold then takes the maximum of `2·m`, so
+//!   the remaining ripple of the mean square at `2f` does not modulate the
+//!   gain; the price is that a low-frequency sine reads its ripple maximum,
+//!   `10·log10(1 + r)` dB above its peak with `r = 1/sqrt(1 + (4π·f·τ)²)`:
+//!   at τ = 10 ms +0.63 dB at 50 Hz, +0.33 dB at 100 Hz, +0.17 dB at
+//!   200 Hz, +0.03 dB at 1 kHz. A level step from silence to `L` dB above a
+//!   threshold crosses it after `−τ·ln(1 − 10^(−L/10))`; after the key stops
+//!   the reading decays with `2τ` (after the hold).
+//!
+//! Switching modes while running seeds the new detector with the level the
+//! old one held (a peak `p` becomes the power `p²` and vice versa), so the
+//! detector level is continuous at the switch; differences between the two
+//! readings afterwards are followed with the attack/release times.
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{
-    vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, OnePole, SegmentedMin,
+    vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, MeanSquareEnvelope, OnePole,
+    SegmentedMin,
 };
 use crate::simd::{detect, Level};
 use crate::Processor;
@@ -102,6 +135,21 @@ pub const PARAM_SMOOTHING_MS: f64 = 10.0;
 /// `min(DETECTOR_HOLD_MS, release)`. 20 ms is half a period of 25 Hz, so a
 /// steady sine at or above 25 Hz gives a ripple-free level (see the module docs).
 pub const DETECTOR_HOLD_MS: f64 = 20.0;
+
+/// Level detector of the compressor (see "Detector modes" in the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompressorDetector {
+    /// Linked sample peak (phase 1 behaviour), with the peak hold.
+    #[default]
+    Peak,
+    /// Sine-calibrated RMS over the rms-window, with the peak hold.
+    Rms,
+}
+
+/// Default RMS averaging time (ms), the same as the gate's detector.
+pub const DEFAULT_RMS_WINDOW_MS: f32 = 10.0;
+/// Range of the RMS averaging time (ms).
+pub const RMS_WINDOW_RANGE: (f32, f32) = (1.0, 100.0);
 
 /// Largest sample rate `configure` accepts (Hz); also sizes the hold window.
 const MAX_SAMPLE_RATE: f64 = 1.0e6;
@@ -274,8 +322,13 @@ pub struct Compressor {
 
     /// Sliding maximum of the detector level (as a minimum of its negation).
     hold: SegmentedMin,
-    /// Most recent held detector level (linear).
+    /// Most recent held detector level (amplitude for peak, power for RMS).
     held: f64,
+    detector: CompressorDetector,
+    /// RMS averaging time (ms, clamped).
+    rms_window_ms: f32,
+    /// Mean-square envelope of the RMS detector.
+    mean_square: MeanSquareEnvelope,
     /// Smoothed gain reduction (dB, ≥ 0).
     reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
@@ -318,6 +371,9 @@ impl Compressor {
             knee_start_lin: curve.computer().knee_start_lin(),
             hold: SegmentedMin::default(),
             held: 0.0,
+            detector: CompressorDetector::Peak,
+            rms_window_ms: DEFAULT_RMS_WINDOW_MS,
+            mean_square: MeanSquareEnvelope::default(),
             reduction: AttackRelease::default(),
             fresh: true,
             level: Level::baseline(),
@@ -380,6 +436,54 @@ impl Compressor {
         &self.params
     }
 
+    /// Select the level detector (see "Detector modes" in the module docs).
+    /// Never allocates. While running, the new detector is seeded with the
+    /// level the old one held, so the detector level is continuous.
+    pub fn set_detector(&mut self, detector: CompressorDetector) {
+        if detector == self.detector {
+            return;
+        }
+        self.detector = detector;
+        if self.fresh {
+            self.held = 0.0;
+            self.mean_square.reset();
+            self.hold.reset(self.hold.window());
+        } else {
+            // Peak amplitude p ↔ sine-calibrated power p².
+            self.held = match detector {
+                CompressorDetector::Rms => {
+                    let power = self.held * self.held;
+                    self.mean_square.set_value(power);
+                    power
+                }
+                CompressorDetector::Peak => self.held.sqrt(),
+            };
+            self.hold.reset(self.hold.window());
+            self.hold.push(-self.held);
+        }
+    }
+
+    /// Current level detector.
+    pub fn detector(&self) -> CompressorDetector {
+        self.detector
+    }
+
+    /// Set the RMS averaging time (ms, 1 … 100, default
+    /// [`DEFAULT_RMS_WINDOW_MS`]; NaN becomes the default). Used only by
+    /// [`CompressorDetector::Rms`]. Never allocates; the envelope keeps its
+    /// value, so a change does not jump.
+    pub fn set_rms_window(&mut self, window_ms: f32) {
+        let (lo, hi) = RMS_WINDOW_RANGE;
+        self.rms_window_ms = clamp_or(window_ms, lo, hi, DEFAULT_RMS_WINDOW_MS);
+        self.mean_square
+            .set_time(self.rms_window_ms as f64, self.sample_rate);
+    }
+
+    /// Current (clamped) RMS averaging time (ms).
+    pub fn rms_window(&self) -> f32 {
+        self.rms_window_ms
+    }
+
     /// Smoothed gain reduction (dB, ≥ 0) after the most recently processed frame,
     /// excluding makeup gain.
     pub fn gain_reduction_db(&self) -> f64 {
@@ -437,24 +541,38 @@ impl Compressor {
                         .linked_peaks_simd(simd, &k[start..], kc, &mut peaks[..frames]);
                 }
             }
-            // Peak hold: sliding maximum over the last `H` frames (serial).
+            // Detector, then the peak hold: sliding maximum over the last
+            // `H` frames (serial). Peak: amplitude; RMS: sine-calibrated power.
+            let rms = self.detector == CompressorDetector::Rms;
             let mut block_max = 0.0f64;
             for (l, &p) in level[..frames].iter_mut().zip(&peaks) {
-                let h = -self.hold.push(-(p as f64));
+                let d = if rms {
+                    self.mean_square.step(p as f64)
+                } else {
+                    p as f64
+                };
+                let h = -self.hold.push(-d);
                 block_max = if h > block_max { h } else { block_max };
                 *l = h;
             }
             self.held = level[frames - 1];
             // Settled curve and the whole block below the knee: the static
             // reduction is exactly 0, no need for the logarithm.
-            let quiet = !self.gliding && block_max <= self.knee_start_lin;
+            let knee_start = if rms {
+                self.knee_start_lin * self.knee_start_lin
+            } else {
+                self.knee_start_lin
+            };
+            let quiet = !self.gliding && block_max <= knee_start;
             if quiet {
                 level[..frames].fill(0.0);
             } else {
                 // Lanes past `frames` must hold finite values.
                 level[frames..lanes].fill(1.0);
+                // RMS: 20·log10(sqrt(P)) = 0.5 · 20·log10(P) (exact scaling).
+                let scale = if rms { 0.5 } else { 1.0 };
                 for v in level[..lanes].chunks_exact_mut(n) {
-                    vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)).store_slice(v);
+                    (vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)) * scale).store_slice(v);
                 }
             }
 
@@ -511,6 +629,7 @@ impl Compressor {
             fs,
         );
         self.glide.set_time(fs);
+        self.mean_square.set_time(self.rms_window_ms as f64, fs);
         let h = hold_frames(self.params.release_ms as f64, fs);
         if h != self.hold.window() {
             // Restart the window with the level held so far, so a release
@@ -579,6 +698,7 @@ impl Processor for Compressor {
         self.reduction.set_value(0.0);
         self.fresh = true;
         self.held = 0.0;
+        self.mean_square.reset();
         let h = hold_frames(self.params.release_ms as f64, self.sample_rate);
         self.hold.reset(h);
         self.update_coefficients();
