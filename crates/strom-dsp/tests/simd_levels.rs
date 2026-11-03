@@ -83,6 +83,7 @@ fn levels() -> (Level, Level) {
 
 #[test]
 fn set_simd_level_is_kept_across_configure() {
+    eprintln!("detected SIMD level: {:?}", detect());
     let mut g = Gate::new();
     g.set_simd_level(Level::fallback());
     g.configure(FS, 2);

@@ -89,6 +89,32 @@ instructions (`fmul v0.4s` on aarch64, `mulps`/`vmulps` on x86-64) show a
 loop was vectorised; scalar forms (`fmul s0`, `mulss`) show it was not. The
 listing follows the release profile, so it shows what ships.
 
+## Explicit SIMD in the dynamics processors
+
+Gate, compressor and limiter detect the instruction set in `configure`
+(`strom_dsp::simd::detect`) and dispatch once per `process` call through
+`fearless_simd` (NEON on aarch64; SSE4.2/AVX2/AVX-512 on x86-64). Every
+kernel uses only IEEE-exact operations (no fused multiply-add), so all
+levels, including the scalar fallback, give **bit-identical** output;
+`tests/simd_levels.rs` checks this with `set_simd_level(Level::fallback())`.
+
+- Vectorised: linked frame peaks and gain application (all three), the
+  compressor's dB conversions and static curve (f64 log/exp approximations,
+  error < 1e-12 dB), the limiter's required gains and bulk delay-line I/O.
+- Serial by nature, kept scalar: envelopes, attack/release smoothers, the
+  gate state machine, and the limiter's min → ramp → release pipeline. These
+  now dominate the cost; SIMD cannot help them further.
+- The limiter's sliding minimum is the van Herk / Gil–Werman segment
+  algorithm: constant cost per frame. On light material it is slightly
+  slower than a monotonic deque (≈ +7 %), under heavy limiting (+20 dB
+  programme, `limiter_stereo_hot`) ≈ 25 % faster; for real-time use the
+  flat worst case wins.
+- Tried and dropped: exact reciprocal multiplication for the ramp's integer
+  division (no measurable change; the division is off the critical path).
+
+Wall-clock numbers on a loaded laptop can vary by ±30 % between identical
+runs (efficiency vs performance cores); compare interleaved A/B runs.
+
 ## Denormal policy
 
 We do **not** set flush-to-zero / denormals-are-zero (FTZ/DAZ) in the CPU:

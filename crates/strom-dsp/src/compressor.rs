@@ -284,7 +284,8 @@ impl Compressor {
     }
 
     /// Force the SIMD instruction set used by `process` (for hosts and tests),
-    /// e.g. [`Level::fallback`] to run the portable scalar path. By default
+    /// e.g. `Level::fallback()` (needs fearless_simd's `force_support_fallback`
+    /// feature) to run the portable scalar path. By default
     /// `configure` detects the best level ([`crate::simd::detect`]); a level
     /// set here is kept across later `configure` calls. Every level produces
     /// bit-identical output (the dB conversions use the same approximation on
