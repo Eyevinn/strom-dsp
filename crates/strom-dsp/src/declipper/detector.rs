@@ -380,15 +380,16 @@ impl ClipDetector {
         // Corners on both sides, and the sample lies inside the cubic
         // through its four neighbours (a smooth peak lies outside it).
         let cubic = (4.0 * (a1 + b1) - (a2 + x)) / 6.0;
-        (d * (v - a1) >= edge && d * (v - b1) >= edge && d * (cubic - v) >= self.tol(v).max(SINGLE_DEFICIT * mag)).then_some(
-            ClipRun {
-                start: m,
-                len: 1,
-                level: v,
-                dir,
-                too_long: false,
-            },
-        )
+        (d * (v - a1) >= edge
+            && d * (v - b1) >= edge
+            && d * (cubic - v) >= self.tol(v).max(SINGLE_DEFICIT * mag))
+        .then_some(ClipRun {
+            start: m,
+            len: 1,
+            level: v,
+            dir,
+            too_long: false,
+        })
     }
 
     #[inline]
@@ -526,7 +527,8 @@ impl ClipDetector {
         let need_out = edge + CORNER_RATIO * slope_out;
         let step_in = d * (level - self.cand_before);
         let soft_in = step_in < need_in;
-        if soft_in && !(step_in > 2.0 * tol && d * (self.cand_before - self.cand_before2) >= need_in)
+        if soft_in
+            && !(step_in > 2.0 * tol && d * (self.cand_before - self.cand_before2) >= need_in)
         {
             return None;
         }
@@ -555,7 +557,9 @@ impl ClipDetector {
     /// Decide on a closed candidate; `next` is the second sample after it
     /// (for a decision taken one sample late).
     fn decide(&mut self, c: Closed, next: Option<f32>, n: u64) -> Option<ClipRun> {
-        let ClipRun { level, dir, len, .. } = c.run;
+        let ClipRun {
+            level, dir, len, ..
+        } = c.run;
         let d = f32::from(dir);
         if let Some(need_out) = c.need_out {
             let x = next?;
@@ -728,7 +732,9 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!((r[0].start, r[0].len, r[0].dir), (8, 3, -1));
         // After a long run the level is known: a pair at it counts at once.
-        let after_long = [0.0, 0.5, 0.8, 0.8, 0.8, 0.8, 0.5, 0.0, 0.5, 0.8, 0.8, 0.5, 0.0];
+        let after_long = [
+            0.0, 0.5, 0.8, 0.8, 0.8, 0.8, 0.5, 0.0, 0.5, 0.8, 0.8, 0.5, 0.0,
+        ];
         let r = runs(&after_long, DetectorParams::default());
         assert_eq!(r.len(), 2);
         assert_eq!((r[1].start, r[1].len), (9, 2));

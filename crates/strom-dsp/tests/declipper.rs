@@ -11,7 +11,9 @@ use std::cell::Cell;
 use std::f64::consts::PI;
 
 use declipper_support::*;
-use strom_dsp::declipper::{Declipper, DeclipperLatency, DeclipperParams, XFADE_MS};
+use strom_dsp::declipper::{
+    Declipper, DeclipperLatency, DeclipperParams, WORK_BURST, WORK_RATE, XFADE_MS,
+};
 use strom_dsp::Processor;
 
 // ---------------------------------------------------------------------------
@@ -599,6 +601,77 @@ fn extreme_inputs_stay_finite() {
                 let y = run(&mut d, &clean, 2, 100);
                 for i in 2 * lat * 2..y.len() {
                     assert_eq!(y[i], clean[i - lat * 2], "{name} fs {fs}: recovery");
+                }
+            }
+        }
+    }
+}
+
+/// Square-ish wave whose plateaus are `run` frames long with one-sample
+/// edges: a clipped run of that length every half period.
+fn adversarial(n: usize, run: usize) -> Vec<f32> {
+    let half = run + 2;
+    (0..n)
+        .map(|i| {
+            let k = i % (2 * half);
+            let (k, s) = if k < half { (k, 1.0) } else { (k - half, -1.0) };
+            let v = if k == 0 || k == half - 1 { 0.5 } else { 0.9 };
+            s * v
+        })
+        .collect()
+}
+
+/// The work budget holds on any input: on runs of the longest repairable
+/// length back to back, on dense clipped tones and on clipped speech, no
+/// buffer (of several sizes) spends more than
+/// `channels · (WORK_BURST + WORK_RATE · d)` plus 12 units per sample for
+/// the fallbacks. The fallback is used on the heavy inputs and keeps every
+/// rebuilt sample on the clipped side, within the overshoot cap.
+#[test]
+fn work_budget_bounds_every_buffer() {
+    for mode in MODES {
+        let p = DeclipperParams {
+            latency: mode,
+            ..Default::default()
+        };
+        let probe = declipper(48_000.0, 1, p);
+        let n = 96_000;
+        let adv = adversarial(n, probe.max_run_frames());
+        let tones = to_f32(&clip(&multitone(2.0, 0xb0d6), 10.0).0);
+        let speech = to_f32(&clip(&speech_like(2.0, 0xb0d7, 150.0), 10.0).0);
+        for (name, a, b) in [
+            ("adversarial", &adv, &adv),
+            ("tones + adversarial", &tones, &adv),
+            ("speech + tones", &speech, &tones),
+        ] {
+            for block in [64usize, 480, 2048] {
+                let mut d = declipper(48_000.0, 2, p);
+                let x = interleave(&[a, b]);
+                let mut y = x.clone();
+                let mut fallbacks = 0;
+                for chunk in y.chunks_mut(block * 2) {
+                    let frames = chunk.len() / 2;
+                    d.process(chunk);
+                    let s = d.take_stats();
+                    let bound = 2.0 * (WORK_BURST + WORK_RATE * frames as f64 / 48_000.0)
+                        + 12.0 * s.samples_repaired as f64;
+                    assert!(
+                        s.work <= bound,
+                        "{mode:?} {name} block {block}: work {} > {bound}",
+                        s.work
+                    );
+                    fallbacks += s.fallbacks;
+                }
+                if name != "speech + tones" {
+                    assert!(fallbacks > 0, "{mode:?} {name}: budget never ran out");
+                }
+                let lat = d.latency_frames() * 2;
+                let lim = 10f32.powf(12.0 / 20.0) * (1.0 + 1e-6);
+                for (i, &v) in y[lat..].iter().enumerate() {
+                    let o = x[i];
+                    if o != v {
+                        assert!(o * v > 0.0 && v.abs() >= o.abs() && v.abs() <= o.abs() * lim);
+                    }
                 }
             }
         }

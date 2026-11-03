@@ -972,7 +972,25 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
     future context has arrived, or when its first sample is about to leave
     the delay line, whichever comes first;
   - runs longer than 2 ms (`max-run`) pass through unchanged and are
-    counted.
+    counted;
+  - *work budget* (own design): every step of a rebuild is counted in
+    multiply-adds from its operation count (estimate `N·(p+2) + 1.5p²`,
+    Burg `+5pN`, solve `(m+p)(p+1) + 3m(p+1) + m³/6 + 2m²`); each channel
+    has a token bucket refilled with 40·10⁶ units per second of audio, up
+    to 300 000. A step only starts when it fits: Burg, else the
+    autocorrelation estimate, then as many active-set solves and the second
+    round as fit; when not even an estimate and one solve fit, the cheap
+    fallback rebuilds the run: a cubic Hermite curve (any numerical-analysis
+    textbook) from the value and one-sided slope on each side, projected
+    into the same box. Counted, not timed, so the output is deterministic
+    and independent of the buffer size;
+  - *model reuse* (own design): a run that starts within 10 ms of the run
+    whose first-round AR model a channel keeps uses that model instead of a
+    new Burg estimate (measured: half the work per run on recorded speech
+    clipped 10 dB, under 0.1 dB change in the SDR improvement);
+  - the hot loops (dot products, Burg recursion, Cholesky) use four
+    partial sums so they vectorise; the Hann window is built by a rotation
+    recurrence.
 
 ### Delay and stereo (`src/delay.rs`, `src/stereo.rs`)
 

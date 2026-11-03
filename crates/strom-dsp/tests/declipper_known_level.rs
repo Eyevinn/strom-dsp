@@ -213,4 +213,3 @@ fn known_level_raises_speech_recall() {
         }
     }
 }
-

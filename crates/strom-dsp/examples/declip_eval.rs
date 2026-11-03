@@ -84,6 +84,9 @@ struct Acc {
     buffers: usize,
     time: f64,
     worst: f64,
+    runs: u64,
+    fallbacks: u64,
+    work: f64,
 }
 
 fn main() {
@@ -138,7 +141,12 @@ fn main() {
                     let s = r.start as usize;
                     let a = s.saturating_sub(3);
                     let b = (s + r.len + 3).min(x32.len());
-                    println!("{name}: unclipped run at {s} len {} too_long {}: {:?}", r.len, r.too_long, &x32[a..b]);
+                    println!(
+                        "{name}: unclipped run at {s} len {} too_long {}: {:?}",
+                        r.len,
+                        r.too_long,
+                        &x32[a..b]
+                    );
                 }
             }
         }
@@ -163,7 +171,11 @@ fn main() {
                         if !det[i] {
                             hist[(j - i).min(7)] += 1;
                             if j - i >= 3 && std::env::var_os("SHOW_MISSED").is_some() {
-                                println!("  missed {i} len {}: {:?}", j - i, &xc32[i.saturating_sub(3)..(j + 3).min(xc32.len())]);
+                                println!(
+                                    "  missed {i} len {}: {:?}",
+                                    j - i,
+                                    &xc32[i.saturating_sub(3)..(j + 3).min(xc32.len())]
+                                );
                             }
                         }
                         i = j;
@@ -171,7 +183,10 @@ fn main() {
                         i += 1;
                     }
                 }
-                println!("{name} {depth} dB: missed runs by length (1..7+): {:?}", &hist[1..]);
+                println!(
+                    "{name} {depth} dB: missed runs by length (1..7+): {:?}",
+                    &hist[1..]
+                );
             }
             let (y, times, d) = run(&xc32, rate, &params);
             let a = &mut acc[k];
@@ -184,7 +199,10 @@ fn main() {
                 a.worst = a.worst.max(t / buf_s);
             }
             a.buffers += times.len();
-            let _ = &d;
+            let st = d.stats();
+            a.runs += st.runs_repaired;
+            a.fallbacks += st.fallbacks;
+            a.work += st.work;
             if n_truth == 0 {
                 continue;
             }
@@ -200,13 +218,23 @@ fn main() {
         }
     }
     println!(
-        "\n{:>5} {:>6} {:>9} {:>7} {:>9} {:>7} {:>8} {:>8}",
-        "depth", "files", "clipped", "recall", "fp", "ΔSDRc", "cpu mean", "cpu max"
+        "\n{:>5} {:>6} {:>9} {:>7} {:>9} {:>7} {:>8} {:>8} {:>8} {:>9} {:>10}",
+        "depth",
+        "files",
+        "clipped",
+        "recall",
+        "fp",
+        "ΔSDRc",
+        "cpu mean",
+        "cpu max",
+        "runs",
+        "fallbacks",
+        "work/run"
     );
     for (k, &depth) in depths.iter().enumerate() {
         let a = acc[k];
         println!(
-            "{:>5.0} {:>6} {:>9} {:>7.3} {:>9} {:>7.2} {:>7.3}% {:>7.2}%",
+            "{:>5.0} {:>6} {:>9} {:>7.3} {:>9} {:>7.2} {:>7.3}% {:>7.2}% {:>8} {:>9} {:>10.0}",
             depth,
             a.files,
             a.truth,
@@ -215,6 +243,9 @@ fn main() {
             a.dsdrc / a.files.max(1) as f64,
             100.0 * a.time / a.buffers.max(1) as f64,
             100.0 * a.worst,
+            a.runs,
+            a.fallbacks,
+            a.work / a.runs.max(1) as f64,
         );
     }
 }

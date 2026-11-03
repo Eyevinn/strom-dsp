@@ -54,6 +54,33 @@
 //! format (or that must meet a ceiling) needs a limiter after the declipper.
 //! [`DeclipperStats::max_overshoot_db`] reports what was actually used.
 //!
+//! # CPU budget
+//!
+//! The work of a rebuild grows with the window and with the cube of the run
+//! length, so a buffer full of long runs could cost far more than a typical
+//! one. Each channel has a work budget, counted in multiply-adds of the
+//! solver's own cost model ([`lsar::work_units`]): it is refilled by
+//! [`WORK_RATE`] per second of audio, up to [`WORK_BURST`]. A rebuild only
+//! starts the steps that still fit: the Burg estimate, or else the cheaper
+//! autocorrelation estimate, then as many active-set solves and the second
+//! round as fit. When not even an estimate and one solve fit, the run is
+//! rebuilt by the cheap fallback, a cubic Hermite curve across the run
+//! from the value and slope on each side, put into the same box (sign,
+//! beyond the clipped value, within `max_overshoot_db`); it is counted in
+//! [`DeclipperStats::fallbacks`]. Runs close together share work: a run
+//! that starts within [`MODEL_REUSE_MS`] of the run whose first-round
+//! model the channel keeps reuses it.
+//!
+//! The work in one buffer of `d` seconds is therefore at most
+//! `channels · (WORK_BURST + WORK_RATE · d)` plus the fallbacks (12
+//! multiply-adds per sample), independent of the input: 700 000 units per
+//! channel for a 10 ms buffer. On the bench (Apple M5 Pro) a unit takes
+//! 0.25–0.3 ns, so the worst 10 ms stereo buffer stays under 4 % of its
+//! duration, detection included; shorter buffers can take a larger share
+//! (the burst does not shrink with them). Everything is counted, not timed,
+//! so the output does not depend on the machine, the load or the buffer
+//! size.
+//!
 //! # Channels
 //!
 //! Channels are independent: each has its own detector and is rebuilt from
@@ -79,7 +106,7 @@ pub mod detector;
 pub mod lsar;
 
 pub use detector::{ClipDetector, ClipRun, DetectorParams};
-pub use lsar::{ArMethod, LsarError, LsarSolver};
+pub use lsar::{work_units, ArMethod, LsarError, LsarSolver};
 
 use crate::Processor;
 
@@ -157,6 +184,24 @@ pub const TOLERANCE_RANGE: (f32, f32) = (0.0, 0.01);
 /// Range of [`DeclipperParams::tilt_hz`].
 pub const TILT_HZ_RANGE: (f32, f32) = (0.0, 200.0);
 
+/// A run that starts at most this long after the run whose first-round AR
+/// model a channel keeps reuses that model instead of estimating its own
+/// (ms). On recorded speech this halves the work per run at 10 dB of
+/// clipping and changes the SDR improvement by less than 0.1 dB.
+pub const MODEL_REUSE_MS: f32 = 10.0;
+
+/// Work budget per channel, refilled per second of audio (multiply-adds,
+/// see [`lsar::work_units`]). See "CPU budget" in the module docs. With
+/// [`WORK_BURST`] it keeps the worst 10 ms stereo buffer under 4 % of its
+/// duration on the bench, and costs about 1 dB of the SDR improvement on
+/// recorded speech clipped 10 dB (none at 3 dB) against no limit.
+pub const WORK_RATE: f64 = 40.0e6;
+
+/// Most work a channel can save up (multiply-adds): what one buffer can
+/// spend on top of its own refill. It covers the first estimate and solve
+/// of the longest run (2 ms) with the autocorrelation estimate.
+pub const WORK_BURST: f64 = 300.0e3;
+
 /// Bypass crossfade (ms).
 pub const XFADE_MS: f32 = 5.0;
 
@@ -219,6 +264,11 @@ pub struct DeclipperStats {
     pub max_overshoot_db: f32,
     /// Largest rebuilt magnitude (linear).
     pub max_repaired_peak: f32,
+    /// Runs rebuilt by the cheap fallback because the work budget was spent
+    /// (included in `runs_repaired`).
+    pub fallbacks: u64,
+    /// Work spent on rebuilding (multiply-adds, see [`lsar::work_units`]).
+    pub work: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -234,6 +284,13 @@ struct Channel {
     pending: Vec<ClipRun>,
     p_head: usize,
     p_len: usize,
+    /// Work budget left (multiply-adds).
+    credit: f64,
+    /// First-round AR model of a recent run, its order, and the start of
+    /// the run it was estimated for.
+    model: Vec<f64>,
+    model_order: usize,
+    model_at: Option<u64>,
 }
 
 /// The declipper. See the [module docs](self).
@@ -263,6 +320,11 @@ pub struct Declipper {
     hi: Vec<f64>,
     stats: DeclipperStats,
     xfade_len: usize,
+    /// Work budget refill per frame and per channel.
+    refill: f64,
+    /// A run starting at most this many frames after the run whose
+    /// first-round model is kept reuses that model.
+    reuse: u64,
     /// Fade position 0 … xfade_len (xfade_len = fully wet).
     fade: usize,
     fade_set: bool,
@@ -460,17 +522,46 @@ impl Declipper {
             *v = f64::from(ch.work[((ws + k as u64) & mask) as usize]);
         }
         let order = self.order.min((len - 1) / 2);
-        let result = if order >= 2 {
-            self.solver.interpolate(
+        // A run close to the one the kept model came from reuses it.
+        let reuse =
+            ch.model_order == order && ch.model_at.is_some_and(|t| s >= t && s - t <= self.reuse);
+        let mut fallback = false;
+        let result = if order < 2 {
+            Err(LsarError::WindowTooShort)
+        } else {
+            let first = reuse.then_some(&ch.model[..=order]);
+            match self.solver.interpolate(
                 &mut self.w[..len],
                 &self.unknown,
                 &self.lo,
                 &self.hi,
                 order,
                 AR_ROUNDS,
-            )
-        } else {
-            Err(LsarError::WindowTooShort)
+                ch.credit,
+                first,
+            ) {
+                Ok(work) => {
+                    ch.credit -= work;
+                    self.stats.work += work;
+                    if !reuse {
+                        ch.model[..=order].copy_from_slice(self.solver.first_model(order));
+                        ch.model_order = order;
+                        ch.model_at = Some(s);
+                    }
+                    Ok(())
+                }
+                Err(LsarError::Budget) => {
+                    fallback = true;
+                    let off = (s - ws) as usize;
+                    let k = run.len;
+                    let work =
+                        hermite_fill(&mut self.w[..len], off, k, &self.lo[..k], &self.hi[..k]);
+                    ch.credit -= work;
+                    self.stats.work += work;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         };
         for i in s..=e {
             ch.dir[(i & mask) as usize] = 0;
@@ -488,12 +579,41 @@ impl Declipper {
         }
         self.stats.runs_repaired += 1;
         self.stats.samples_repaired += run.len as u64;
+        if fallback {
+            self.stats.fallbacks += 1;
+        }
         if level > 0.0 {
             let over = (20.0 * (peak / level).log10()).max(0.0) as f32;
             self.stats.max_overshoot_db = self.stats.max_overshoot_db.max(over);
         }
         self.stats.max_repaired_peak = self.stats.max_repaired_peak.max(peak as f32);
     }
+}
+
+/// The cheap fallback: cubic Hermite interpolation across the run
+/// `w[off .. off + len]` from the two samples on each side (value and
+/// one-sided slope at each end), then each sample put into its box. A
+/// missing neighbour (at the start of the stream, or the end of the
+/// window) counts as zero slope. Returns its work (multiply-adds).
+fn hermite_fill(w: &mut [f64], off: usize, len: usize, lo: &[f64], hi: &[f64]) -> f64 {
+    let n = w.len();
+    let y0 = if off >= 1 { w[off - 1] } else { 0.0 };
+    let d0 = if off >= 2 { y0 - w[off - 2] } else { 0.0 };
+    let e1 = off + len;
+    let y1 = if e1 < n { w[e1] } else { y0 };
+    let d1 = if e1 + 1 < n { w[e1 + 1] - y1 } else { 0.0 };
+    let h = (len + 1) as f64;
+    for k in 0..len {
+        let t = (k + 1) as f64 / h;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let v = (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+            + (t3 - 2.0 * t2 + t) * h * d0
+            + (-2.0 * t3 + 3.0 * t2) * y1
+            + (t3 - t2) * h * d1;
+        w[off + k] = v.clamp(lo[k], hi[k]);
+    }
+    12.0 * len as f64
 }
 
 fn ms_frames(ms: f32, sample_rate: f32) -> usize {
@@ -548,6 +668,10 @@ impl Processor for Declipper {
                 ],
                 p_head: 0,
                 p_len: 0,
+                credit: WORK_BURST,
+                model: vec![0.0; AR_ORDER_MAX + 1],
+                model_order: 0,
+                model_at: None,
             })
             .collect();
         let n_max = self.past + self.max_run_limit + self.future + 1;
@@ -559,6 +683,8 @@ impl Processor for Declipper {
         self.lo = Vec::with_capacity(m_max);
         self.hi = Vec::with_capacity(m_max);
         self.xfade_len = ms_frames(XFADE_MS, sample_rate).max(1);
+        self.refill = WORK_RATE / f64::from(sample_rate);
+        self.reuse = ms_frames(MODEL_REUSE_MS, sample_rate) as u64;
         self.configured = true;
         self.apply_params();
         self.reset();
@@ -577,6 +703,7 @@ impl Processor for Declipper {
             let slot = (n & mask) as usize;
             for (c, x) in frame.iter().enumerate() {
                 let ch = &mut self.ch[c];
+                ch.credit = (ch.credit + self.refill).min(WORK_BURST);
                 ch.input[slot] = *x;
                 ch.work[slot] = *x;
                 ch.dir[slot] = 0;
@@ -648,6 +775,8 @@ impl Processor for Declipper {
             c.dir.fill(0);
             c.p_head = 0;
             c.p_len = 0;
+            c.credit = WORK_BURST;
+            c.model_at = None;
         }
         self.n = 0;
         self.stats = DeclipperStats::default();

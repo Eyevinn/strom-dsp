@@ -83,6 +83,8 @@ pub struct LsarSolver {
     m_max: usize,
     /// AR coefficients `a[0..=p]`.
     a: Vec<f64>,
+    /// The first round's coefficients.
+    a0: Vec<f64>,
     /// Signal autocorrelation, then coefficient autocorrelation `R_a`.
     r: Vec<f64>,
     ra: Vec<f64>,
@@ -112,6 +114,8 @@ pub enum LsarError {
     TooLarge,
     /// The window holds a non-finite value, or the solve broke down.
     Numerical,
+    /// Not even the first estimate and solve fit the work limit.
+    Budget,
 }
 
 impl LsarSolver {
@@ -127,6 +131,7 @@ impl LsarSolver {
             n_max,
             m_max,
             a: vec![0.0; p_max + 1],
+            a0: vec![0.0; p_max + 1],
             r: vec![0.0; p_max + 1],
             ra: vec![0.0; p_max + 1],
             tmp: vec![0.0; p_max + 1],
@@ -155,9 +160,16 @@ impl LsarSolver {
     fn estimate(&mut self, w: &[f64], p: usize) -> Result<usize, LsarError> {
         let n = w.len();
         if self.hann_len != n {
-            let denom = (n + 1) as f64;
-            for (i, h) in self.hann[..n].iter_mut().enumerate() {
-                *h = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * (i + 1) as f64 / denom).cos();
+            // h[i] = (1 − cos((i + 1)·δ))/2, δ = 2π/(n + 1); the cosine by a
+            // rotation recurrence (the window length changes from run to run).
+            let delta = 2.0 * std::f64::consts::PI / (n + 1) as f64;
+            let (sd, cd) = delta.sin_cos();
+            let (mut c, mut s) = (cd, sd);
+            for h in self.hann[..n].iter_mut() {
+                *h = 0.5 - 0.5 * c;
+                let c2 = c * cd - s * sd;
+                s = s * cd + c * sd;
+                c = c2;
             }
             self.hann_len = n;
         }
@@ -166,11 +178,7 @@ impl LsarSolver {
         }
         let win = &self.win[..n];
         for lag in 0..=p {
-            let mut s = 0.0;
-            for k in lag..n {
-                s += win[k] * win[k - lag];
-            }
-            self.r[lag] = s;
+            self.r[lag] = dot(&win[lag..], &win[..n - lag]);
         }
         if self.r[0] <= 0.0 || !self.r[0].is_finite() {
             // Silence (or non-finite): the trivial predictor.
@@ -217,7 +225,12 @@ impl LsarSolver {
     /// Burg estimate of AR(`p`) coefficients into `self.a` from the known
     /// samples of `w` (every index not in `unknown`), the reflection
     /// coefficients summed over the stretches between the unknowns.
-    fn estimate_burg(&mut self, w: &[f64], unknown: &[usize], p: usize) -> Result<usize, LsarError> {
+    fn estimate_burg(
+        &mut self,
+        w: &[f64],
+        unknown: &[usize],
+        p: usize,
+    ) -> Result<usize, LsarError> {
         let n = w.len();
         self.segs.clear();
         let mut start = 0usize;
@@ -246,10 +259,10 @@ impl LsarSolver {
         for m in 1..=p {
             let (mut num, mut den) = (0.0, 0.0);
             for &(a, e) in &self.segs {
-                for k in a + m..=e {
-                    num += self.fwd[k] * self.bwd[k - 1];
-                    den += self.fwd[k] * self.fwd[k] + self.bwd[k - 1] * self.bwd[k - 1];
-                }
+                let f = &self.fwd[a + m..=e];
+                let b = &self.bwd[a + m - 1..e];
+                num += dot(f, b);
+                den += sum_sq2(f, b);
             }
             let positive = den > 0.0;
             if !positive {
@@ -260,12 +273,17 @@ impl LsarSolver {
                 break;
             }
             for &(a, e) in &self.segs {
-                let mut j = e;
-                while j >= a + m {
-                    let f = self.fwd[j];
-                    self.fwd[j] = f + k * self.bwd[j - 1];
-                    self.bwd[j] = self.bwd[j - 1] + k * f;
-                    j -= 1;
+                // New errors from the old ones: the backward errors shift by
+                // one sample (copied first, so the loop has no dependency).
+                let len = e + 1 - (a + m);
+                let old_b = &mut self.win[..len];
+                old_b.copy_from_slice(&self.bwd[a + m - 1..e]);
+                let f = &mut self.fwd[a + m..=e];
+                let b = &mut self.bwd[a + m..=e];
+                for ((fj, bj), &bp) in f.iter_mut().zip(b.iter_mut()).zip(old_b.iter()) {
+                    let f_old = *fj;
+                    *fj = f_old + k * bp;
+                    *bj = bp + k * f_old;
                 }
             }
             self.tmp[..m].copy_from_slice(&self.a[..m]);
@@ -285,7 +303,19 @@ impl LsarSolver {
     /// must be at least `2·order + 1` long); `rounds` the number of
     /// alternations of AR estimate and interpolation (≥ 1).
     ///
-    /// On error `w` is left as on entry.
+    /// `limit` caps the work, in the units of [`work_units`]: no step starts
+    /// that would take the work past it. The first round uses
+    /// [`method`](Self::method), or the cheaper autocorrelation estimate when
+    /// that and one solve do not fit, or the coefficients in `first` when
+    /// given (they
+    /// must have `order + 1` entries, `first[0] = 1`); later rounds and
+    /// active-set solves are left out when they do not fit (every unknown is
+    /// still put into its box). When not even the first estimate and solve
+    /// fit, it returns [`LsarError::Budget`] and leaves `w` untouched.
+    ///
+    /// Returns the work done. On another error the contents of `w` are
+    /// undefined.
+    #[allow(clippy::too_many_arguments)]
     pub fn interpolate(
         &mut self,
         w: &mut [f64],
@@ -294,7 +324,9 @@ impl LsarSolver {
         hi: &[f64],
         order: usize,
         rounds: usize,
-    ) -> Result<(), LsarError> {
+        limit: f64,
+        first: Option<&[f64]>,
+    ) -> Result<f64, LsarError> {
         let n = w.len();
         let m = unknown.len();
         let p = order.min(self.p_max);
@@ -304,17 +336,43 @@ impl LsarSolver {
         if p == 0 || n < 2 * p + 1 {
             return Err(LsarError::WindowTooShort);
         }
+        if first.is_some_and(|a| a.len() != p + 1) {
+            return Err(LsarError::TooLarge);
+        }
         if w.iter().any(|v| !v.is_finite()) {
             return Err(LsarError::Numerical);
         }
         if m == 0 {
-            return Ok(());
+            return Ok(0.0);
         }
+        let mut work = 0.0;
+        let first_solve = solve_units(m, p);
         for round in 0..rounds.max(1) {
-            let p = match self.method {
-                ArMethod::Burg if round == 0 => self.estimate_burg(w, unknown, p)?,
-                _ => self.estimate(w, p)?,
-            };
+            if round == 0 {
+                let auto = estimate_units(n, p, false);
+                if let Some(a) = first {
+                    self.a[..=p].copy_from_slice(a);
+                    work += 1.5 * (p * p) as f64;
+                } else if self.method == ArMethod::Burg
+                    && estimate_units(n, p, true) + first_solve <= limit
+                {
+                    work += estimate_units(n, p, true);
+                    self.estimate_burg(w, unknown, p)?;
+                } else if auto + first_solve <= limit {
+                    work += auto;
+                    self.estimate(w, p)?;
+                } else {
+                    return Err(LsarError::Budget);
+                }
+                self.a0[..=p].copy_from_slice(&self.a[..=p]);
+            } else {
+                let est = estimate_units(n, p, false);
+                if work + est + first_solve > limit {
+                    break;
+                }
+                work += est;
+                self.estimate(w, p)?;
+            }
             self.coef_autocorr(p);
             self.free.clear();
             self.free_slot.clear();
@@ -329,6 +387,11 @@ impl LsarSolver {
                 if self.free.is_empty() {
                     break;
                 }
+                let cost = solve_units(self.free.len(), p);
+                if work + cost > limit {
+                    break;
+                }
+                work += cost;
                 self.solve_free(w, p)?;
                 // Fix every free unknown outside its box at the bound it crossed.
                 let mut kept = 0;
@@ -355,7 +418,13 @@ impl LsarSolver {
                 w[i] = w[i].clamp(lo[slot], hi[slot]);
             }
         }
-        Ok(())
+        Ok(work)
+    }
+
+    /// The first round's AR coefficients of the last successful
+    /// [`interpolate`](Self::interpolate) (`order + 1` entries, `a[0] = 1`).
+    pub fn first_model(&self, order: usize) -> &[f64] {
+        &self.a0[..=order.min(self.p_max)]
     }
 
     /// `R_a(d) = Σ_t a_t·a_{t+d}`.
@@ -381,15 +450,14 @@ impl LsarSolver {
         }
         // Only the rows that contain a free unknown are needed: the union of
         // [max(i, p), min(i + p, n − 1)] over the free unknowns (ascending).
+        for j in 0..=p {
+            self.tmp[j] = self.a[p - j];
+        }
         let mut next = p;
         for &i in &self.free {
             let k1 = (i + p).min(n - 1);
             for k in next.max(i)..=k1 {
-                let mut s = 0.0;
-                for j in 0..=p {
-                    s += self.a[j] * w[k - j];
-                }
-                self.e0[k] = s;
+                self.e0[k] = dot(&self.tmp[..=p], &w[k - p..=k]);
             }
             next = next.max(k1 + 1);
         }
@@ -400,11 +468,7 @@ impl LsarSolver {
         for f in 0..m {
             let i = self.free[f];
             let (k0, k1) = (i.max(p), (i + p).min(n - 1));
-            let mut s = 0.0;
-            for k in k0..=k1 {
-                s += self.a[k - i] * self.e0[k];
-            }
-            self.rhs[f] = -s;
+            self.rhs[f] = -dot(&self.a[k0 - i..=k1 - i], &self.e0[k0..=k1]);
         }
         // Normal matrix.
         for f in 0..m {
@@ -418,13 +482,11 @@ impl LsarSolver {
                     self.ra[d]
                 } else {
                     let (k0, k1) = (j.max(p), (i + p).min(n - 1));
-                    let mut s = 0.0;
-                    let mut k = k0;
-                    while k <= k1 {
-                        s += self.a[k - i] * self.a[k - j];
-                        k += 1;
+                    if k0 > k1 {
+                        0.0
+                    } else {
+                        dot(&self.a[k0 - i..=k1 - i], &self.a[k0 - j..=k1 - j])
                     }
-                    s
                 };
                 self.mat[f * m + g] = v;
                 self.mat[g * m + f] = v;
@@ -447,14 +509,86 @@ impl LsarSolver {
     }
 }
 
+/// `Σ a[i]·b[i]` over the shorter length, with four partial sums (so the
+/// compiler can vectorise it).
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut acc = [0.0f64; 4];
+    let (ac, ar) = a.as_chunks::<4>();
+    let (bc, br) = b.as_chunks::<4>();
+    for (x, y) in ac.iter().zip(bc) {
+        for l in 0..4 {
+            acc[l] += x[l] * y[l];
+        }
+    }
+    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    for (x, y) in ar.iter().zip(br) {
+        s += x * y;
+    }
+    s
+}
+
+/// `Σ a[i]² + b[i]²` over the shorter length, with four partial sums.
+#[inline]
+fn sum_sq2(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut acc = [0.0f64; 4];
+    let (ac, ar) = a.as_chunks::<4>();
+    let (bc, br) = b.as_chunks::<4>();
+    for (x, y) in ac.iter().zip(bc) {
+        for l in 0..4 {
+            acc[l] += x[l] * x[l] + y[l] * y[l];
+        }
+    }
+    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    for (x, y) in ar.iter().zip(br) {
+        s += x * x + y * y;
+    }
+    s
+}
+
+/// Work of one AR estimate on a window of `n` samples at order `p`
+/// (multiply-adds, rounded up).
+fn estimate_units(n: usize, p: usize, burg: bool) -> f64 {
+    let (n, p) = (n as f64, p as f64);
+    let base = n * (p + 2.0) + 1.5 * p * p;
+    if burg {
+        base + 5.0 * p * n
+    } else {
+        base
+    }
+}
+
+/// Work of one least-squares solve with `m` free unknowns at order `p`
+/// (multiply-adds, rounded up): prediction errors, right-hand side, normal
+/// matrix and Cholesky.
+fn solve_units(m: usize, p: usize) -> f64 {
+    let (m, p) = (m as f64, p as f64);
+    (m + p) * (p + 1.0) + 3.0 * m * (p + 1.0) + m * m * m / 6.0 + 2.0 * m * m
+}
+
+/// Upper bound of the work of [`LsarSolver::interpolate`] on a window of
+/// `n` samples with `m` unknowns at order `p` and `rounds` rounds, in
+/// multiply-adds (each step is counted at this rate when it runs).
+pub fn work_units(n: usize, m: usize, p: usize, rounds: usize, method: ArMethod) -> f64 {
+    let rounds = rounds.max(1);
+    let mut w = 0.0;
+    for r in 0..rounds {
+        w += estimate_units(n, p, method == ArMethod::Burg && r == 0);
+        w += MAX_ACTIVE_SET_ROUNDS as f64 * solve_units(m, p);
+    }
+    w
+}
+
 /// Solve `M·x = b` in place (`M` symmetric positive definite, row-major
 /// `m × m`, overwritten by its Cholesky factor; `b` overwritten by `x`).
 fn cholesky_solve(mat: &mut [f64], b: &mut [f64], m: usize) -> Result<(), LsarError> {
     for j in 0..m {
-        let mut d = mat[j * m + j];
-        for k in 0..j {
-            d -= mat[j * m + k] * mat[j * m + k];
-        }
+        let row_j = &mat[j * m..j * m + j];
+        let d = mat[j * m + j] - dot(row_j, row_j);
         let positive = d > 0.0;
         if !positive || !d.is_finite() {
             return Err(LsarError::Numerical);
@@ -463,19 +597,14 @@ fn cholesky_solve(mat: &mut [f64], b: &mut [f64], m: usize) -> Result<(), LsarEr
         mat[j * m + j] = d;
         let inv = 1.0 / d;
         for i in j + 1..m {
-            let mut s = mat[i * m + j];
-            for k in 0..j {
-                s -= mat[i * m + k] * mat[j * m + k];
-            }
-            mat[i * m + j] = s * inv;
+            let (upper, lower) = mat.split_at_mut(i * m);
+            let s = lower[j] - dot(&lower[..j], &upper[j * m..j * m + j]);
+            lower[j] = s * inv;
         }
     }
     // L·y = b
     for i in 0..m {
-        let mut s = b[i];
-        for k in 0..i {
-            s -= mat[i * m + k] * b[k];
-        }
+        let s = b[i] - dot(&mat[i * m..i * m + i], &b[..i]);
         b[i] = s / mat[i * m + i];
     }
     // Lᵀ·x = y
@@ -514,7 +643,8 @@ mod tests {
         let lo = vec![-10.0; unknown.len()];
         let hi = vec![10.0; unknown.len()];
         let mut s = LsarSolver::new(n, 16, 16);
-        s.interpolate(&mut w, &unknown, &lo, &hi, 16, 3).unwrap();
+        s.interpolate(&mut w, &unknown, &lo, &hi, 16, 3, f64::INFINITY, None)
+            .unwrap();
         for &i in &unknown {
             assert!(
                 (w[i] - truth[i]).abs() < 1e-2,
@@ -544,7 +674,8 @@ mod tests {
         let hi = vec![10.0; unknown.len()];
         let mut s = LsarSolver::new(n, 16, 16);
         s.method = ArMethod::Burg;
-        s.interpolate(&mut w, &unknown, &lo, &hi, 16, 1).unwrap();
+        s.interpolate(&mut w, &unknown, &lo, &hi, 16, 1, f64::INFINITY, None)
+            .unwrap();
         for &i in &unknown {
             assert!(
                 (w[i] - truth[i]).abs() < 1e-2,
@@ -563,7 +694,8 @@ mod tests {
         let lo = vec![0.3; 10];
         let hi = vec![0.4; 10];
         let mut s = LsarSolver::new(n, 16, 8);
-        s.interpolate(&mut w, &unknown, &lo, &hi, 8, 2).unwrap();
+        s.interpolate(&mut w, &unknown, &lo, &hi, 8, 2, f64::INFINITY, None)
+            .unwrap();
         for &i in &unknown {
             assert!((0.3..=0.4).contains(&w[i]));
         }
