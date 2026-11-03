@@ -18,11 +18,18 @@ of permissively licensed dependencies.
   gstreamer-rs bindings and GStreamer API docs.
 - **No transcription from memory:** each algorithm was derived from the
   references listed below, in our own structure and naming.
+- **Crates only for what is hard to get right** (FFT, standards-compliant
+  measurement, resampling), and only under a licence on the `deny.toml`
+  allowlist.
 - **No comparison** of output, behaviour, performance or code with the plugin
-  this project replaces. Correctness is verified against theory (analytic gain
-  curves, transfer functions, time constants) and invariants only.
+  this project replaces, and no tuning to match the output of any product.
+  Correctness is verified against theory (analytic gain curves, transfer
+  functions, time constants) and invariants. Measuring against an
+  implementation of a standard (for example the `ebur128` crate for
+  ITU-R BS.1770) is allowed, in tests only.
 - The only thing taken from the replaced plugin is the *interface* Strom
-  relies on: property names, GLib types, units, ranges and defaults.
+  relies on: property names, GLib types, units and ranges. The defaults are
+  strom-dsp's own choice (see "Element defaults").
 
 ## Algorithms
 
@@ -42,7 +49,7 @@ of permissively licensed dependencies.
 
 ### Gate (`crates/strom-dsp/src/gate.rs`)
 
-Linked downward noise gate with hysteresis and hold (spec 3.2), from the
+Linked downward noise gate with hysteresis and hold, from the
 textbook description of a gate (Zölzer, *DAFX*, dynamics chapter).
 
 - **Detector (own choice):** key = max |x| over the channels of a frame, into a
@@ -59,8 +66,9 @@ textbook description of a gate (Zölzer, *DAFX*, dynamics chapter).
 - Parameter changes only move the fade target, so they are always smoothed.
   The envelope is denormal-flushed, the gain snaps to its target within 1e-12,
   and the gate starts closed after `configure`/`reset`.
-- **Superseded after listening tests (phase 1b):** two parts of this section
-  were replaced, see "Sidechain, expander mode and gate detector" below:
+- **Superseded:** two parts of this section were replaced after problems
+  found by ear on speech and programme material, see "Sidechain, expander
+  mode and gate detector" below:
   - the peak detector, now an RMS detector with a 1 dB minimum hysteresis;
   - the one-pole release, now a full-range dB ramp (`GateFade`).
 
@@ -71,9 +79,9 @@ J. D. Reiss, "Digital Dynamic Range Compressor Design — A Tutorial and
 Analysis", JAES 60(6), 2012.
 
 - **Detector:** `x = 20·log10(max |x| over channels)` (peak, −200 dB floor).
-- **Gain computer** (knee per spec 3.3): `T = 20·log10(threshold)`,
-  `k ∈ [0.001, 1]`, `W = −40·log10(k)`, `S = 1 − 1/ratio`. The gain reduction
-  is 0 below `T − W/2`, `S·(x − T + W/2)²/(2W)` inside the knee (the paper's
+- **Gain computer** (knee given as a linear amplitude factor `k`):
+  `T = 20·log10(threshold)`, `k ∈ [0.001, 1]`, `W = −40·log10(k)`,
+  `S = 1 − 1/ratio`. The gain reduction is 0 below `T − W/2`, `S·(x − T + W/2)²/(2W)` inside the knee (the paper's
   quadratic interpolation), and `S·(x − T)` above it. `W = 0` is a hard knee.
 - **Smoothing:** a branching one-pole on the gain reduction in dB (paper's
   "smooth branching" variant): the attack coefficient while the reduction
@@ -83,9 +91,10 @@ Analysis", JAES 60(6), 2012.
   with a 10 ms one-pole; values snap on the first block after
   `configure`/`reset`. States are f64 and denormal-flushed.
 
-**Changes after listening tests (phase 1b):**
+**Later changes:**
 
-- **Detector peak hold (bass distortion fix).** At fast attack/release (1 ms /
+- **Detector peak hold (bass distortion fix, found by ear on bass-heavy
+  programme).** At fast attack/release (1 ms /
   50 ms, 10:1) the per-frame peak detector followed every half-cycle. The gain
   rippled with the waveform: 3.0 % THD at 50 Hz, 0.77 % at 200 Hz.
   - The detector level is now the sliding maximum of the linked peak over
@@ -106,8 +115,7 @@ Analysis", JAES 60(6), 2012.
   - Own choices: sine calibration ×2 (+3.01 dB) in both modes, so a threshold
     means the same in each, and the same as the gate; the peak hold comes after
     the mean square; switching modes seeds the new detector from the held level.
-- **Auto-makeup (programme-dependent, after a second listening test).** The
-  first version used the static reduction at −18 dB. It under-compensated
+- **Auto-makeup (programme-dependent).** The first version used the static reduction at −18 dB. It under-compensated
   speech that peaks near −3 dBFS by 2–6 LU, so it was replaced.
   - Starting point: automatic make-up gain from the gain computer (Giannoulis,
     Massberg & Reiss, JAES 60(6), 2012). Related work on automating compressor
@@ -243,7 +251,7 @@ them. Time constants everywhere: `a = exp(−1/(τ·fs))` (63.2 % after τ).
 | `OnePole` | one-pole smoother toward a target, snaps exactly when close | J. O. Smith III, one-pole low-pass (impulse-invariant RC) |
 | `AttackRelease` | one-pole with separate rise/fall coefficients | Giannoulis et al. 2012, "branching" smoother |
 | `PeakEnvelope` | peak follower, instant attack, exponential release, denormal flush | Giannoulis et al. 2012, level detection |
-| `GainComputer` | static soft-knee curve, knee per spec 3.3 | Giannoulis et al. 2012 |
+| `GainComputer` | static soft-knee curve, knee as a linear amplitude factor | Giannoulis et al. 2012 |
 | `GateStateMachine` | hysteresis thresholds + hold counter | Zölzer, *DAFX*, dynamics chapter |
 | `DelayLine` | multichannel interleaved ring buffer | standard circular buffer, own design |
 | `SlidingMin` | sliding-window minimum, monotonic deque in a preallocated ring | standard ascending-minima technique |
@@ -286,7 +294,7 @@ basics from J. O. Smith III. No code listing was used.
 - **Safety clip:** a guard at the ceiling that counts each intervention
   (`safety_clip_count()`); tests show it stays at 0. Release state is snapped
   to its target below 1e-15 (denormal-safe).
-- **Gain hold (bass distortion fix, after listening tests).**
+- **Gain hold (bass distortion fix, found by ear on bass-heavy programme).**
   - **Problem:** at fast settings (1 ms / 50 ms) the sliding-min window covered
     only A + 1 frames, so the gain released between waveform peaks. THD was
     3.4 % at 50 Hz, and 9.3 % with a 10 ms release.
@@ -302,7 +310,7 @@ basics from J. O. Smith III. No code listing was used.
     frames later.
   - **Guard test:** `tests/limiter_thd.rs`.
 
-### Loudness detector (`src/meter/kweighting.rs`, phase 2)
+### Loudness detector (`src/meter/kweighting.rs`)
 
 - **K-weighting:** follows ITU-R BS.1770-4/-5 Annex 1 §2.1, i.e. the
   pre-filter and RLB stages, with coefficients from tables 1 and 2 at 48 kHz.
@@ -323,9 +331,10 @@ basics from J. O. Smith III. No code listing was used.
 - **Why not `meter::LoudnessMeter`:** fed and read every block, it costs about
   231 µs (2.3 % of a core). This detector costs about 1.3 µs.
 
-### Wideband AGC (`src/agc.rs`, phase 2)
+### Wideband AGC (`src/agc.rs`)
 
-A feed-forward loudness rider, per phase 2 spec §2.3.
+A feed-forward loudness rider: a slow, gated, rate-limited gain that moves
+the programme toward a target loudness.
 - **Target gain:** `clamp(target − measured, −max_cut, +max_gain)`, updated
   every 10 ms. The applied gain ramps linearly in dB at separate up and down
   rates and stops exactly at the target, so it never overshoots.
@@ -340,20 +349,20 @@ A feed-forward loudness rider, per phase 2 spec §2.3.
   - 10 s pauses move the gain by ≤ 0.1 dB, with no overshoot afterwards.
 - No commercial processor material was used.
 
-### True-peak limiter (`src/truepeak.rs`, phase 2)
+### True-peak limiter (`src/truepeak.rs`)
 
 **Measurement concept.** ITU-R BS.1770-4/-5 Annex 2 defines the true peak as
 the maximum absolute value of the signal oversampled 4×.
 
 **Detector.**
-- Interpolation: our phase 1b polyphase half-band `Oversampler` at 4×, taking
+- Interpolation: our polyphase half-band `Oversampler` at 4×, taking
   the max |·| over sub-samples and channels (linked).
 - High-frequency term (own design): κ·|Δ⁶x|/64. The finite difference has gain
   sin⁶(πf/fs) (J. O. Smith III).
 - Each term passes through a sliding maximum over ±8 frames (van Herk /
   Gil–Werman, `SegmentedMin`).
 
-**Gain stage.** The phase 1 limiter's gain pipeline, reused through
+**Gain stage.** The sample-peak `Limiter`'s gain pipeline, reused through
 crate-internal hooks. `Limiter` is unchanged and bit-identical. Attack equals
 the lookahead.
 
@@ -372,7 +381,7 @@ the lookahead.
   clicks exceeded the ceiling by up to 0.78 dB.
 - κ = 0.45 gives about 30 % headroom over the largest value an adversarial
   search needed. Measuring against an implementation of a standard is allowed
-  by phase 2 spec §1.
+  by the clean-room rules above.
 - Cost: extra limiting on HF-heavy material. About 1 dB at 15 kHz; full-band
   white noise ends about 1.9 dB under the ceiling.
 - The term is a conservative detector margin. It is not a clipping or
@@ -383,12 +392,13 @@ ripple), within the +0.1 dB requirement.
 
 No commercial-processor material and no patent-driven method was used.
 
-### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`, phase 2)
+### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
-**The chain** is our own composition of existing parts, not a new algorithm.
-The order follows the phase 2 spec §0/§2.6: input gain → wideband AGC
-(`agc.rs`) → multiband compressor (`multiband.rs`) → true-peak limiter
-(`truepeak.rs`).
+**The chain** is our own composition of existing parts, not a new algorithm:
+input gain → wideband AGC (`agc.rs`) → multiband compressor
+(`multiband.rs`) → true-peak limiter (`truepeak.rs`). Levelling comes first,
+so the band dynamics work on programme at the target loudness, and the
+true-peak ceiling comes last, so no later stage can push a peak over it.
 
 Own choices:
 - **Input gain:** glides in dB through two cascaded 5 ms one-poles.
@@ -405,24 +415,26 @@ Own choices:
 
 **Presets** are our own.
 - **Targets and ceilings** come from EBU R 128 (−23 LUFS / −1 dBTP), ATSC A/85
-  (−24 LKFS / −2 dBTP), the AES TD1004/TD1008 streaming range (−16 LUFS) and
-  the spec's speech values.
+  (−24 LKFS / −2 dBTP) and the AES TD1004/TD1008 streaming range (−16 LUFS;
+  −18 LUFS / −1 dBTP for speech, our own choice inside that range).
 - **Dynamics settings** are textbook: low ratios, band thresholds relative to
   the target, and attack/release of at least one or ten periods of the
   band's lowest frequency (Giannoulis et al. 2012; Zölzer, *DAFX*).
 - **Crossover choices:** a 200 Hz bass split, and 3 kHz at the ear's most
   sensitive region (ISO 226).
 
-The values were checked with the spec's acceptance test (±1 LU of target,
-true peak ≤ ceiling + 0.1 dB, measured with `ebur128`).
+The values were checked with the chain acceptance test in
+`tests/broadcast.rs` (60 s programme at −35, −23 and −10 LUFS input:
+integrated loudness within ±1 LU of target after the first 10 s, true peak
+≤ ceiling + 0.1 dB, measured with `ebur128`).
 
 No commercial broadcast-processor manuals, presets or tuning were used.
 
-### Multiband compressor (`src/multiband.rs`, phase 2)
+### Multiband compressor (`src/multiband.rs`)
 
 This is our own composition of existing parts, not a new algorithm. The
-phase 1b LR4 `Crossover` (Linkwitz, JAES 1976, all-pass compensated) feeds one
-phase 1 `Compressor` per band (Giannoulis et al. 2012), and the bands are then
+LR4 `Crossover` (Linkwitz, JAES 1976, all-pass compensated) feeds one
+`Compressor` per band (Giannoulis et al. 2012), and the bands are then
 summed.
 
 Own choices:
@@ -439,7 +451,7 @@ Tests check the static curve per band against the gain-computer formula, and
 the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warped
 `r`. No commercial broadcast-processor material was used.
 
-### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`, phase 1b)
+### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`)
 
 - **Butterworth design** (Oppenheim & Schafer, *Discrete-Time Signal
   Processing*; J. O. Smith III, *Introduction to Digital Filters*).
@@ -449,7 +461,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - The bilinear transform is pre-warped with `K = tan(π fc/fs)`, so −3.01 dB
     lands on fc at any rate.
   - Pair sections are algebraically identical to the RBJ LPF/HPF at Q_k, so
-    the phase 1 biquad designs and SIMD kernels are reused.
+    the biquad designs and SIMD kernels are reused.
 - **Crossover** (S. Linkwitz, JAES 24(1), 1976; LR2n = Butterworth n squared).
   - From `B(s)B(−s) = 1 + (−1)ⁿs²ⁿ`: `LP² + HP² = B(−s)/B(s)` for n = 2, 4,
     and `LP² − HP² = B(−s)/B(s)` for n = 1.
@@ -464,7 +476,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - Frequency changes glide as in the EQ. Order and band-count changes
     crossfade over 10 ms.
 
-### Oversampler (`src/oversample.rs`, phase 1b)
+### Oversampler (`src/oversample.rs`)
 
 - **Structure:** a cascade of 2× half-band FIR stages in polyphase form
   (Crochiere & Rabiner, *Multirate Digital Signal Processing*, ch. 4–5; Lyons,
@@ -481,7 +493,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
     delays are whole base-rate frames.
 - **Measured:** passband error ≤ 0.0001 dB, images and aliases ≤ −98.4 dB.
 
-### STFT (`src/stft.rs`, phase 1b)
+### STFT (`src/stft.rs`)
 
 - **Method:** weighted overlap-add after J. O. Smith III, *Spectral Audio
   Signal Processing* (STFT, OLA, the COLA condition).
@@ -490,10 +502,10 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
 - **Normalisation:** that sum and the 1/N inverse-FFT scale are folded into
   the synthesis window.
 - **Latency (own analysis):** N − 1 samples for arbitrary buffer sizes. The
-  spec says N − hop, which only holds for hop-aligned blocks; an impulse test
+  often-quoted N − hop only holds for hop-aligned blocks; an impulse test
   verifies N − 1 exactly.
 
-### Meters (`src/meter/`, phase 1b)
+### Meters (`src/meter/`)
 
 - **`LoudnessMeter`** wraps `ebur128`, always in histogram mode.
   - Why histogram mode: the default queue mode reallocates after 500 s and
@@ -513,14 +525,15 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   the correlation, a hold time, and freezing below a silence level (the same
   idea as the gate, Zölzer, *DAFX*).
 
-### Sidechain, expander mode and gate detector (`dynamics/key.rs`, `gate.rs`, phase 1b)
+### Sidechain, expander mode and gate detector (`dynamics/key.rs`, `gate.rs`)
 
 - **`KeyDetector`:** an optional key filter (RBJ HPF, or BPF with 0 dB peak,
-  using the phase 1 `Biquad`), then the linked peak over the key's channels.
+  using the `Biquad`), then the linked peak over the key's channels.
   The detector-path structure follows Giannoulis et al. 2012. Own choice: a
   key with the wrong channel count, or too short, reads as silence (fail-safe:
   nothing is processed).
-- **Gate detector (fix after listening tests):** `MeanSquareEnvelope` is a
+- **Gate detector (fix for chatter found by ear on speech in studio
+  noise):** `MeanSquareEnvelope` is a
   one-pole average of x² with τ = 10 ms (Zölzer, *DAFX*: RMS level
   measurement).
   - Own calibration: ×2 (+3.01 dB), so a steady sine reads its peak level.
@@ -528,35 +541,33 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - These replace the instant-attack peak follower, which let single noise
     peaks open the gate when open == close. The guard test is
     `tests/gate_chatter.rs`.
-- **Gate release (second fix after listening tests):** `dynamics::GateFade`.
+- **Gate release (fix for a gate that stayed open in short speech pauses,
+  found by ear):** `dynamics::GateFade`.
   - Attack stays a one-pole on the linear gain.
   - Release is the **time to close**: a straight line in dB from 0 dB to
     `reduction` in exactly `release` ms, i.e. a constant per-sample gain
     factor `10^(−range/(20·N))` with range at least 1 dB.
   - This follows the common operator definition of gate release, a full-range
     traversal time.
-  - Why: with the phase 1 one-pole release, the gate needed ≈ 6.9 τ to reach
+  - Why: with the earlier one-pole release, the gate needed ≈ 6.9 τ to reach
     −60 dB and never closed in short pauses.
   - Closing time after the key stops is `t_detector + hold + release`.
   - Guard test: `tests/gate_chatter.rs::gate_closes_within_hold_plus_release_after_burst`
     (the old code took 1462 ms against a 140 ms budget).
-  - The phase 1 test `release_time_constant` was replaced by
+  - The earlier test `release_time_constant` was replaced by
     `release_closes_over_full_range_in_release_time`, because it measured the
     old definition.
 - **Expander mode:** a downward expander after Zölzer, *DAFX*. Below
   T = open threshold, the static gain is `max(D, (R−1)(x−T))` dB. Own choice:
   hysteresis and hold act as in the gate, and only the closed target changes.
   The element exposes it as `mode`/`ratio`.
-- **Interface-test deviation:** phase 1 `tests/interface.rs` asserts the exact
-  set of gate properties, so the additive `mode`/`ratio` would fail it by
-  construction.
-  - Minimal change: every phase 1 assertion is kept, and only these two names
-    are allowed as extra gate properties.
-  - Full checks of the two new properties are in `tests/interface_gate_1b.rs`.
+- **Interface tests:** `tests/interface.rs` asserts the exact set of gate
+  properties and allows only `mode` and `ratio`, which were added later, as
+  extra ones. Full checks of those two are in `tests/interface_gate_1b.rs`.
 - **Test signals:** pink noise is generated with the Voss method (M. Gardner,
   *Scientific American*, 1978).
 
-### `BandCorrelation` (`src/meter/band.rs`, phase 1b)
+### `BandCorrelation` (`src/meter/band.rs`)
 
 - **Structure:** our own composition of existing parts. The LR4 `Crossover`
   (Linkwitz 1976) is configured once for L and R, so both get identical
@@ -564,7 +575,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   filtered identically, the filter phase cancels in the correlation.
 - **Own choice:** default splits at 250 Hz and 4 kHz.
 
-### Ducker (`src/ducker.rs`, `src/resample.rs`, element `stromdsp-ducker`, phase 1b)
+### Ducker (`src/ducker.rs`, `src/resample.rs`, element `stromdsp-ducker`)
 
 - **Detector:** the existing sidechain blocks (`KeyDetector` with an RBJ HPF;
   `MeanSquareEnvelope`, a J. O. Smith III one-pole averager and the RMS level
@@ -592,7 +603,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
     tolerance) and the live deadline logic.
   - No GStreamer C source was read.
 
-### De-esser (`src/deesser.rs`, phase 1b)
+### De-esser (`src/deesser.rs`)
 
 - **Composition:** built only from existing blocks: `KeyDetector`,
   `GainComputer` and `AttackRelease` (Giannoulis, Massberg & Reiss, JAES 2012),
@@ -607,7 +618,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
     the input;
   - 10 ms glides for threshold and max-reduction.
 
-### Input cleanup (`src/cleanup.rs`, phase 1b)
+### Input cleanup (`src/cleanup.rs`)
 
 - **DC blocker:** the order-1 Butterworth high-pass at 5 Hz. It equals the
   one-zero/one-pole DC blocker (J. O. Smith III, *Introduction to Digital
@@ -626,7 +637,7 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - stages that are off are skipped, with 10 ms dry/wet crossfades when
     switching and two-bank crossfades for hum changes.
 
-### Delay and stereo (`src/delay.rs`, `src/stereo.rs`, phase 1b)
+### Delay and stereo (`src/delay.rs`, `src/stereo.rs`)
 
 - **Delay:** an integer-frame read tap on the shared `DelayLine` circular
   buffer (J. O. Smith III, *Physical Audio Signal Processing*, delay lines).
@@ -649,11 +660,10 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
     10 ms matrix ramp, which equals a crossfade because the processor is
     linear; signed-permutation matrices applied as copies/negations for
     bit-exactness.
-  - The element was scaffolded as `stromdsp-stereotools` and renamed to
-    `stromdsp-stereo`, because the old name was too close to a commercial
-    broadcast product.
+  - The element was scaffolded as `stromdsp-stereotools` and renamed to the
+    shorter, more generic `stromdsp-stereo`.
 
-### Meter element (`stromdsp-meter`, phase 1b)
+### Meter element (`stromdsp-meter`)
 
 - **Sources:** written from the gstreamer-rs documentation and the GStreamer
   API docs (BaseTransform passthrough, element messages,
@@ -682,19 +692,27 @@ Written from the gstreamer-rs bindings documentation and crate sources
   FLUSH_STOP call `reset()`.
 - Samples are converted from F32LE in fixed-size chunks through a scratch
   buffer, so no `unsafe` code and no alignment assumptions are needed.
-- `enabled = false` uses BaseTransform passthrough (gate, compressor, EQ). The
-  limiter is never passthrough: it keeps its lookahead delay, adds the
-  lookahead to upstream's min/max in the LATENCY query, and posts a Latency
-  message when the lookahead changes.
+- Toggling `enabled` fades instead of switching (own design). Gate,
+  compressor, EQ, de-esser, cleanup and ducker share a raised-cosine
+  crossfade between the processed and the dry signal (the raised cosine is
+  the textbook Hann window shape, Oppenheim & Schafer); once fully dry, the
+  BaseTransform elements switch to passthrough and the ducker copies the
+  programme. Delay and stereo fade through their own parameter ramps (to
+  delay 0, or to the identity matrix) and end in a bit-exact copy. The
+  limiter and the broadcast processor are never passthrough: they keep
+  their lookahead delay, report it in the LATENCY query, and post a Latency
+  message when it changes.
 
 ### Element defaults (`crates/strom-dsp/src/presets.rs`)
 
-The property defaults of `stromdsp-gate`, `-compressor` and `-limiter`, and
-the decision to keep `stromdsp-equalizer` neutral, are strom-dsp's own choice
-(spec §4, revised 2026-11-03). They are chosen for live broadcast speech and
-programme from textbook and common broadcast practice, never from any product's
-presets. Each value and its reason is documented in `presets.rs` and in the
-README ("Why these defaults"). The references are:
+The property defaults of every element are strom-dsp's own choice, including
+the decision to keep `stromdsp-equalizer`, `-cleanup`, `-delay` and `-stereo`
+neutral (bit-exact until an operator changes them) and the broadcast presets
+(see "Broadcast chain and presets"). They are chosen for live broadcast
+speech and programme from textbook and common broadcast practice, never from
+any product's presets. Each value and its reason is documented in the README
+("Why these defaults"), and for the gate, compressor, limiter and broadcast
+presets also in `presets.rs`. The references are:
 
 - EBU R68, the −18 dBFS alignment level. This sets the compressor threshold
   and the level assumptions for the gate.
@@ -712,13 +730,15 @@ The library's `*Params::default()` values are unchanged, because the theory
 tests are written against them. The elements start from
 `GateParams::broadcast()`, `CompressorParams::broadcast()`,
 `LimiterParams::broadcast()` and the `*_BROADCAST_*` constants for the
-setter-based properties. Strom sets every property it relies on explicitly,
-so these defaults do not change Strom's sound. The compressor's `auto-makeup`
-default (`false`) may be revisited once its redesign lands.
+setter-based properties. The ducker, de-esser, cleanup, delay, stereo and
+meter elements start from their library defaults. Strom sets every property
+it relies on explicitly, so these defaults do not change Strom's sound. The
+compressor's `auto-makeup` default is `false`, so inserting the element never
+raises the level by itself.
 
 ### Performance and real-time-safety tooling
 
-`tests/rtsan.rs` uses RealtimeSanitizer through `rtsan-standalone`, written
+The `tests/rtsan*.rs` files use RealtimeSanitizer through `rtsan-standalone`, written
 from that crate's README and API docs; a canary test that must abort proves
 the sanitizer is really active. `benches/strip_gungraun.rs` uses gungraun,
 written from its crate documentation. Both are optional features used only
@@ -779,7 +799,8 @@ deliberately not set (see "Engineering policies").
 | RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
 | `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |
 
-**Why these are reused (phase 1b rule: hard to get right):**
+**Why these are reused (rule: reuse a crate only for what is hard to get
+right):**
 - **`ebur128`:** the standard has many edge cases: K-weighting at any rate,
   75 %-overlap gating, absolute and relative gates, Tech 3342 percentiles, and
   true-peak oversampling. The crate is a mature port of libebur128 and is used
