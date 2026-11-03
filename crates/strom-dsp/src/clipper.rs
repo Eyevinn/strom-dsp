@@ -2,7 +2,7 @@
 //! (what the curve removes) are resampled and filtered, and then subtracted
 //! from the programme.
 //!
-//! # Signal flow (one pass; two passes in series)
+//! # Signal flow (one pass; the two-pass setting runs two in series)
 //!
 //! ```text
 //!        ┌─ delay (L) ─────────────────────────────────────────────────┐
@@ -12,7 +12,8 @@
 //! ```
 //!
 //! - **Differential clipping** (expired US 6,337,999; US 4,208,548): the
-//!   input is upsampled 8× with the shared [`Oversampler`], a soft-knee
+//!   input is upsampled (8×, or 4× in the low-latency setting) with the
+//!   shared [`Oversampler`], a soft-knee
 //!   static curve `f` is applied, and the **clippings** `c(u) = u − f(u)`
 //!   are formed at the high rate. Only the clippings are downsampled and
 //!   filtered; the programme itself stays at the base rate, delayed to
@@ -30,11 +31,12 @@
 //!   `C(u) = e²/2 − w²·ln cosh(e/w)`, `e = |u| − k`. It attenuates what
 //!   folds back from near multiples of the high rate, and delays the
 //!   clippings by half a high-rate sample, which the shaping FIR takes back.
-//!   Why 8× and not 4×: a 15 kHz tone 6 dB over the threshold left a
-//!   −79.8 dBFS alias at 4× (−52.5 dBFS without the antialiasing), −95.8
-//!   dBFS at 8×. 8× costs 2 more frames of latency per pass.
+//!   Why 8× for the standard setting: a 15 kHz tone 6 dB over the
+//!   threshold left a −75 … −80 dBFS alias at 4× (−52.5 dBFS without the
+//!   antialiasing), −94.0 dBFS at 8×. 8× costs 2 more frames of latency.
 //! - **Shaping** (expired US 4,460,871; Armstrong 2002): one linear-phase
-//!   FIR of [`SHAPE_TAPS`] taps ([`design_shaping_fir`]): a **band limit** at
+//!   FIR (41 taps; 3 in the low-latency setting) ([`design_shaping_fir`]):
+//!   a **band limit** at
 //!   `bandwidth_hz` whose passband rises toward the cut-off as
 //!   `1 + a·(f/f_b)²` with `a` = [`EDGE_RISE`], so cutting the out-of-band
 //!   part of the clippings brings less of the peak back ("overshoot
@@ -47,11 +49,12 @@
 //!   latency per pass. Low-frequency clippings are not subtracted (the
 //!   output's bass band stays the input's, as in US 4,208,548): bass peaks
 //!   are left to the true-peak limiter after the clipper (or a bass clipper
-//!   before it), and the
-//!   bass is not modulated by peaks in the upper bands.
-//! - **Two passes** (Armstrong 2002, repeated clipping and filtering):
+//!   before it), and the bass is not modulated by peaks in the upper bands.
+//! - **Passes** (Armstrong 2002, repeated clipping and filtering):
 //!   band-limiting the clippings lets peaks grow back a little; a second,
-//!   identical pass on the first pass's output takes most of that off.
+//!   identical pass on the first pass's output takes most of that off. The
+//!   standard and low settings run one pass to save latency and leave the
+//!   residue to the true-peak limiter after the clipper.
 //! - **Early-out.** Before upsampling a chunk the clipper checks a hard
 //!   bound: `B · max|x|` over the chunk and the interpolator's memory, with
 //!   `B` the largest absolute sum of the interpolator's polyphase branches
@@ -64,9 +67,17 @@
 //!
 //! # Latency
 //!
-//! Per pass, the oversampler's round trip (49 frames at 8×) plus the FIR's
-//! `(SHAPE_TAPS − 1)/2` = 20 frames: 69 frames, so 138 frames (2.875 ms at
-//! 48 kHz) for two passes, at every sample rate ([`latency_frames_for`]).
+//! Per pass, the oversampler's round trip (49 frames at 8×, 47 at 4×) plus
+//! the FIR's `(taps − 1)/2`, at every sample rate ([`ClipperLatency`]):
+//!
+//! | Setting | Structure | Latency (48 kHz) | 15 kHz alias | Worst overshoot |
+//! |---|---|---|---|---|
+//! | `Low` | 4×, 1 pass, 3 taps | 48 frames, 1.00 ms | −75.8 dBFS | +2.17 dB |
+//! | `Standard` (default) | 8×, 1 pass, 41 taps | 69 frames, 1.44 ms | −94.0 dBFS | +0.77 dB |
+//! | `TwoPass` | 8×, 2 passes, 41 taps | 138 frames, 2.88 ms | −94.0 dBFS | +0.27 dB |
+//!
+//! (Overshoot: worst sample peak re threshold over band-limited signals
+//! driven 2 and 4 dB; measured in `tests/clipper.rs`.)
 //!
 //! # Activity (for the clip budget and for upstream stages)
 //!
@@ -91,10 +102,8 @@ use crate::filter::MAX_OCTAVES_PER_MS;
 use crate::oversample::{bessel_i0, OversampleFactor, Oversampler};
 use crate::Processor;
 
-/// Taps of the shaping FIR (odd: linear phase, integer delay).
-pub const SHAPE_TAPS: usize = 41;
-/// Delay of the shaping FIR (frames).
-pub const SHAPE_DELAY: usize = (SHAPE_TAPS - 1) / 2;
+/// Most taps of the shaping FIR (odd: linear phase, integer delay).
+pub const MAX_SHAPE_TAPS: usize = 41;
 /// Kaiser β of the shaping FIR window (about 50 dB side lobes).
 const SHAPE_BETA: f64 = 4.5;
 /// Rise `a` of the shaping passband toward its cut-off, `1 + a·(f/f_b)²`
@@ -103,10 +112,57 @@ const SHAPE_BETA: f64 = 4.5;
 /// signals driven 4 dB into the clipper (two tones at 19 and 20 kHz,
 /// speech-like and pink noise) within +0.3 dB of the threshold.
 pub const EDGE_RISE: f64 = 1.0;
-/// Passes of clip-and-shape.
-pub const PASSES: usize = 2;
-/// Default oversampling of the curve.
-pub const DEFAULT_OVERSAMPLE: OversampleFactor = OversampleFactor::X8;
+/// Most passes of clip-and-shape.
+pub const MAX_PASSES: usize = 2;
+
+/// Latency setting of the clipper: oversampling, passes and shaping FIR
+/// length. Structural (takes effect at the next `configure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipperLatency {
+    /// 4×, one pass, 3-tap FIR: 48 frames (1.00 ms at 48 kHz). The
+    /// FIR only takes back the antialiasing's delay; the decimator's band
+    /// limit is the clippings' band limit. Against 2× with a 17-tap FIR (47
+    /// frames: 15 kHz alias −57.8 dBFS, worst overshoot +2.55 dB) this is
+    /// better on both (−75.8 dBFS, +2.17 dB).
+    Low,
+    /// 8×, one pass, 41-tap FIR: 69 frames (1.44 ms at 48 kHz).
+    #[default]
+    Standard,
+    /// 8×, two passes, 41-tap FIRs: 138 frames (2.88 ms at 48 kHz). The
+    /// cleanest peaks; for latency-tolerant uses and comparisons.
+    TwoPass,
+}
+
+impl ClipperLatency {
+    /// Oversampling of the curve.
+    pub fn oversampling(self) -> OversampleFactor {
+        match self {
+            Self::Low => OversampleFactor::X4,
+            Self::Standard | Self::TwoPass => OversampleFactor::X8,
+        }
+    }
+
+    /// Clip-and-shape passes.
+    pub fn passes(self) -> usize {
+        match self {
+            Self::Low | Self::Standard => 1,
+            Self::TwoPass => 2,
+        }
+    }
+
+    /// Taps of the shaping FIR (odd).
+    pub fn taps(self) -> usize {
+        match self {
+            Self::Low => 3,
+            Self::Standard | Self::TwoPass => MAX_SHAPE_TAPS,
+        }
+    }
+
+    /// Latency (frames) at every sample rate.
+    pub fn latency_frames(self) -> usize {
+        latency_frames_for(Some(self.oversampling()), self.passes(), self.taps())
+    }
+}
 /// Range of the threshold (dBFS).
 pub const THRESHOLD_RANGE_DB: (f32, f32) = (-24.0, 0.0);
 /// Range of the knee width (dB).
@@ -156,7 +212,7 @@ impl Default for FinalClipperParams {
             low_cut_hz: 120.0,
             low_cut: true,
             overshoot_compensation: true,
-            passes: PASSES,
+            passes: MAX_PASSES,
         }
     }
 }
@@ -195,7 +251,7 @@ impl FinalClipperParams {
             ),
             low_cut: self.low_cut,
             overshoot_compensation: self.overshoot_compensation,
-            passes: self.passes.clamp(1, PASSES),
+            passes: self.passes.clamp(1, MAX_PASSES),
         }
     }
 }
@@ -247,22 +303,22 @@ impl ClipStats {
     }
 }
 
-/// Latency (frames) of a [`FinalClipper`] with `factor` oversampling (`None`
-/// = no oversampling): `PASSES · (round trip + SHAPE_DELAY)`. 138 frames at
-/// 8×, at every sample rate.
-pub fn latency_frames_for(factor: Option<OversampleFactor>) -> usize {
+/// Latency (frames) of a [`FinalClipper`] with `factor` oversampling
+/// (`None` = none), `passes` passes and a `taps`-tap shaping FIR:
+/// `passes · (round trip + (taps − 1)/2)`, at every sample rate.
+pub fn latency_frames_for(factor: Option<OversampleFactor>, passes: usize, taps: usize) -> usize {
     let round_trip = match factor {
         None => 0,
         Some(OversampleFactor::X2) => 39,
         Some(OversampleFactor::X4) => 47,
         Some(OversampleFactor::X8) => 49,
     };
-    PASSES * (round_trip + SHAPE_DELAY)
+    passes * (round_trip + (taps - 1) / 2)
 }
 
-/// Design the shaping FIR (see the module docs): `SHAPE_TAPS` taps of a
+/// Design the shaping FIR (see the module docs): `taps` (odd) taps of a
 /// Kaiser-windowed ideal low-pass at `bandwidth_hz` whose passband is
-/// `1 + a·(f/f_b)²`, centred `advance` frames before tap `SHAPE_DELAY` (the
+/// `1 + a·(f/f_b)²`, centred `advance` frames before its middle tap (the
 /// curve's half-sample delay, see the module docs). With `compensate`,
 /// `a` = [`EDGE_RISE`]; otherwise `a = 0` (a plain windowed low-pass). Window method: Oppenheim
 /// & Schafer, *Discrete-Time Signal Processing*, §7.5–7.6. The ideal
@@ -273,15 +329,18 @@ pub fn design_shaping_fir(
     sample_rate: f64,
     compensate: bool,
     advance: f64,
-) -> [f32; SHAPE_TAPS] {
+    taps: usize,
+) -> [f32; MAX_SHAPE_TAPS] {
+    let taps = (taps.clamp(1, MAX_SHAPE_TAPS) - 1) | 1;
+    let delay = (taps - 1) / 2;
     let fs = sample_rate;
     let fb = bandwidth_hz.clamp(1.0, BANDWIDTH_MAX_FRACTION * fs);
     let a = if compensate { EDGE_RISE } else { 0.0 };
     let i0b = bessel_i0(SHAPE_BETA);
-    let half = SHAPE_DELAY as f64 + 0.5;
-    let mut h = [0.0f32; SHAPE_TAPS];
-    for (i, tap) in h.iter_mut().enumerate() {
-        let n = i as f64 - SHAPE_DELAY as f64 + advance;
+    let half = delay as f64 + 0.5;
+    let mut h = [0.0f32; MAX_SHAPE_TAPS];
+    for (i, tap) in h.iter_mut().take(taps).enumerate() {
+        let n = i as f64 - delay as f64 + advance;
         let ideal = if n.abs() < 1e-9 {
             2.0 / fs * (fb + a * fb / 3.0)
         } else {
@@ -294,6 +353,12 @@ pub fn design_shaping_fir(
         let r = n / half;
         let w = bessel_i0(SHAPE_BETA * (1.0 - r * r).max(0.0).sqrt()) / i0b;
         *tap = (ideal * w) as f32;
+    }
+    // Unit gain at DC (short designs drift from it): the clippings' low
+    // and mid frequencies are subtracted exactly.
+    let dc: f32 = h.iter().sum();
+    if dc.is_finite() && dc > 0.0 {
+        h.iter_mut().for_each(|v| *v /= dc);
     }
     h
 }
@@ -465,9 +530,13 @@ struct Pass {
 pub struct FinalClipper {
     params: FinalClipperParams,
     factor: Option<OversampleFactor>,
+    latency: ClipperLatency,
+    /// Structure in force (from `latency`, `factor` may be overridden).
+    n_passes: usize,
+    taps: usize,
     sample_rate: f64,
     channels: usize,
-    passes: [Pass; PASSES],
+    passes: [Pass; MAX_PASSES],
     /// Base frames each pass's input history must hold to prime the
     /// interpolator (its memory).
     prime_frames: usize,
@@ -480,8 +549,8 @@ pub struct FinalClipper {
     /// Input delayed by the whole latency, for the removed-energy meter.
     reference: DelayLine,
     /// Current and target shaping coefficients and remaining glide (frames).
-    fir: [f32; SHAPE_TAPS],
-    fir_target: [f32; SHAPE_TAPS],
+    fir: [f32; MAX_SHAPE_TAPS],
+    fir_target: [f32; MAX_SHAPE_TAPS],
     fir_glide: usize,
     low_cut_coefs: [BiquadCoefficients; 2],
     /// Low-cut frequency in force (Hz), gliding toward the parameter.
@@ -552,7 +621,10 @@ impl FinalClipper {
     pub fn new() -> Self {
         let mut s = Self {
             params: FinalClipperParams::default(),
-            factor: Some(DEFAULT_OVERSAMPLE),
+            factor: Some(ClipperLatency::Standard.oversampling()),
+            latency: ClipperLatency::Standard,
+            n_passes: ClipperLatency::Standard.passes(),
+            taps: ClipperLatency::Standard.taps(),
             sample_rate: 48_000.0,
             channels: 0,
             passes: [Pass::new(), Pass::new()],
@@ -561,8 +633,8 @@ impl FinalClipper {
             interp_bound: 1.0,
             pass_latency: 0,
             reference: DelayLine::default(),
-            fir: [0.0; SHAPE_TAPS],
-            fir_target: [0.0; SHAPE_TAPS],
+            fir: [0.0; MAX_SHAPE_TAPS],
+            fir_target: [0.0; MAX_SHAPE_TAPS],
             fir_glide: 0,
             low_cut_coefs: [BiquadCoefficients::IDENTITY; 2],
             low_cut_cur_hz: 120.0,
@@ -584,8 +656,22 @@ impl FinalClipper {
         s
     }
 
-    /// Oversampling of the curve (`None` = none, at the base rate; tests
-    /// use it as a guard). Structural: takes effect at the next `configure`.
+    /// Latency setting (oversampling, passes, FIR length). Structural:
+    /// takes effect at the next `configure`. Resets the oversampling to the
+    /// setting's.
+    pub fn set_latency(&mut self, latency: ClipperLatency) {
+        self.latency = latency;
+        self.factor = Some(latency.oversampling());
+    }
+
+    /// The latency setting.
+    pub fn latency(&self) -> ClipperLatency {
+        self.latency
+    }
+
+    /// Override the oversampling of the curve (`None` = none, at the base
+    /// rate; tests use it as a guard). Structural: takes effect at the next
+    /// `configure`.
     pub fn set_oversampling(&mut self, factor: Option<OversampleFactor>) {
         self.factor = factor;
     }
@@ -613,6 +699,7 @@ impl FinalClipper {
                 fs,
                 p.overshoot_compensation,
                 self.advance(),
+                self.taps,
             );
             if self.fresh {
                 self.fir = self.fir_target;
@@ -741,16 +828,17 @@ impl FinalClipper {
             pass.history.write_frames(x);
         }
 
-        // Shaping FIR (per channel; history of SHAPE_TAPS − 1 frames).
+        // Shaping FIR (per channel; history of taps − 1 frames).
         let any = clip.iter().any(|&v| v != 0.0);
         if any {
             pass.since_fir = 0;
         } else {
             pass.since_fir = pass.since_fir.saturating_add(n);
         }
-        let fir_live = any || pass.since_fir < SHAPE_TAPS + n;
+        let taps = self.taps;
+        let fir_live = any || pass.since_fir < taps + n;
         if fir_live {
-            let h = SHAPE_TAPS - 1;
+            let h = taps - 1;
             let stride = pass.fir_stride;
             for c in 0..ch {
                 let buf = &mut pass.fir_buf[c * stride..(c + 1) * stride];
@@ -759,7 +847,7 @@ impl FinalClipper {
                 }
                 for i in 0..n {
                     // y[n] = Σ_j h[j]·e[n − j]; the window's last entry is e[n].
-                    let win = &buf[i..i + SHAPE_TAPS];
+                    let win = &buf[i..i + taps];
                     let acc = win
                         .iter()
                         .rev()
@@ -844,9 +932,11 @@ impl FinalClipper {
         }
         self.reference.write_frames(x);
         let touched = self.run_pass(0, x);
-        self.run_pass(1, x);
+        for k in 1..self.n_passes {
+            self.run_pass(k, x);
+        }
         // Meter: input delayed to the output against what was removed.
-        let lat = PASSES * self.pass_latency;
+        let lat = self.n_passes * self.pass_latency;
         let r = &mut self.delayed[..n * ch];
         self.reference.read_frames(lat, r);
         let (mut e_in, mut e_rm) = (0.0f64, 0.0f64);
@@ -910,6 +1000,8 @@ impl Processor for FinalClipper {
         } else {
             48_000.0
         };
+        self.n_passes = self.latency.passes();
+        self.taps = self.latency.taps();
         let ratio = self.factor.map_or(1, OversampleFactor::ratio);
         let (round_trip, prime, down_span, bound) = match self.factor {
             Some(f) => {
@@ -934,9 +1026,12 @@ impl Processor for FinalClipper {
         self.prime_frames = prime;
         self.down_span = down_span;
         self.interp_bound = bound;
-        self.pass_latency = round_trip + SHAPE_DELAY;
-        debug_assert_eq!(PASSES * self.pass_latency, latency_frames_for(self.factor));
-        let stride = SHAPE_TAPS - 1 + CHUNK;
+        self.pass_latency = round_trip + (self.taps - 1) / 2;
+        debug_assert_eq!(
+            self.n_passes * self.pass_latency,
+            latency_frames_for(self.factor, self.n_passes, self.taps)
+        );
+        let stride = MAX_SHAPE_TAPS - 1 + CHUNK;
         for pass in &mut self.passes {
             if let Some(f) = self.factor {
                 pass.os.configure(f, channels);
@@ -949,7 +1044,7 @@ impl Processor for FinalClipper {
             pass.prev = vec![0.0; channels];
         }
         self.reference
-            .allocate(PASSES * self.pass_latency + CHUNK, channels);
+            .allocate(MAX_PASSES * self.pass_latency + CHUNK, channels);
         self.up = vec![0.0; (CHUNK.max(prime) * ratio).max(CHUNK) * channels];
         self.clip = vec![0.0; CHUNK * channels];
         self.delayed = vec![0.0; CHUNK * channels];
@@ -992,7 +1087,7 @@ impl Processor for FinalClipper {
     }
 
     fn latency_frames(&self) -> usize {
-        latency_frames_for(self.factor)
+        latency_frames_for(self.factor, self.n_passes, self.taps)
     }
 }
 
@@ -1002,27 +1097,44 @@ mod tests {
 
     #[test]
     fn shaping_fir_is_linear_phase_with_unit_dc() {
-        for comp in [true, false] {
-            let h = design_shaping_fir(20_000.0, 48_000.0, comp, 0.0);
-            for i in 0..SHAPE_DELAY {
-                assert_eq!(h[i], h[SHAPE_TAPS - 1 - i]);
+        for taps in [3, 17, MAX_SHAPE_TAPS] {
+            let d = (taps - 1) / 2;
+            for comp in [true, false] {
+                let h = design_shaping_fir(20_000.0, 48_000.0, comp, 0.0, taps);
+                for i in 0..d {
+                    assert_eq!(h[i], h[taps - 1 - i]);
+                }
+                assert!(h[taps..].iter().all(|&v| v == 0.0));
+                let dc: f32 = h.iter().sum();
+                assert!((dc - 1.0).abs() < 1e-5, "{taps}: {dc}");
             }
-            let dc: f32 = h.iter().sum();
-            assert!((dc - 1.0).abs() < 0.02, "{dc}");
+            if taps == MAX_SHAPE_TAPS {
+                let h = design_shaping_fir(20_000.0, 48_000.0, true, 0.0, taps);
+                let a = 1.0 + EDGE_RISE / 3.0;
+                assert!((h[d] as f64 - 2.0 * 20.0 / 48.0 * a).abs() < 0.02);
+            }
         }
-        let h = design_shaping_fir(20_000.0, 48_000.0, true, 0.0);
-        let a = 1.0 + EDGE_RISE / 3.0;
-        assert!((h[SHAPE_DELAY] as f64 - 2.0 * 20.0 / 48.0 * a).abs() < 1e-6);
     }
 
     #[test]
     fn latency_is_as_documented() {
-        assert_eq!(latency_frames_for(Some(OversampleFactor::X4)), 134);
-        assert_eq!(latency_frames_for(Some(OversampleFactor::X8)), 138);
-        let mut c = FinalClipper::new();
-        c.configure(48_000.0, 2);
-        assert_eq!(c.latency_frames(), 138);
-        assert!(c.interpolator_bound() > 1.0 && c.interpolator_bound() < 2.5);
+        assert_eq!(ClipperLatency::Low.latency_frames(), 48);
+        assert_eq!(ClipperLatency::Standard.latency_frames(), 69);
+        assert_eq!(ClipperLatency::TwoPass.latency_frames(), 138);
+        for l in [
+            ClipperLatency::Low,
+            ClipperLatency::Standard,
+            ClipperLatency::TwoPass,
+        ] {
+            let mut c = FinalClipper::new();
+            c.set_latency(l);
+            c.configure(48_000.0, 2);
+            assert_eq!(c.latency_frames(), l.latency_frames());
+            assert!(c.interpolator_bound() > 1.0 && c.interpolator_bound() < 2.5);
+        }
+        // Standard fits 1.5 ms and low 1 ms at 48 kHz.
+        assert!(ClipperLatency::Standard.latency_frames() <= 72);
+        assert!(ClipperLatency::Low.latency_frames() <= 48);
     }
 
     #[test]

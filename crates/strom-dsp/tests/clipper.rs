@@ -29,7 +29,7 @@ use std::f64::consts::PI;
 use agc_support::{noise, pink, Rng};
 use clip_metrics::*;
 use strom_dsp::biquad::{Biquad, BiquadCoefficients};
-use strom_dsp::clipper::{FinalClipper, FinalClipperParams, BANDWIDTH_RANGE_HZ};
+use strom_dsp::clipper::{ClipperLatency, FinalClipper, FinalClipperParams, BANDWIDTH_RANGE_HZ};
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};
 use strom_dsp::oversample::OversampleFactor;
 use strom_dsp::truepeak::{TruePeakLimiter, TruePeakLimiterParams};
@@ -63,6 +63,21 @@ fn allocs() -> usize {
 }
 
 const FS: f64 = 48_000.0;
+
+const SETTINGS: [ClipperLatency; 3] = [
+    ClipperLatency::Low,
+    ClipperLatency::Standard,
+    ClipperLatency::TwoPass,
+];
+
+/// A configured clipper with a latency setting.
+fn clipper_at(p: FinalClipperParams, l: ClipperLatency, ch: usize) -> FinalClipper {
+    let mut c = FinalClipper::new();
+    c.set_latency(l);
+    c.set_params(&p);
+    c.configure(FS as f32, ch);
+    c
+}
 
 fn clipper(p: FinalClipperParams, f: Option<OversampleFactor>, ch: usize) -> FinalClipper {
     let mut c = FinalClipper::new();
@@ -122,11 +137,15 @@ fn speech_like(frames: usize, hz: f64, seed: u64) -> Vec<f32> {
 /// bit for bit, in any buffer size, stereo, at several rates.
 #[test]
 fn transparent_below_knee() {
-    for fs in [44_100.0f32, 48_000.0, 96_000.0] {
+    for (fs, l) in [44_100.0f32, 48_000.0, 96_000.0]
+        .into_iter()
+        .flat_map(|fs| SETTINGS.map(|l| (fs, l)))
+    {
         let mut c = FinalClipper::new();
+        c.set_latency(l);
         c.configure(fs, 2);
         let lat = c.latency_frames();
-        assert_eq!(lat, 138);
+        assert_eq!(lat, l.latency_frames());
         // Peaks well under the knee start (the interpolator can add up to
         // its bound B on top of sample peaks).
         let x = scale_peak(pink(1 << 15, 2, fs as f64, 9), threshold() - 2.0 - 7.0);
@@ -197,10 +216,14 @@ fn early_out_is_exact() {
 // Aliasing.
 
 /// Largest spur (dBFS) of a 15 kHz tone 6 dB over the threshold, mono, 1 s
-/// analysed after 1 s.
-fn alias_spur(f: Option<OversampleFactor>, fs: f64) -> f64 {
+/// analysed after 1 s, at latency setting `l` (oversampling overridden by
+/// `f` when given).
+fn alias_spur(l: ClipperLatency, f: Option<Option<OversampleFactor>>, fs: f64) -> f64 {
     let mut c = FinalClipper::new();
-    c.set_oversampling(f);
+    c.set_latency(l);
+    if let Some(f) = f {
+        c.set_oversampling(f);
+    }
     c.configure(fs as f32, 1);
     let t = 10f64.powf(threshold() / 20.0);
     let n = fs as usize;
@@ -218,23 +241,34 @@ fn alias_spur(f: Option<OversampleFactor>, fs: f64) -> f64 {
     spur_dbfs(&s, fs, &harmonics, 6)
 }
 
-/// Spurs of the 15 kHz tone stay below −80 dBFS at 48 and 96 kHz (the
-/// tone's folded harmonics are non-harmonic). Guard: without oversampling
-/// the same curve leaves spurs far above that.
+/// Spurs of the 15 kHz tone stay below −80 dBFS at 48 and 96 kHz with the
+/// standard setting (8×; the tone's folded harmonics are non-harmonic).
+/// Guard: without oversampling the same curve leaves spurs far above that.
+/// The low setting (4×, short FIR) is measured and must stay within 1 dB of the
+/// recorded value.
 #[test]
 fn aliasing_of_clipped_15k_tone() {
-    let at_48 = alias_spur(Some(OversampleFactor::X8), 48_000.0);
-    let at_96 = alias_spur(Some(OversampleFactor::X8), 96_000.0);
-    let at_4x = alias_spur(Some(OversampleFactor::X4), 48_000.0);
-    let base = alias_spur(None, 48_000.0);
-    println!(
-        "15 kHz +6 dB: spur 8x {at_48:.1} dBFS (96 kHz: {at_96:.1}), 4x {at_4x:.1}, \
-         no oversampling {base:.1}"
+    let std48 = alias_spur(ClipperLatency::Standard, None, 48_000.0);
+    let std96 = alias_spur(ClipperLatency::Standard, None, 96_000.0);
+    let low = alias_spur(ClipperLatency::Low, None, 48_000.0);
+    let x4 = alias_spur(
+        ClipperLatency::Standard,
+        Some(Some(OversampleFactor::X4)),
+        48_000.0,
     );
-    assert!(at_48 < -80.0, "{at_48}");
-    assert!(at_96 < -80.0, "{at_96}");
+    let base = alias_spur(ClipperLatency::Standard, Some(None), 48_000.0);
+    println!(
+        "15 kHz +6 dB: spur standard (8x) {std48:.1} dBFS (96 kHz: {std96:.1}), low (4x, 3 taps) \
+         {low:.1}, 4x {x4:.1}, no oversampling {base:.1}"
+    );
+    assert!(std48 < -80.0, "{std48}");
+    assert!(std96 < -80.0, "{std96}");
+    assert!((low - LOW_ALIAS_DBFS).abs() <= 1.0, "low {low}");
     assert!(base > -80.0, "guard: no oversampling should alias, {base}");
 }
+
+/// Spur of the 15 kHz tone at the low setting (dBFS), as measured.
+const LOW_ALIAS_DBFS: f64 = -75.8;
 
 // ---------------------------------------------------------------------------
 // Overshoot.
@@ -260,7 +294,7 @@ fn band_limited_signals() -> Vec<(&'static str, Vec<f32>)> {
 
 /// Largest sample peak (dB re threshold) over the signals at drives 2 and
 /// 4 dB, after 4000 frames of warm-up.
-fn worst_overshoot(compensate: bool) -> f64 {
+fn worst_overshoot(l: ClipperLatency, compensate: bool) -> f64 {
     let p = FinalClipperParams {
         overshoot_compensation: compensate,
         ..FinalClipperParams::default()
@@ -269,26 +303,42 @@ fn worst_overshoot(compensate: bool) -> f64 {
     for (name, x) in band_limited_signals() {
         for drive in [2.0, 4.0] {
             let x = scale_peak(x.clone(), threshold() + drive);
-            let mut c = clipper(p, Some(OversampleFactor::X8), 1);
+            let mut c = clipper_at(p, l, 1);
             let y = run(&mut c, &x, 1, 480);
             let over = sample_peak_db(&y[4000..]) - threshold();
-            println!("compensation {compensate}: {name} +{drive} dB: peak {over:+.2} dB re T");
+            println!(
+                "{l:?}, compensation {compensate}: {name} +{drive} dB: peak {over:+.2} dB re T"
+            );
             worst = worst.max(over);
         }
     }
     worst
 }
 
-/// Sample peaks after the clipper stay within +0.3 dB of its threshold with
-/// the overshoot compensation; without it they do not (guard).
+/// Two passes hold sample peaks within +0.3 dB of the threshold with the
+/// overshoot compensation; one pass (the standard and the low setting)
+/// leaves more, up to the recorded bound, for the limiter after the
+/// clipper. Without the compensation every setting does worse (guard: each
+/// exceeds its bound; at the low setting's 3 taps the compensation is
+/// worth only about 0.3 dB).
 #[test]
 fn sample_peak_within_threshold() {
-    let with = worst_overshoot(true);
-    let without = worst_overshoot(false);
-    println!("worst: with compensation {with:+.2} dB, without {without:+.2} dB");
-    assert!(with <= 0.3, "{with}");
-    assert!(without > 0.3, "guard: {without}");
+    for (l, bound) in [
+        (ClipperLatency::TwoPass, 0.3),
+        (ClipperLatency::Standard, STANDARD_OVERSHOOT_DB),
+        (ClipperLatency::Low, LOW_OVERSHOOT_DB),
+    ] {
+        let with = worst_overshoot(l, true);
+        let without = worst_overshoot(l, false);
+        println!("{l:?}: worst with compensation {with:+.2} dB, without {without:+.2} dB");
+        assert!(with <= bound, "{l:?}: {with}");
+        assert!(without > bound, "{l:?}: guard: {without}");
+    }
 }
+
+/// Worst sample-peak overshoot (dB re threshold) allowed for one pass.
+const STANDARD_OVERSHOOT_DB: f64 = 0.85;
+const LOW_OVERSHOOT_DB: f64 = 2.3;
 
 // ---------------------------------------------------------------------------
 // Low cut and intermodulation.
@@ -337,14 +387,35 @@ fn low_cut_keeps_bass_band() {
     assert!(with < without - 10.0, "with {with}, without {without}");
 }
 
+/// Recorded sidebands (dBc, −50/+50/−100/+100 Hz) per setting: with the low
+/// cut, without it.
+type Sidebands = [f64; 4];
+const SIDEBANDS: [(ClipperLatency, Sidebands, Sidebands); 3] = [
+    (
+        ClipperLatency::Low,
+        [-95.7, -99.2, -4.5, -4.5],
+        [-95.9, -99.4, -4.7, -4.7],
+    ),
+    (
+        ClipperLatency::Standard,
+        [-95.2, -99.0, -4.0, -4.0],
+        [-95.5, -99.1, -4.3, -4.2],
+    ),
+    (
+        ClipperLatency::TwoPass,
+        [-70.5, -70.2, -3.1, -3.1],
+        [-90.4, -93.8, -3.7, -3.7],
+    ),
+];
+
 /// Sidebands (dBc) at 3 kHz ± 50 and ± 100 Hz when a loud 50 Hz tone (3 dB
 /// over the threshold) drives the clipper under a soft 3 kHz tone.
-fn bass_into_highs(low_cut: bool) -> [f64; 4] {
+fn bass_into_highs(l: ClipperLatency, low_cut: bool) -> [f64; 4] {
     let p = FinalClipperParams {
         low_cut,
         ..FinalClipperParams::default()
     };
-    let mut c = clipper(p, Some(OversampleFactor::X8), 1);
+    let mut c = clipper_at(p, l, 1);
     let t = 10f64.powf(threshold() / 20.0);
     let x = gen(2 * FS as usize, |s| {
         1.4 * t * (2.0 * PI * 50.0 * s).sin() + 0.1 * t * (2.0 * PI * 3000.0 * s).sin()
@@ -355,21 +426,30 @@ fn bass_into_highs(low_cut: bool) -> [f64; 4] {
     [2950.0, 3050.0, 2900.0, 3100.0].map(|f| level_at_dbfs(&s, FS, f) - c0)
 }
 
-/// Documents the bass-into-highs sidebands of the clipper on its own. A
-/// bass peak over the threshold chops the 3 kHz tone riding on it, with or
-/// without the low cut. The low cut does not lower these sidebands: it
-/// leaves the bass peak in place (for the limiter after the clipper), so
-/// the second pass chops the remaining treble again. Keeping bass out of
-/// the clipper is the job of a stage before it. Each value must stay within
-/// 1 dB of the recorded one (or both below −70 dBc), so a change shows up.
+/// Documents the bass-into-highs sidebands of the clipper on its own, per
+/// latency setting. A bass peak over the threshold chops the 3 kHz tone
+/// riding on it, with or without the low cut, so the ±100 Hz sidebands sit
+/// 2 … 4 dB under the tone in every setting. The low cut does not lower
+/// them: with one pass it changes them by 0.3 dB; with two passes it makes
+/// them 0.6 dB worse, because it leaves the bass peak in place (for the
+/// limiter after the clipper) and the second pass chops the remaining
+/// treble again. Keeping bass out of the clipper is the job of a stage
+/// before it. Each value must stay within 1 dB of the recorded one (or both
+/// below −70 dBc), so a change shows up.
 #[test]
 fn bass_into_highs_sidebands_documented() {
-    let with = bass_into_highs(true);
-    let without = bass_into_highs(false);
-    println!("sidebands -50/+50/-100/+100 Hz (dBc): low cut {with:.1?}, without {without:.1?}");
-    let recorded_with = [-70.5, -70.2, -3.1, -3.1];
-    let recorded_without = [-90.4, -93.8, -3.7, -3.7];
-    for (got, rec) in [(with, recorded_with), (without, recorded_without)] {
+    let mut cases = Vec::new();
+    for (l, rec_with, rec_without) in SIDEBANDS {
+        let with = bass_into_highs(l, true);
+        let without = bass_into_highs(l, false);
+        println!(
+            "{l:?}: sidebands -50/+50/-100/+100 Hz (dBc): low cut {with:.1?}, without \
+             {without:.1?}"
+        );
+        cases.push((with, rec_with));
+        cases.push((without, rec_without));
+    }
+    for (got, rec) in cases {
         for (m, r) in got.iter().zip(rec) {
             assert!(
                 (m - r).abs() <= 1.0 || (*m < -70.0 && r < -70.0),
@@ -408,7 +488,7 @@ fn integrated(x: &[f32]) -> f64 {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Method {
-    Clipper,
+    Clipper(ClipperLatency),
     LimiterAlone,
     HardClip,
 }
@@ -428,8 +508,9 @@ fn loudness_and_nmr(x: &[f32], method: Method) -> (f64, f64) {
     let mut lat = lim.latency_frames();
     let mut y = x.to_vec();
     match method {
-        Method::Clipper => {
+        Method::Clipper(l) => {
             let mut c = FinalClipper::new();
+            c.set_latency(l);
             c.configure(FS as f32, 1);
             lat += c.latency_frames();
             y = run(&mut c, &y, 1, 480);
@@ -464,18 +545,20 @@ fn loudness_against_nmr_beats_limiter_and_hard_clip() {
     for drive in [0.0, 1.0, 2.0, 3.0, 4.0] {
         let g = 10f64.powf(drive / 20.0) as f32;
         let x: Vec<f32> = x0.iter().map(|v| v * g).collect();
-        let (lc, nc) = loudness_and_nmr(&x, Method::Clipper);
-        let mut line = format!("drive {drive}: clipper {lc:.2} LUFS / NMR {nc:.1} dB");
-        for m in [Method::LimiterAlone, Method::HardClip] {
-            let (l, n) = loudness_and_nmr(&x, m);
-            line += &format!("; {m:?} {l:.2} LUFS / {n:.1} dB");
-            if lc < l - 0.02 || nc >= n {
-                failures.push(format!(
-                    "drive {drive}: {m:?} {l:.2}/{n:.1} vs clipper {lc:.2}/{nc:.1}"
-                ));
+        let others = [Method::LimiterAlone, Method::HardClip].map(|m| (m, loudness_and_nmr(&x, m)));
+        for setting in SETTINGS {
+            let (lc, nc) = loudness_and_nmr(&x, Method::Clipper(setting));
+            let mut line = format!("drive {drive}: {setting:?} {lc:.2} LUFS / NMR {nc:.1} dB");
+            for (m, (l, n)) in others {
+                line += &format!("; {m:?} {l:.2} LUFS / {n:.1} dB");
+                if lc < l - 0.02 || nc >= n {
+                    failures.push(format!(
+                        "drive {drive}: {m:?} {l:.2}/{n:.1} vs {setting:?} {lc:.2}/{nc:.1}"
+                    ));
+                }
             }
+            println!("{line}");
         }
-        println!("{line}");
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
