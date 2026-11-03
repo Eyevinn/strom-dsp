@@ -106,12 +106,30 @@ Analysis", JAES 60(6), 2012.
   - Own choices: sine calibration ×2 (+3.01 dB) in both modes, so a threshold
     means the same in each, and the same as the gate; the peak hold comes after
     the mean square; switching modes seeds the new detector from the held level.
-- **Auto-makeup.** Makeup equals the static gain reduction at a reference level
-  (Giannoulis et al. 2012, automatic make-up gain from the gain computer).
-  - Own choice: the reference is −18 dB sine-calibrated (the EBU R68 alignment
-    level) instead of 0 dBFS. It glides with the existing 10 ms makeup smoother.
-  - Test: integrated loudness stays within ±1.5 LU over thresholds −30 … −10 dB
-    and ratios 2 … 10, measured with `meter::LoudnessMeter`.
+- **Auto-makeup (programme-dependent, after a second listening test).** The
+  first version used the static reduction at −18 dB. It under-compensated
+  speech that peaks near −3 dBFS by 2–6 LU, so it was replaced.
+  - Starting point: automatic make-up gain from the gain computer (Giannoulis,
+    Massberg & Reiss, JAES 60(6), 2012). Related work on automating compressor
+    parameters from signal statistics: Giannoulis, Massberg & Reiss, "Parameter
+    Automation in a Dynamic Range Compressor", JAES 61(10), 716–726, 2013. That
+    is cited as context only; the method below is our own.
+  - Own design: makeup M = clamp(M_s + C, 0, 24 dB), using only frames whose
+    detector level is ≥ −50 dB (it freezes in pauses).
+    - M_s applies the current static curve to an energy-weighted level
+      histogram (61 × 1 dB bins), so setting changes take effect at once.
+    - C is a measured correction for attack and release, bounded to ±6 dB.
+    - Both age with τ = 10 s of gated frames. A short prior (the static
+      reduction at −12 dB, 0.5 s) avoids start-up jumps.
+    - Energy weighting is used because BS.1770 loudness is a mean square.
+  - Test: integrated output loudness stays within ±2 LU of the input (measured
+    ±1.0 LU) over thresholds −30 … −10 dB, ratios 2 … 10, both detectors and
+    three speech-like programmes. Measured with `meter::LoudnessMeter`. The old
+    reference failed 87 of 150 grid points.
+- **Peak hold on speech.** The hold reads the true peak of every cycle, so peak
+  mode compresses speech about 3 dB harder than a detector without hold. A
+  shorter hold barely changes this but breaks the THD guard. The hold stays at
+  20 ms; use `rms` for gentler speech compression.
 
 
 ### Equalizer (`crates/strom-dsp/src/equalizer.rs`)

@@ -133,10 +133,19 @@ in PLAYING.
   over `rms-window`, the classic choice for programme and speech. Both read a
   steady sine at its peak level, so `threshold` means the same in both modes;
   in `rms` mode, noise reads its RMS + 3 dB.
-- **`auto-makeup`:** adds the static gain reduction at −18 dBFS (sine peak,
-  the EBU R68 alignment level) as makeup. The output level then stays roughly
-  constant while threshold, ratio or knee change. `makeup-gain` applies on
-  top, and changes glide without clicks.
+- **`auto-makeup`:** keeps the perceived level roughly where it was without
+  compression. It makes up the gain reduction the programme actually gets.
+  - The estimate is energy-weighted over about the last 10 s.
+  - It freezes in pauses and silence, below −50 dB detector level.
+  - It is capped at 24 dB and never rises on noise.
+  - When threshold, ratio or knee change, the makeup follows at once.
+  - Changes glide over 10 ms, and `makeup-gain` applies on top.
+  - Trade-off: level differences that last much longer than 10 s are evened
+    out less.
+- **Peak detector on speech:** with the `peak` detector, speech is compressed
+  about 3 dB harder than with `rms`, because the detector hold reads the true
+  peak of every cycle. Use `rms` or a higher threshold for gentler speech
+  compression.
 - **Detector hold:** the detector holds its level for min(20 ms, release)
   after the level falls, so bass is not distorted at fast attack and release
   times. The release starts after that hold.
