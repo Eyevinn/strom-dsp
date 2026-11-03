@@ -9,11 +9,15 @@ it, built for the [Strom](https://github.com/Eyevinn/strom) live media engine.
   channel count and 8–192 kHz. It uses SIMD with runtime dispatch (NEON,
   SSE4.2/AVX2/AVX-512).
 - **`gst-plugin-stromdsp`** (`crates/gst-plugin-stromdsp`): the GStreamer
-  plugin `stromdsp` with ten elements: the four phase 1 channel-strip
-  elements (gate, compressor, equalizer, limiter) and six phase 1b elements
-  (ducker, de-esser, cleanup, delay, stereo, meter). It builds as a `cdylib` (for
-  `GST_PLUGIN_PATH`) and as an `rlib` for static linking
-  (`gststromdsp::plugin_register_static()`).
+  plugin `stromdsp` with eleven elements:
+  - the channel strip: `stromdsp-gate`, `stromdsp-compressor`,
+    `stromdsp-equalizer`, `stromdsp-limiter`;
+  - utility and measurement elements: `stromdsp-ducker`, `stromdsp-deesser`,
+    `stromdsp-cleanup`, `stromdsp-delay`, `stromdsp-stereo`, `stromdsp-meter`;
+  - the broadcast final processor: `stromdsp-broadcastprocessor`.
+
+  It builds as a `cdylib` (for `GST_PLUGIN_PATH`) and as an `rlib` for static
+  linking (`gststromdsp::plugin_register_static()`).
 
 Licence: MIT OR Apache-2.0. See [PROVENANCE.md](PROVENANCE.md) for the
 clean-room record: which reference each algorithm follows, and every
@@ -21,16 +25,23 @@ dependency with its licence.
 
 ## Elements
 
-The four phase 1 elements are in-place `BaseTransform`s:
+**Bypass.** Every processing element has an `enabled` property, mutable while
+PLAYING. Toggling `enabled` fades over a few ms, then the output is bit-exact,
+delayed by the element's reported latency (zero for most elements; the
+limiter and the broadcast processor keep their lookahead delay).
+
+### Channel strip
+
+The four channel-strip elements are in-place `BaseTransform`s:
 - caps `audio/x-raw, format=F32LE, layout=interleaved, rate=[1,MAX], channels=[1,MAX]`
 - klass `Filter/Effect/Audio`
 - every property controllable while PLAYING, except `num-bands`
-- `enabled=false` is bit-exact passthrough, except for the limiter (see below)
+- latency: none, except the limiter (`lookahead`, see below)
 
 Gate, compressor and limiter use **linked channels**: one gain is computed from
 the loudest channel and applied to all, so the stereo image never moves.
 
-### `stromdsp-gate`: noise gate with hysteresis and hold
+#### `stromdsp-gate`: noise gate with hysteresis and hold
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -42,7 +53,7 @@ the loudest channel and applied to all, so the stereo image never moves.
 | `release` | float | ms | 1 … 2000 | 200 |
 | `reduction` | float | dB | −80 … 0 | −35 |
 
-Phase 1b additions (additive; every phase 1 property is unchanged):
+Expander properties:
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -76,7 +87,7 @@ signal was above the close threshold.
 expansion:
 - below `open-threshold` the gain is `max(reduction, (ratio − 1)·(level − open-threshold))` dB;
 - hysteresis, hold and the fades work as in gate mode;
-- `mode=gate` is bit-identical to the phase 1 behaviour.
+- in `mode=gate`, `ratio` has no effect.
 
 **Why these defaults.** The defaults make the gate close cleanly in speech
 pauses on its own. They are strom-dsp's own choice from textbook and broadcast
@@ -98,7 +109,7 @@ R68/R128 alignment, where speech averages around −20 dBFS.
   box. 1:2 is the gentlest textbook expansion slope, ready for anyone who
   switches to `expander`.
 
-### `stromdsp-compressor`: feed-forward compressor with soft knee
+#### `stromdsp-compressor`: feed-forward compressor with soft knee
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -120,7 +131,7 @@ R68/R128 alignment, where speech averages around −20 dBFS.
 - Ratio 1 means unity (apart from makeup).
 - `knee` reads back exactly as written.
 
-**Additional properties (phase 1b).** All three are controllable and mutable
+**Detector and automatic makeup.** All three are controllable and mutable
 in PLAYING.
 
 | Property | Type | Unit | Range | Default |
@@ -169,11 +180,14 @@ textbook and broadcast practice (`strom_dsp::presets`, see `PROVENANCE.md`).
 - `detector` `rms`, `rms-window` 10 ms: an average level follows perceived
   loudness better than the sample peak, the classic choice for speech and
   programme. 10 ms covers a period of 100 Hz and matches the gate's detector.
-- `auto-makeup` `false`: the element never raises the level by itself. The
-  automatic makeup is being redesigned, and this default may be revisited
-  after that lands.
+- `auto-makeup` `false`: the element never raises the level by itself.
+  Automatic makeup is programme-dependent (see above): it learns the
+  programme over about 10 s and, like any makeup, also lifts the noise in
+  pauses (up to 24 dB after heavy compression). That is a choice for an
+  operator who knows the source, not a safe default for an element inserted
+  into a live chain.
 
-### `stromdsp-equalizer`: parametric EQ, up to 8 biquad bands
+#### `stromdsp-equalizer`: parametric EQ, up to 8 biquad bands
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -216,7 +230,7 @@ programme. The parked band settings make a first edit easy: 1000 Hz is the
 middle of the speech band, Q 0.707 is the Butterworth value (a moderate width
 for shelves and peaks), and 4 bands is a common size for a channel-strip EQ.
 
-### `stromdsp-limiter`: lookahead peak limiter
+#### `stromdsp-limiter`: lookahead peak limiter
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -260,12 +274,12 @@ are strom-dsp's own choice from textbook and broadcast practice
 - `lookahead` 5 ms: 5 ms of latency, which Strom relies on. It covers the
   attack with margin.
 
-## Phase 1b elements
+### Utility and measurement elements
 
-These are new interfaces: units are dB / ms / Hz. Every property is mutable
-while PLAYING unless noted.
+Units are dB, ms and Hz. Every property is mutable while PLAYING unless
+noted. None of these elements adds latency.
 
-### `stromdsp-ducker`: lower the programme while a key is present
+#### `stromdsp-ducker`: lower the programme while a key is present
 
 A `GstAggregator` with three pads:
 - an always pad `sink` for the programme;
@@ -287,7 +301,8 @@ reads as silence, so the programme holds and then fades back to unity.
 **Non-live pipelines.** Request `sidechain` only if it will be fed or reach
 EOS.
 
-`enabled=false` is a bit-exact passthrough, and the key is still consumed.
+Toggling `enabled` fades over a few ms, then the programme passes bit-exact.
+The key is still consumed while disabled.
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -318,6 +333,27 @@ EOS.
 | `key-active` | gboolean | key above threshold or within hold |
 | `key-present` | gboolean | real key samples covered part of that buffer |
 
+**Why these defaults.** The defaults duck music or programme under a
+presenter's microphone ("talk-over") out of the box. The levels assume EBU
+R68/R128 alignment, where speech averages around −20 dBFS.
+- `threshold` −30 dB: well below a talker at alignment level, so speech
+  triggers it reliably, and well above the noise floor of an open studio
+  microphone (< −50 dBFS), so the mic alone does not duck.
+- `depth` −12 dB: the programme drops clearly below the voice for
+  intelligibility but stays audible as a bed, without the hole of a full mute.
+- `attack` 20 ms: the programme makes room within the first syllable, as a
+  fade rather than a step.
+- `hold` 300 ms: longer than the gap between syllables and short words
+  (200–250 ms), so the programme does not pump up between words.
+- `release` 500 ms: a smooth fade back after the talker stops, slower than
+  the attack so the return is not abrupt.
+- `key-highpass` 100 Hz: rumble, handling noise and plosive pops on the key
+  mic do not trigger ducking, while the speech band above it does.
+- `range-mode` `fixed`: a constant, predictable depth whatever the talker's
+  level.
+- `meter-interval` 100 ms: ten updates per second, smooth enough for an
+  operator display; the same as `stromdsp-meter`.
+
 ```sh
 gst-launch-1.0 -m \
   audiotestsrc is-live=true wave=sine freq=220 volume=0.5 \
@@ -328,7 +364,7 @@ gst-launch-1.0 -m \
     ! audio/x-raw,format=F32LE,rate=16000,channels=1 ! duck.sidechain
 ```
 
-### `stromdsp-deesser`: sibilance reduction
+#### `stromdsp-deesser`: sibilance reduction
 
 A linked-channel de-esser.
 - A 12 dB/octave high-pass detector at `frequency` drives a gain reduction.
@@ -338,7 +374,8 @@ A linked-channel de-esser.
   crossover. With no reduction the bands sum to a flat all-pass.
 - `wideband` reduces the whole signal. It goes through the same all-pass
   split, so mode changes glide.
-- No latency. `enabled=false` is a bit-exact passthrough.
+- No latency. Toggling `enabled` fades over a few ms, then the output is
+  bit-exact.
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -350,13 +387,30 @@ A linked-channel de-esser.
 | `release` | float | ms (63 % time constant) | 1 … 2000 | 50 |
 | `mode` | enum `StromDspDeesserMode` | | `split-band` (0), `wideband` (1) | `split-band` |
 
+**Why these defaults.** The defaults tame sibilance on live speech without
+dulling the voice.
+- `frequency` 6 kHz: the energy of "s" and "sh" sounds sits mostly from
+  about 5 to 10 kHz, while the body and most consonants of the voice lie
+  below.
+- `threshold` −30 dBFS: at EBU R68/R128 alignment, sharp sibilants exceed it
+  in the high-passed detector, while normal high-frequency content mostly
+  stays below.
+- `max-reduction` 10 dB: enough to tame harsh sibilance, not so much that
+  the talker starts to sound lisping.
+- `attack` 1 ms: sibilants start abruptly, so the reduction must be in place
+  within their first milliseconds.
+- `release` 50 ms: recovers before the following vowel, so the next syllable
+  is not dulled.
+- `mode` `split-band`: only the band above `frequency` is reduced, so the
+  level and body of the voice are untouched.
+
 ```sh
 gst-launch-1.0 pulsesrc ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved ! \
   stromdsp-deesser frequency=6500 threshold=-32 max-reduction=8 mode=split-band ! \
   audioconvert ! autoaudiosink
 ```
 
-### `stromdsp-cleanup`: DC, rumble and hum removal
+#### `stromdsp-cleanup`: DC, rumble and hum removal
 
 Input cleanup for contributions and field recordings. The stages run in this
 order:
@@ -371,7 +425,7 @@ order:
 
 Every stage is off by default, so the default element is a bit-exact
 passthrough. Switching a stage on or off crossfades over 10 ms. No latency.
-`enabled=false` is a bit-exact passthrough.
+Toggling `enabled` fades over a few ms, then the output is bit-exact.
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
@@ -383,6 +437,17 @@ passthrough. Switching a stage on or off crossfades over 10 ms. No latency.
 | `hum-harmonics` | uint | number of notches | 1 … 10 | 5 |
 | `hum-q` | float | Q of the fundamental; bandwidth f0/`hum-q` | 6 … 100 | 10 |
 
+**Why these defaults.** Every stage is off, so inserting the element never
+changes the sound: whether a source needs a low cut, and whether the local
+mains hum is at 50 or 60 Hz, depends on the source and the site. The parked
+values make switching a stage on safe:
+- `highpass-order` 2 (12 dB/octave): a gentle microphone-style low cut that
+  removes rumble without thinning the voice above the corner.
+- `hum-harmonics` 5: the fundamental up to 250 Hz (50 Hz mains) or 300 Hz
+  (60 Hz), where most hum energy lies.
+- `hum-q` 10: notches 5 or 6 Hz wide, narrow enough to leave the programme
+  between them intact and wide enough for normal mains frequency drift.
+
 ```sh
 gst-launch-1.0 filesrc location=field.wav ! wavparse ! audioconvert ! \
   audio/x-raw,format=F32LE,layout=interleaved ! \
@@ -390,7 +455,7 @@ gst-launch-1.0 filesrc location=field.wav ! wavparse ! audioconvert ! \
   audioconvert ! autoaudiosink
 ```
 
-### `stromdsp-delay`: intentional delay for alignment
+#### `stromdsp-delay`: intentional delay for alignment
 
 Content alignment, such as mic alignment and lip sync. There is a common
 `delay` plus per-channel `channel-delays`. The delay per channel is
@@ -420,12 +485,17 @@ Content alignment, such as mic alignment and lip sync. There is a common
 - It is mutable while PLAYING, but not controllable, because arrays cannot be
   interpolated.
 
+**Why these defaults.** `delay` 0 and no `channel-delays`: the element is a
+bit-exact passthrough until an operator sets the delay, because every
+alignment value (microphone distance, video pipeline delay) is specific to
+the setup. A wrong default delay would put audio out of sync.
+
 ```sh
 gst-launch-1.0 audiotestsrc ! audio/x-raw,format=F32LE,channels=2,rate=48000 ! \
   stromdsp-delay delay=40 'channel-delays=<0.0, 2.5>' ! autoaudiosink
 ```
 
-### `stromdsp-stereo`: stereo utility
+#### `stromdsp-stereo`: stereo utility
 
 A stereo utility for exactly 2 channels (caps `channels=2`). It applies one
 2×2 matrix: balance · width · mode · polarity.
@@ -450,12 +520,20 @@ passthrough. No latency.
 | `balance` | float | −1 … 1 | 0 |
 | `width` | float | 0 … 2 | 1 |
 
+**Why these defaults.** `mode` `stereo`, `width` 1, `balance` 0 and no
+inversion: the element is a bit-exact passthrough until an operator changes
+it, so inserting it never alters the stereo image. `mono-law` `minus-3db`:
+when an operator folds to mono, uncorrelated material (wide stereo, room
+sound) keeps its power, and centred material rises only 3 dB. This is the
+usual compromise for mixed programme; `minus-6db` keeps centred material
+(a mono voice) at its level instead.
+
 ```sh
 gst-launch-1.0 audiotestsrc ! audio/x-raw,format=F32LE,channels=2,rate=48000 ! \
   stromdsp-stereo mode=mono mono-law=minus-6db ! autoaudiosink
 ```
 
-### `stromdsp-meter`: loudness, peak, RMS and correlation meter
+#### `stromdsp-meter`: loudness, peak, RMS and correlation meter
 
 A passthrough meter: samples are never changed. It has klass
 `Filter/Analyzer/Audio` and accepts F32LE interleaved audio with 1–64 channels.
@@ -504,16 +582,22 @@ programme peaks.
 
 Without a mask, every channel is weighted 1.0.
 
-**Cost.** Measuring costs about 7 µs per 10 ms of stereo (10 µs with true peak).
-The loudness readings are taken only when a message is due, about 170 µs per
-message.
+**Cost.** The loudness readings, the expensive part, are taken only when a
+message is due (`cargo bench -p strom-dsp --bench meter`).
+
+**Why these defaults.**
+- `interval` 100 ms: ten messages per second, smooth for an operator's
+  meter display and fine enough to follow the 400 ms momentary loudness,
+  while keeping the cost of the readings low.
+- `true-peak` `true`: EBU R128 and ATSC A/85 set their peak limits in dBTP,
+  so the meter shows the value that delivery compliance is checked against.
 
 ```sh
 gst-launch-1.0 -m audiotestsrc wave=pink-noise ! audioconvert ! \
   audio/x-raw,format=F32LE,channels=2 ! stromdsp-meter interval=100 ! autoaudiosink
 ```
 
-## Phase 2: `stromdsp-broadcastprocessor`
+### Broadcast final processor: `stromdsp-broadcastprocessor`
 
 A broadcast/streaming final processor: the last stage before a programme
 leaves Strom. Its job is consistent, standards-compliant loudness under a
@@ -539,7 +623,7 @@ when it changes (only at caps negotiation). With `enabled=false` the output is
 the input delayed by exactly that latency. The element never uses
 BaseTransform passthrough.
 
-### Properties
+#### Properties
 
 Units are dB, LUFS, dBTP, dB/s, ms and Hz. Every property is controllable and
 mutable in PLAYING unless noted.
@@ -584,12 +668,12 @@ Alternatively, set them all at once with `crossover-frequencies`, whose
 entries are sorted. GObject validates each entry, so an out-of-range or NaN
 entry rejects the whole write.
 
-### Presets
+#### Presets
 
 Setting `preset` sets every property except `enabled`, `meter-interval`,
 `num-bands` and `limiter-lookahead`, using the current `num-bands`.
-- **`limiter-lookahead`:** it is READY-only, which is a documented deviation
-  from the phase 2 spec §3.2. All presets assume 5 ms.
+- **`limiter-lookahead`:** it sets the element's latency, so it is READY-only
+  and not part of a preset. All presets assume 5 ms.
 - **Writing another property afterwards:** a write that changes a value
   changes only that property, and `preset` then reads `custom`. Writing
   `custom` changes nothing.
@@ -610,11 +694,14 @@ All presets: `input-gain` 0, all stages on, `multiband-drive` 0, band makeup 0.
 
 **Why these values:**
 - **Targets and ceilings:** EBU R 128, ATSC A/85, and the AES TD1004/TD1008
-  streaming range.
+  streaming range (`speech` sits inside that range at −18 LUFS).
 - **Band thresholds:** target + 5 dB (speech: + 7 dB). They follow the target
   because the multiband comes after the AGC.
-- **AGC range and rates:** `ebu-r128` keeps the spec defaults. The others need
-  ±24 dB and 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
+- **AGC range and rates:** `ebu-r128` uses ±12 dB, which covers programme
+  delivered between −35 and −11 LUFS, and 1 dB/s up, 3 dB/s down: a slow
+  fader, not a compressor, that brings a loud item down faster than it lifts
+  a quiet one. The others sit further from typical delivery levels, so they
+  need ±24 dB and 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, and a
   150 ms limiter release.
 
@@ -628,6 +715,19 @@ Crossovers and band time constants depend only on the band count:
 | 4 | 120, 800, 4000 | 30/300, 15/200, 8/150, 5/100 |
 | 5 | 120, 800, 4000, 10000 | 30/300, 15/200, 8/150, 5/100, 3/80 |
 
+**Why these defaults.** The element starts as the `ebu-r128` preset at
+4 bands, so it delivers to the European broadcast loudness standard with no
+property set; the preset reasons above apply. The settings outside the
+presets:
+- `enabled` `true`: a final processor is meant to be on.
+- `num-bands` 4 (crossovers 120, 800 and 4000 Hz): bass, body, presence and
+  top are controlled separately, without the extra phase shift and cost of a
+  fifth band.
+- `limiter-lookahead` 5 ms: the limiter's attack equals the lookahead, and
+  5 ms catches a peak with a smooth ramp; it matches `stromdsp-limiter`.
+- `meter-interval` 100 ms: ten updates per second, the same as
+  `stromdsp-meter`.
+
 **Measured result:** a 60 s synthetic programme at −35, −23 and −10 LUFS input
 lands within ±1 LU of each preset's target (integrated, after the first
 10 s), and true peak stays ≤ ceiling + 0.1 dB (both measured with `ebur128`).
@@ -637,7 +737,7 @@ percussive hits, can land 1–3 LU below target. The multiband stage and the
 limiter come after the AGC, so the level they remove is not made up. True peak
 still holds.
 
-### Signals
+#### Signals
 
 - **`get-preset-values(gchararray nick) -> GstStructure`:** returns a
   structure named after the preset, with one field per property the preset
@@ -645,7 +745,7 @@ still holds.
   unknown nick.
 - **`reset()`:** restarts the output integrated loudness.
 
-### Meter message
+#### Meter message
 
 The element posts an element message named `stromdsp-broadcastprocessor`
 every `meter-interval` ms of stream time, at most once per buffer. Silence
@@ -654,10 +754,10 @@ reads −200.0, never NaN.
 | Field | Type | Meaning |
 |---|---|---|
 | `running-time`, `stream-time` | guint64, ns | end of the buffer |
-| `input-momentary`, `input-short-term` | gdouble, LUFS | after `input-gain` |
+| `input-momentary`, `input-short-term` | gdouble, LUFS | measured before `input-gain`: the signal as it arrives |
 | `output-momentary`, `output-short-term` | gdouble, LUFS | |
 | `output-integrated` | gdouble, LUFS | gated, since start or `reset` |
-| `input-true-peak`, `output-true-peak` | gdouble, dBTP | max since the last message; input is after `input-gain` |
+| `input-true-peak`, `output-true-peak` | gdouble, dBTP | max since the last message; input is measured before `input-gain` |
 | `agc-gain` | gdouble, dB | signed; + is boost |
 | `band-gain-reduction` | GstValueArray of gdouble | positive dB of reduction, one per active band |
 | `limiter-gain-reduction` | gdouble | positive dB of reduction; max of values sampled every 512 frames |
@@ -685,10 +785,9 @@ cargo deny check licenses
 ```
 
 Optional checks, described in [docs/PERFORMANCE.md](docs/PERFORMANCE.md):
-- RealtimeSanitizer on Linux/macOS, run once per `tests/rtsan*.rs` file:
-  `RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan`
-  (also `rtsan_filter`, `rtsan_meter`, `rtsan_sampling`, `rtsan_sidechain`,
-  `rtsan_ducker`, `rtsan_deesser_cleanup`, `rtsan_delay_stereo`).
+- RealtimeSanitizer on Linux/macOS: every `crates/strom-dsp/tests/rtsan*.rs`
+  file runs under RealtimeSanitizer, one `--test` at a time, e.g.
+  `RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan`.
 - Instruction-count benchmarks with gungraun on Linux.
 
 ## Use with GStreamer
@@ -731,79 +830,48 @@ comp.process(&mut interleaved_f32); // real-time safe
 Reusable building blocks are public too:
 - `strom_dsp::biquad`: RBJ coefficient design, analytic magnitude, a DF-I
   `Biquad` with coefficient ramps.
-- `strom_dsp::dynamics`:
-  - envelope followers (peak, RMS);
-  - a soft-knee gain computer;
-  - the gate state machine and `GateFade` (one-pole attack, full-range dB release);
+- `strom_dsp::dynamics`, the building blocks of the dynamics processors:
+  - smoothers and envelope followers: `OnePole`, `AttackRelease`,
+    `PeakEnvelope`, `MeanSquareEnvelope` (RMS);
+  - the soft-knee `GainComputer`;
+  - the `GateStateMachine` and `GateFade` (one-pole attack, full-range dB
+    release);
   - the sidechain `KeyDetector` (key filter, linked peak);
-  - delay line, sliding minimum and ramp smoother.
+  - `DelayLine`, `SlidingMin`/`SegmentedMin` and the `RampSmoother`.
 - `strom_dsp::filter`: Butterworth high-/low-pass (order 1–8) and the
   Linkwitz-Riley `Crossover` (LR2/4/8, 1–5 bands, all-pass compensated).
 - `strom_dsp::oversample`: polyphase half-band oversampler, 2×/4×/8×, with
   integer latency.
 - `strom_dsp::stft`: STFT framework (√Hann WOLA over `realfft`) with a
   per-frame spectrum callback.
-- `strom_dsp::meter`: `LoudnessMeter` (BS.1770 via `ebur128`),
+- `strom_dsp::meter`: `LoudnessMeter` (BS.1770 via `ebur128`), the
+  low-cost BS.1770 `LoudnessDetector` (momentary and short-term),
   `CorrelationMeter`, `BandCorrelation` and `MonoDetector`.
-- Processors behind the phase 1b elements: `ducker`, `deesser`, `cleanup`,
+- `strom_dsp::agc`: `Agc`, the gated, rate-limited loudness-targeting AGC.
+- `strom_dsp::multiband`: `MultibandCompressor`, an LR4 crossover with one
+  compressor per band (1–5 bands).
+- `strom_dsp::truepeak`: `TruePeakLimiter`, a lookahead limiter with a 4×
+  oversampled true-peak detector (BS.1770 Annex 2).
+- `strom_dsp::broadcast`: `BroadcastProcessor`, the chain behind
+  `stromdsp-broadcastprocessor` (input gain → AGC → multiband → true-peak
+  limiter), with its meters.
+- `strom_dsp::presets`: the element defaults (`GateParams::broadcast()` and
+  friends) and the broadcast presets (`BroadcastPreset`).
+- Processors behind the utility elements: `ducker`, `deesser`, `cleanup`,
   `delay` and `stereo`.
 
 ## Performance
 
-Run the benchmark with `cargo bench -p strom-dsp --bench strip` (criterion).
-These numbers are criterion medians on an Apple M5 Pro (aarch64, NEON level),
-release profile with fat LTO, 48 kHz.
-- **% of one core** = time per buffer ÷ buffer duration. 480 frames are 10 ms;
-  1024 frames are 21.3 ms.
-- **The strip** is gate → compressor → 4-band EQ (HPF 80 Hz, bell 300 Hz
-  −3 dB, bell 3 kHz +2.5 dB, high shelf 10 kHz +2 dB) → limiter. The input is a
-  synthetic programme, so every stage does real work.
+`cargo bench -p strom-dsp` runs the criterion benchmarks: the channel strip
+(gate → compressor → 4-band EQ → limiter), each processor on its own, and the
+building blocks (filters, oversampler, STFT, meters, AGC, multiband,
+true-peak limiter, broadcast chain). Run a single one with
+`cargo bench -p strom-dsp --bench <name>`. "% of one core" is the time per
+buffer divided by the buffer's duration (480 frames at 48 kHz are 10 ms).
 
-| Benchmark | 480 frames | 1024 frames | % of one core |
-|---|---|---|---|
-| **Channel strip, stereo** | **6.83 µs** | **14.33 µs** | **0.068 %** |
-| Gate, stereo | 0.79 µs | 1.65 µs | 0.008 % |
-| Compressor, stereo | 2.54 µs | 5.38 µs | 0.025 % |
-| EQ 4-band, mono | 0.98 µs | 2.01 µs | 0.010 % |
-| EQ 4-band, stereo | 1.02 µs | 2.08 µs | 0.010 % |
-| EQ 4-band, 8 channels | 3.91 µs | 8.15 µs | 0.039 % |
-| EQ 4-band, stereo, gain automated every buffer | 2.69 µs | 5.63 µs | 0.027 % |
-| Limiter, stereo | 3.04 µs | 6.46 µs | 0.030 % |
-| Limiter, stereo, +20 dB input (heavy limiting) | 3.08 µs | 6.58 µs | 0.031 % |
+<!-- BENCHMARK NUMBERS -->
 
-The spec target is "well under 1 % of one core per strip". One strip costs
-about 0.07 %, so one core can run more than 1000 stereo strips.
-
-### Phase 1b components
-
-These numbers were reported by the agents that built each component: criterion
-medians on the same Apple M-series machine, 48 kHz stereo, one 480-frame
-(10 ms) buffer, taken while the machine was under other load. Expect about
-±10 %. Run them with `cargo bench -p strom-dsp --bench <name>`, using the names
-`filters`, `sampling`, `meter`, `sidechain`, `ducker`, `dynamics_1b`
-(de-esser), `cleanup` and `channel_tools` (delay, stereo).
-
-| Benchmark | Time per buffer | % of one core |
-|---|---|---|
-| Butterworth order 4 / order 8 | 0.86 / 1.02 µs | 0.009 / 0.010 % |
-| LR4 crossover, 3 / 5 bands | 3.48 / 7.98 µs | 0.035 / 0.08 % |
-| Oversampler 4× up+down | 11.7 µs | 0.12 % |
-| STFT 1024/256, 2048/512 (identity) | 7.0 / 8.6 µs | 0.07 / 0.09 % |
-| Loudness meter, without / with true peak | 7.2 / 10.4 µs | 0.07 / 0.10 % |
-| Band correlation (3 bands) | 5.6 µs | 0.056 % |
-| Compressor keyed + HPF key filter | 3.55 µs | 0.036 % |
-| Gate (RMS detector), expander | 1.53 / 1.79 µs | 0.015 / 0.018 % |
-| Ducker (48 kHz mono key, HPF) | 3.35 µs | 0.034 % |
-| De-esser, split-band | 8.42 µs | 0.084 % |
-| Cleanup, DC + HP4 + 10 hum notches | 4.71 µs | 0.047 % |
-| Delay 20 ms, stereo | 0.15 µs | 0.0015 % |
-| Stereo, width + balance | 0.33 µs | 0.003 % |
-
-The gate became about 1.8× slower with the RMS detector, which fixes chatter on
-noise peaks. It is still 0.015 % of a core.
-
-x86-64 timings (SSE4.2/AVX2/AVX-512 paths) have not been measured yet. CI runs
-the tests on those paths. For instruction-count benchmarks (gungraun), the
+For the full benchmark list, instruction-count benchmarks (gungraun), the
 RealtimeSanitizer tests, SIMD design notes and the denormal policy, see
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
