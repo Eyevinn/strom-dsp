@@ -12,7 +12,7 @@
 //!   `meter::LoudnessMeter` (`ebur128`) on the same signal.
 //! - Robustness and zero allocations.
 //! - Acceptance (60 s programme per preset at −35/−23/−10 LUFS): see
-//!   [`acceptance`]; ignored until the true-peak limiter is in the chain.
+//!   [`acceptance`], using the presets of `strom_dsp::presets`.
 
 mod agc_support;
 
@@ -799,50 +799,28 @@ fn no_allocation() {
 // ---------------------------------------------------------------------------
 // Acceptance (phase 2 spec §4 "Chain").
 
-/// 60 s programmes per preset at three input levels. Needs the true-peak
-/// limiter (the stand-in limiter is sample-peak only) and the presets.
+/// 60 s programmes per preset (`strom_dsp::presets`, at the default 4 bands)
+/// at three input levels: the integrated loudness (excluding the first
+/// 10 s) lands within ±1 LU of the preset target, and the output true peak
+/// (BS.1770, `ebur128`) stays at or below the ceiling + 0.1 dB.
+///
+/// With these gentle presets this programme's output true peak stays 2 …
+/// 9 dB below the ceiling, so the true-peak part passes with the interim
+/// sample-peak limiter too; it does not stress the limiter (the limiter's
+/// own tests do). TODO(true-peak limiter): add a hot, peaky programme here
+/// once the true-peak limiter is in the chain.
 mod acceptance {
     use super::*;
+    use strom_dsp::presets::BroadcastPreset;
 
     const SECONDS: usize = 60;
     const SKIP_SECONDS: usize = 10;
+    /// Allowed true-peak overshoot (phase 2 spec §2.5).
+    const TP_MARGIN_DB: f64 = 0.1;
 
-    /// Explicit parameters standing in for the presets (targets and
-    /// ceilings of phase 2 spec 3.2) until `presets.rs` has them.
+    /// The preset with this nick, at the default band count.
     fn preset(name: &str) -> BroadcastParams {
-        let mut p = BroadcastParams::default();
-        match name {
-            "ebu-r128" => {
-                p.target_loudness_lufs = -23.0;
-                p.true_peak_ceiling_dbtp = -1.0;
-            }
-            "atsc-a85" => {
-                p.target_loudness_lufs = -24.0;
-                p.true_peak_ceiling_dbtp = -2.0;
-            }
-            "streaming" => {
-                p.target_loudness_lufs = -16.0;
-                p.true_peak_ceiling_dbtp = -1.0;
-            }
-            "speech" => {
-                p.target_loudness_lufs = -18.0;
-                p.true_peak_ceiling_dbtp = -1.0;
-            }
-            _ => unreachable!(),
-        }
-        // Fast enough to land within the first 10 s from any input level.
-        p.agc_rate_up_db_s = 3.0;
-        p.agc_rate_down_db_s = 6.0;
-        // Reach any of the three input levels.
-        p.agc_max_gain_db = 24.0;
-        p.agc_max_cut_db = 24.0;
-        // The multiband stage follows the AGC, so its gain reduction at
-        // the target level lowers the output below target. Thresholds
-        // relative to the target keep that reduction small.
-        for b in &mut p.bands {
-            b.threshold_db = p.target_loudness_lufs + 6.0;
-        }
-        p
+        BroadcastParams::preset(BroadcastPreset::from_nick(name).unwrap(), 4)
     }
 
     /// A music-like programme: pink noise with a 4 Hz level modulation, two
@@ -864,7 +842,9 @@ mod acceptance {
         x
     }
 
-    fn check(name: &str) {
+    /// Run the three input levels; assert ±1 LU and true peak ≤ ceiling +
+    /// `tp_margin_db`.
+    fn check(name: &str, tp_margin_db: f64) {
         let ch = 2;
         let fs = FS as f64;
         let p = preset(name);
@@ -893,13 +873,18 @@ mod acceptance {
             }
             let integrated = meter.integrated();
             let tp = db((0..ch).map(|c| meter.true_peak(c)).fold(0.0, f64::max));
+            println!(
+                "{name} at {input_lufs} LUFS: integrated {integrated:.2} LUFS (target {}), \
+                 true peak {tp:.2} dBTP (ceiling {})",
+                p.target_loudness_lufs, p.true_peak_ceiling_dbtp
+            );
             assert!(
                 (integrated - p.target_loudness_lufs as f64).abs() <= 1.0,
                 "{name} at {input_lufs} LUFS: integrated {integrated:.2} LUFS, target {}",
                 p.target_loudness_lufs
             );
             assert!(
-                tp <= p.true_peak_ceiling_dbtp as f64 + 0.1,
+                tp <= p.true_peak_ceiling_dbtp as f64 + tp_margin_db,
                 "{name} at {input_lufs} LUFS: true peak {tp:.2} dBTP, ceiling {}",
                 p.true_peak_ceiling_dbtp
             );
@@ -907,26 +892,22 @@ mod acceptance {
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_ebu_r128() {
-        check("ebu-r128");
+        check("ebu-r128", TP_MARGIN_DB);
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_atsc_a85() {
-        check("atsc-a85");
+        check("atsc-a85", TP_MARGIN_DB);
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_streaming() {
-        check("streaming");
+        check("streaming", TP_MARGIN_DB);
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_speech() {
-        check("speech");
+        check("speech", TP_MARGIN_DB);
     }
 }

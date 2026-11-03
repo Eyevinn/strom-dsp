@@ -72,6 +72,13 @@
 //! The meter is a passthrough (trivially clean, still measured). The ducker
 //! is a `GstAggregator`: it is driven on both pads (programme and a steady
 //! key on `sidechain`) like its own harness test.
+//!
+//! The broadcast processor runs with its multiband band 2 (800 … 4000 Hz,
+//! where the 1 kHz tone is) compressing and the true-peak limiter limiting.
+//! Its AGC rides the gain at most a few dB/s by design, which the
+//! annihilator reads far below the bound (a 3 dB/s ramp is about −110 dB),
+//! so the AGC stays on. Its READY-only properties (`num-bands`,
+//! `limiter-lookahead`) are not PLAYING-mutable and so not knobs.
 
 mod util;
 
@@ -105,7 +112,7 @@ const HARD_LIMIT_DB: f64 = -50.0;
 const TARGET_DB: f64 = -60.0;
 
 /// Elements and the GObject type name of each.
-const ELEMENTS: [&str; 10] = [
+const ELEMENTS: [&str; 11] = [
     "stromdsp-gate",
     "stromdsp-compressor",
     "stromdsp-equalizer",
@@ -116,6 +123,7 @@ const ELEMENTS: [&str; 10] = [
     "stromdsp-delay",
     "stromdsp-meter",
     "stromdsp-ducker",
+    "stromdsp-broadcastprocessor",
 ];
 
 /// Test tone: one frequency, per-channel amplitude and phase.
@@ -271,6 +279,13 @@ fn base_setup(factory: &str) -> Vec<(&'static str, &'static str)> {
         "stromdsp-meter" => vec![],
         // Steady key well above threshold: ducking by `depth`.
         "stromdsp-ducker" => vec![("threshold", "-30"), ("depth", "-15")],
+        // Band 2 (the tone's band) compressing; the tone raised to 0 dBFS
+        // into a −6 dBTP ceiling, so the limiter limits.
+        "stromdsp-broadcastprocessor" => vec![
+            ("band2-threshold", "-30"),
+            ("input-gain", "12"),
+            ("true-peak-ceiling", "-6"),
+        ],
         _ => unreachable!("{factory}"),
     }
 }
@@ -533,6 +548,48 @@ fn cases() -> Vec<Case> {
     v.push(case(u, &[], &[("key-highpass", "2000")]));
     v.push(case(u, &[], &[("range-mode", "proportional")]));
     v.push(case(u, &[], &[("meter-interval", "0")]));
+
+    // ---- broadcast processor (band 2 compressing, limiter limiting) ----
+    let b = "stromdsp-broadcastprocessor";
+    v.push(case(b, &[], &[("enabled", "false")]));
+    v.push(case(b, &[("enabled", "false")], &[("enabled", "true")]));
+    // Presets jump many parameters at once.
+    v.push(case(b, &[], &[("preset", "streaming")]));
+    v.push(case(b, &[("preset", "streaming")], &[("preset", "speech")]));
+    v.push(case(b, &[], &[("preset", "atsc-a85")]));
+    v.push(case(b, &[], &[("preset", "custom")]));
+    // Stage bypass, both ways.
+    for stage in ["agc-enabled", "multiband-enabled", "limiter-enabled"] {
+        v.push(case(b, &[], &[(stage, "false")]));
+        v.push(case(b, &[(stage, "false")], &[(stage, "true")]));
+    }
+    // Extremes of the gains.
+    v.push(case(b, &[], &[("input-gain", "24")]));
+    v.push(case(b, &[], &[("input-gain", "-24")]));
+    v.push(case(b, &[], &[("multiband-drive", "12")]));
+    v.push(case(b, &[], &[("multiband-drive", "-12")]));
+    v.push(case(b, &[], &[("true-peak-ceiling", "0")]));
+    v.push(case(b, &[], &[("true-peak-ceiling", "-12")]));
+    v.push(case(b, &[], &[("target-loudness", "-5")]));
+    v.push(case(b, &[], &[("target-loudness", "-40")]));
+    // Crossovers sweeping across the tone (band 2 → band 1, and back).
+    v.push(case(b, &[], &[("crossover1-frequency", "3000")]));
+    v.push(case(
+        b,
+        &[("crossover1-frequency", "3000")],
+        &[("crossover1-frequency", "200")],
+    ));
+    v.push(case(
+        b,
+        &[],
+        &[("crossover-frequencies", "<100.0, 2000.0, 5000.0, 12000.0>")],
+    ));
+    v.push(case(
+        b,
+        &[],
+        &[("crossover-frequencies", "<20.0, 21.0, 22.0, 23.0>")],
+    ));
+    v.push(case(b, &[], &[("meter-interval", "0")]));
 
     v
 }
