@@ -398,8 +398,10 @@ impl BroadcastParams {
     }
 
     /// Set every field of `preset` for the current `num_bands`, except
-    /// `enabled`, `num_bands`, `spike_guard_lookahead_ms` and
-    /// `limiter_lookahead_ms`, which a preset never changes.
+    /// `enabled`, `num_bands` and the latency settings
+    /// (`spike_guard_lookahead_ms`, `bass_clipper_lookahead_ms`,
+    /// `clipper_latency`, `limiter_lookahead_ms`), which a preset never
+    /// changes.
     pub fn apply_preset(&mut self, preset: BroadcastPreset) {
         let (target, ceiling, gate, offset, ratio, limiter_release) = preset.row();
         let times = broadcast_band_times(self.num_bands);

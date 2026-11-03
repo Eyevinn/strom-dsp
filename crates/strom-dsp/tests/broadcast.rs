@@ -244,20 +244,20 @@ fn latency_formula() {
         );
     }
     // Spike guard (4× interpolator 24 + its 0.5 ms standard lookahead), the
-    // bass clipper's 3 ms lookahead, the final clipper (69 frames, standard
+    // bass clipper's 1 ms standard lookahead, the final clipper (69 frames, standard
     // setting), then the limiter lookahead plus the true-peak detector delay
     // (24 + 8 frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        (24 + 24) + 144 + 69 + 240 + 32
+        (24 + 24) + 48 + 69 + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        (24 + 22) + 132 + 69 + 221 + 32
+        (24 + 22) + 44 + 69 + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        (24 + 48) + 288 + 69 + 480 + 32
+        (24 + 48) + 96 + 69 + 480 + 32
     );
     // Defaults: 1.5 ms lookahead, standard clipper; the low clipper setting
     // with 0.75 ms.
@@ -268,11 +268,11 @@ fn latency_formula() {
             d.limiter_lookahead_ms,
             d.clipper_latency
         ),
-        (24 + 24) + 144 + 69 + 72 + 32
+        (24 + 24) + 48 + 69 + 72 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for_config(48_000.0, 0.75, ClipperLatency::Low),
-        (24 + 24) + 144 + 48 + 36 + 32
+        (24 + 24) + 48 + 48 + 36 + 32
     );
     // The spike guard lookahead is structural too (0 = low latency).
     let low = BroadcastParams {
@@ -281,13 +281,29 @@ fn latency_formula() {
     };
     assert_eq!(
         BroadcastProcessor::latency_frames_for_params(48_000.0, &low),
-        24 + 144 + 69 + 72 + 32
+        24 + 48 + 69 + 72 + 32
     );
     let mut bp = processor(48_000.0, 2, &BroadcastParams::default());
     bp.set_params(&low);
-    assert_eq!(bp.latency_frames(), 48 + 144 + 69 + 72 + 32);
+    assert_eq!(bp.latency_frames(), 48 + 48 + 69 + 72 + 32);
     bp.configure(48_000.0, 2);
-    assert_eq!(bp.latency_frames(), 24 + 144 + 69 + 72 + 32);
+    assert_eq!(bp.latency_frames(), 24 + 48 + 69 + 72 + 32);
+    // So is the bass clipper lookahead (0 … 10 ms; 0 = low latency).
+    for (ms, frames) in [(0.0f32, 0usize), (1.0, 48), (3.0, 144), (50.0, 480)] {
+        let p = BroadcastParams {
+            bass_clipper_lookahead_ms: ms,
+            ..BroadcastParams::default()
+        };
+        assert_eq!(
+            BroadcastProcessor::latency_frames_for_params(48_000.0, &p),
+            48 + frames + 69 + 72 + 32,
+            "bass lookahead {ms} ms"
+        );
+        let mut bp = processor(48_000.0, 2, &p);
+        assert_eq!(bp.latency_frames(), 48 + frames + 69 + 72 + 32);
+        bp.set_params(&BroadcastParams::default());
+        assert_eq!(bp.latency_frames(), 48 + frames + 69 + 72 + 32);
+    }
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),

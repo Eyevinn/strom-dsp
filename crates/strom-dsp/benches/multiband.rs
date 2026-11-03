@@ -4,7 +4,7 @@
 //! core is `48 000 frames/s ÷ measured frames/s`.
 //!
 //! A second case adds a downward expander on every band and the bass
-//! clipper on band 0 (3 ms lookahead), as the broadcast processor uses them.
+//! clipper on band 0 (1 ms standard lookahead), as the broadcast processor uses them.
 use std::f64::consts::PI;
 use std::hint::black_box;
 
@@ -81,7 +81,7 @@ fn bench(c: &mut Criterion) {
             ..ExpanderParams::default()
         }; MAX_BANDS],
     );
-    m.set_bass_lookahead_ms(3.0);
+    m.set_bass_lookahead_ms(strom_dsp::broadcast::STANDARD_BASS_LOOKAHEAD_MS);
     m.set_bass_clipper(&BassClipperParams {
         enabled: true,
         threshold_db: -14.0,

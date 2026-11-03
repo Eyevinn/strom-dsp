@@ -32,15 +32,17 @@
 //!    cascaded-box ramp of length `L` ([`RampSmoother`]). The gain then
 //!    reaches the required gain of a frame exactly when that frame leaves
 //!    the delay, starting `L` frames earlier, along a smooth S-shaped ramp.
+//!    With a lookahead shorter than [`BASS_MIN_RAMP_MS`] (down to none) the
+//!    ramp keeps that length and the gain arrives late by the difference.
 //! 4. **Release**: the gain follows a falling ramp at once and rises toward
 //!    it with a one-pole of [`BASS_CLIP_RELEASE_MS`].
 //!
 //! **Band-limited gain.** The gain only moves along the cascaded-box ramp
 //! (a low-pass whose impulse response is the `L`-frame triangle-like
-//! kernel: magnitude `|sinc|²`, first zero at `2/L`, 667 Hz for 3 ms) and the
+//! kernel: magnitude `|sinc|²`, first zero at `2/L`, 2 kHz for 1 ms) and the
 //! release one-pole (cut-off `1/(2π·τ)`, 3.2 Hz for 50 ms). On a steady
 //! bass the gain is constant. See the element page for the limits of this at
-//! a 3 ms lookahead.
+//! the short lookaheads the broadcast chain uses (1 ms, or none).
 //!
 //! # IM feedback
 //!
@@ -79,6 +81,17 @@ use crate::util::{db_to_lin, lin_to_db, one_pole_coef};
 pub const BASS_CLIP_THRESHOLD_RANGE_DB: (f32, f32) = (-40.0, 0.0);
 /// Release time constant of the gain (ms).
 pub const BASS_CLIP_RELEASE_MS: f64 = 50.0;
+/// Time constant (ms) of each of the two cascaded one-poles through which
+/// a threshold change glides (critically damped, starts with zero slope).
+/// It keeps a threshold change click-free with any lookahead, including
+/// none, where the gain would otherwise follow the new threshold at once.
+pub const BASS_THRESHOLD_GLIDE_MS: f64 = 5.0;
+/// Shortest gain ramp (ms). With a lookahead at least this long the ramp
+/// equals the lookahead (the gain arrives exactly when a frame leaves the
+/// delay); with a shorter one, down to none, the ramp keeps this length and
+/// the gain arrives late by the difference (an attack time) instead of
+/// stepping: a gain step on a bass tone is a click.
+pub const BASS_MIN_RAMP_MS: f64 = 0.5;
 /// Crossfade time of `enabled` (ms, raised cosine).
 pub const BASS_CLIP_FADE_MS: f64 = 10.0;
 /// Largest threshold reduction of the IM feedback (dB): the documented
@@ -96,6 +109,8 @@ pub const BASS_PEAK_MARGIN_DB: f64 = 6.0;
 /// goes down until the coincidence nearly stops, bounded by
 /// [`BASS_IM_MAX_DB`].
 pub const BASS_IM_FULL_ACTIVITY: f64 = 0.01;
+/// [`BASS_PEAK_MARGIN_DB`] as a linear factor.
+const PEAK_MARGIN: f64 = 0.501_187_233_627_272_2;
 /// Lowest frequency (Hz) of the envelope's design band; the band spans 600:1
 /// in pre-warped frequency above it (8 Hz … about 4.6 kHz at 48 kHz).
 pub const ENVELOPE_LOW_HZ: f64 = 8.0;
@@ -153,6 +168,8 @@ pub struct BassClipper {
     allowed: bool,
     channels: usize,
     lookahead: usize,
+    /// Length of the gain ramp: `max(lookahead, BASS_MIN_RAMP_MS)`.
+    ramp_len: usize,
     envelope: HilbertPair,
     window: SegmentedMin,
     ramp: RampSmoother,
@@ -170,9 +187,12 @@ pub struct BassClipper {
     k_im_up: f64,
     k_im_down: f64,
     activity: f64,
-    /// Nominal threshold (linear) and the bass-peak level.
+    /// Nominal threshold (linear): its target, the first glide stage and
+    /// the value in force.
+    threshold_target: f64,
+    threshold_mid: f64,
     threshold: f64,
-    peak_level: f64,
+    k_glide: f64,
     /// Smallest applied gain since the last `take_gain_reduction_db`.
     min_gain: f64,
     envelope_kind: BassEnvelope,
@@ -202,9 +222,11 @@ impl BassClipper {
         self.lookahead = lookahead;
         self.envelope.configure(fs, self.channels, ENVELOPE_LOW_HZ);
         self.window.allocate(lookahead + 1);
-        self.ramp.allocate(lookahead);
+        self.ramp_len = lookahead.max((BASS_MIN_RAMP_MS * 0.001 * fs).round() as usize);
+        self.ramp.allocate(self.ramp_len);
         self.delay.allocate(lookahead, self.channels);
         self.k_release = 1.0 - one_pole_coef(BASS_CLIP_RELEASE_MS, fs);
+        self.k_glide = 1.0 - one_pole_coef(BASS_THRESHOLD_GLIDE_MS, fs);
         self.k_im_up = 1.0 - one_pole_coef(BASS_IM_ATTACK_MS, fs);
         self.k_im_down = 1.0 - one_pole_coef(BASS_IM_RELEASE_MS, fs);
         self.fade_len = ((BASS_CLIP_FADE_MS * 0.001 * fs).round() as usize).max(1);
@@ -216,13 +238,21 @@ impl BassClipper {
         self.lookahead
     }
 
-    /// New parameters (clamped). Never allocates. The threshold applies to
-    /// frames as they enter the lookahead, so a change is ramped like any
-    /// gain change.
+    /// New parameters (clamped). Never allocates. A threshold change glides
+    /// ([`BASS_THRESHOLD_GLIDE_MS`]) while the control runs, and applies to
+    /// frames as they enter the lookahead; while the control is stopped it
+    /// applies at once.
     pub fn set_params(&mut self, params: &BassClipperParams) {
         self.params = params.clamped();
-        self.threshold = db_to_lin(self.params.threshold_db as f64);
-        self.peak_level = self.threshold * db_to_lin(-BASS_PEAK_MARGIN_DB);
+        self.threshold_target = db_to_lin(self.params.threshold_db as f64);
+        if !self.running {
+            self.snap_threshold();
+        }
+    }
+
+    fn snap_threshold(&mut self) {
+        self.threshold_mid = self.threshold_target;
+        self.threshold = self.threshold_target;
     }
 
     /// Current (clamped) parameters.
@@ -276,11 +306,12 @@ impl BassClipper {
     pub fn reset(&mut self) {
         self.envelope.reset();
         self.window.reset(self.lookahead + 1);
-        self.ramp.reset(self.lookahead, 1.0);
+        self.ramp.reset(self.ramp_len, 1.0);
         self.delay.clear();
         self.gain = 1.0;
         self.im_db = 0.0;
         self.min_gain = 1.0;
+        self.snap_threshold();
         let on = self.on();
         self.fade_pos = if on { self.fade_len } else { 0 };
         self.running = on;
@@ -316,9 +347,10 @@ impl BassClipper {
             // Restart the control path from a clean state.
             self.envelope.reset();
             self.window.reset(self.lookahead + 1);
-            self.ramp.reset(self.lookahead, 1.0);
+            self.ramp.reset(self.ramp_len, 1.0);
             self.gain = 1.0;
             self.im_db = 0.0;
+            self.snap_threshold();
             self.running = true;
         }
         let l = self.lookahead;
@@ -333,9 +365,19 @@ impl BassClipper {
                         frame.iter().fold(0.0f64, |m, &v| m.max((v as f64).abs()))
                     }
                 };
+                if self.threshold != self.threshold_target {
+                    let k = self.k_glide;
+                    self.threshold_mid += k * (self.threshold_target - self.threshold_mid);
+                    self.threshold += k * (self.threshold_mid - self.threshold);
+                    if (self.threshold - self.threshold_target).abs()
+                        <= 1e-9 * self.threshold_target
+                    {
+                        self.snap_threshold();
+                    }
+                }
                 // IM feedback: lower the threshold while bass peaks and
                 // upper-clipper activity coincide.
-                let target = if env >= self.peak_level {
+                let target = if env >= self.threshold * PEAK_MARGIN {
                     BASS_IM_MAX_DB * (self.activity / BASS_IM_FULL_ACTIVITY).min(1.0)
                 } else {
                     0.0
@@ -397,6 +439,11 @@ impl BassClipper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peak_margin_matches_its_db_value() {
+        assert!((PEAK_MARGIN - db_to_lin(-BASS_PEAK_MARGIN_DB)).abs() < 1e-15);
+    }
 
     #[test]
     fn disabled_is_a_plain_delay() {

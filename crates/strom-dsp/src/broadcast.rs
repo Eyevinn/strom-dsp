@@ -32,9 +32,10 @@
 //!   downward expander per band (`band_expanders`, `expander_hold_ms`;
 //!   knee [`EXPANDER_KNEE_DB`], open [`EXPANDER_OPEN_MS`], close
 //!   [`EXPANDER_CLOSE_MS`]) and the bass clipper on band 0
-//!   ([`crate::bassclip`]). The bass clipper's lookahead,
-//!   [`BASS_LOOKAHEAD_MS`], is the stage's latency (constant, also with the
-//!   clipper off). Its IM-feedback input
+//!   ([`crate::bassclip`]). The bass clipper's lookahead
+//!   (`bass_clipper_lookahead_ms`, structural: [`STANDARD_BASS_LOOKAHEAD_MS`]
+//!   or [`LOW_LATENCY_BASS_LOOKAHEAD_MS`]) is the stage's latency (constant,
+//!   also with the clipper off). Its IM-feedback input
 //!   ([`crate::multiband::MultibandCompressor::set_upper_clip_activity`])
 //!   stays at "no activity" until a clipper after the multiband feeds it.
 //! - **Final clipper**: [`crate::clipper::FinalClipper`] (oversampled
@@ -70,14 +71,15 @@
 //! applies bypass states and the input gain instantly (no fade).
 //!
 //! The latency is `spike guard + agc (0) + multiband + clipper + limiter`,
-//! i.e. `24 + round(spike lookahead · fs / 1000) + round(3 ms · fs / 1000)
-//! + C + round(limiter lookahead · fs / 1000) + 32` frames with `C` = 69
-//! (standard clipper latency) or 48 (low): 48 + 144 + 69 + 72 + 32 = 365
-//! frames (7.60 ms) at 48 kHz with the defaults (0.5 ms, standard, 1.5 ms).
-//! It depends only on the sample rate and the structural fields
-//! ([`BroadcastProcessor::latency_frames_for_params`]). `num_bands`,
-//! `spike_guard_lookahead_ms`, `clipper_latency` and `limiter_lookahead_ms`
-//! are structural: they take effect at the next [`Processor::configure`].
+//! i.e. `24 + round(spike lookahead · fs / 1000) + round(bass lookahead ·
+//! fs / 1000) + C + round(limiter lookahead · fs / 1000) + 32` frames with
+//! `C` = 69 (standard clipper latency) or 48 (low): 48 + 48 + 69 + 72 + 32
+//! = 269 frames (5.60 ms) at 48 kHz with the defaults (0.5 ms, 1 ms,
+//! standard, 1.5 ms). It depends only on the sample rate and the
+//! structural fields ([`BroadcastProcessor::latency_frames_for_params`]).
+//! `num_bands`, `spike_guard_lookahead_ms`, `bass_clipper_lookahead_ms`,
+//! `clipper_latency` and `limiter_lookahead_ms` are structural: they take
+//! effect at the next [`Processor::configure`].
 //!
 //! # Output-referenced trim
 //!
@@ -187,7 +189,9 @@ use crate::meter::{
     lufs_from_mean_square, ChannelLayout, History, LoudnessConfig, LoudnessDetector, LoudnessMeter,
     WindowSum, SUB_BLOCK_MS,
 };
-use crate::multiband::{MultibandBandParams, MultibandCompressor, MultibandParams, MAX_BANDS};
+use crate::multiband::{
+    MultibandBandParams, MultibandCompressor, MultibandParams, MAX_BANDS, MAX_BASS_LOOKAHEAD_MS,
+};
 use crate::oversample::{OversampleFactor, Oversampler};
 use crate::spike_guard::{self, SpikeGuard, SpikeGuardParams};
 use crate::truepeak::{self, TruePeakLimiter, TruePeakLimiterParams};
@@ -256,10 +260,17 @@ pub const SILENCE_DB: f64 = -200.0;
 /// Number of crossover frequencies (`MAX_BANDS − 1`).
 pub const MAX_CROSSOVERS: usize = MAX_BANDS - 1;
 
-/// Lookahead of the bass clipper (ms): the multiband stage's latency.
-/// 3 ms gives the gain ramp more than a quarter period of 60 Hz while
-/// keeping the chain's latency budget.
-pub const BASS_LOOKAHEAD_MS: f32 = 3.0;
+/// Bass clipper lookahead (ms) of the standard configuration: the
+/// multiband stage's latency. The analytic envelope reaches a bass onset
+/// later than any lookahead of a few ms could cover, so a longer one buys
+/// little: on a 60 Hz onset 12 dB over the threshold 3 ms let 11.3 dB
+/// through, 1 ms 12.0 dB, none 12.0 dB, and steady bass stays clean (2nd
+/// and 3rd harmonic under −125 dBc) at every setting. What gets through
+/// goes on to the final clipper (which leaves bass alone) and the limiter
+/// (see `tests/broadcast_latency.rs` for what that costs there).
+pub const STANDARD_BASS_LOOKAHEAD_MS: f32 = 1.0;
+/// Bass clipper lookahead (ms) of the low-latency configuration.
+pub const LOW_LATENCY_BASS_LOOKAHEAD_MS: f32 = 0.0;
 /// Soft-knee width of every band's expander (dB).
 pub const EXPANDER_KNEE_DB: f32 = 6.0;
 /// Open time of every band's expander (ms): faster than a consonant onset.
@@ -385,6 +396,9 @@ pub struct BroadcastParams {
     /// Bass clip threshold (dB, −40 … 0), against band 0's analytic envelope
     /// (a steady sine reads its peak).
     pub bass_clip_threshold_db: f32,
+    /// Bass clipper lookahead (ms, 0 … 10; standard 1, low latency 0).
+    /// Structural: part of the latency, applied at the next configure.
+    pub bass_clipper_lookahead_ms: f32,
     /// Latency setting of the final clipper. Structural (takes effect at
     /// the next `configure`).
     pub clipper_latency: ClipperLatency,
@@ -427,6 +441,7 @@ impl Default for BroadcastParams {
             expander_hold_ms: 100.0,
             bass_clipper_enabled: false,
             bass_clip_threshold_db: -12.0,
+            bass_clipper_lookahead_ms: STANDARD_BASS_LOOKAHEAD_MS,
             clipper_latency: ClipperLatency::Standard,
         }
     }
@@ -592,6 +607,12 @@ impl BroadcastParams {
                 BASS_CLIP_THRESHOLD_RANGE_DB.0,
                 BASS_CLIP_THRESHOLD_RANGE_DB.1,
                 d.bass_clip_threshold_db,
+            ),
+            bass_clipper_lookahead_ms: clamp_or(
+                self.bass_clipper_lookahead_ms,
+                0.0,
+                MAX_BASS_LOOKAHEAD_MS,
+                d.bass_clipper_lookahead_ms,
             ),
             clipper_latency: self.clipper_latency,
         }
@@ -1088,6 +1109,7 @@ pub struct BroadcastProcessor {
     /// Structural values in force since the last `configure`.
     active_lookahead_ms: f32,
     active_spike_lookahead_ms: f32,
+    active_bass_lookahead_ms: f32,
     active_clipper_latency: ClipperLatency,
     /// Limiter ceiling in force (dBTP), gliding toward the parameter.
     ceiling_db: f32,
@@ -1160,6 +1182,7 @@ impl BroadcastProcessor {
             channels: 0,
             active_lookahead_ms: params.limiter_lookahead_ms,
             active_spike_lookahead_ms: params.spike_guard_lookahead_ms,
+            active_bass_lookahead_ms: params.bass_clipper_lookahead_ms,
             active_clipper_latency: params.clipper_latency,
             ceiling_db: params.true_peak_ceiling_dbtp,
             active_bands: params.num_bands,
@@ -1216,6 +1239,7 @@ impl BroadcastProcessor {
             // Unconfigured: the structural values follow until `configure`.
             self.active_lookahead_ms = p.limiter_lookahead_ms;
             self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
+            self.active_bass_lookahead_ms = p.bass_clipper_lookahead_ms;
             self.active_clipper_latency = p.clipper_latency;
             self.active_bands = p.num_bands;
         }
@@ -1393,14 +1417,14 @@ impl BroadcastProcessor {
     }
 
     /// Total latency in frames for the structural fields of `p` (spike
-    /// guard lookahead, clipper latency, limiter lookahead; the bass
-    /// clipper's lookahead is fixed). Usable before `configure`.
+    /// guard lookahead, bass clipper lookahead, clipper latency, limiter
+    /// lookahead). Usable before `configure`.
     pub fn latency_frames_for_params(sample_rate: f32, p: &BroadcastParams) -> usize {
         SpikeStage::latency_frames_for(
             sample_rate,
             spike_guard::clamp_lookahead_ms(p.spike_guard_lookahead_ms),
         ) + AgcStage::latency_frames_for(sample_rate)
-            + MultibandCompressor::bass_lookahead_frames(BASS_LOOKAHEAD_MS, sample_rate)
+            + MultibandCompressor::bass_lookahead_frames(p.bass_clipper_lookahead_ms, sample_rate)
             + ClipperStage::latency_frames(p.clipper_latency)
             + LimiterStage::latency_frames_for(sample_rate, clamp_lookahead(p.limiter_lookahead_ms))
     }
@@ -1580,6 +1604,7 @@ impl Processor for BroadcastProcessor {
         let p = self.params;
         self.active_lookahead_ms = p.limiter_lookahead_ms;
         self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
+        self.active_bass_lookahead_ms = p.bass_clipper_lookahead_ms;
         self.active_clipper_latency = p.clipper_latency;
         self.active_bands = p.num_bands;
 
@@ -1587,7 +1612,8 @@ impl Processor for BroadcastProcessor {
             .configure(sample_rate, channels, self.active_spike_lookahead_ms);
         self.agc.configure(sample_rate, channels);
         self.trim.allocate();
-        self.multiband.set_bass_lookahead_ms(BASS_LOOKAHEAD_MS);
+        self.multiband
+            .set_bass_lookahead_ms(self.active_bass_lookahead_ms);
         self.multiband.configure(sample_rate, channels);
         self.clipper
             .configure(sample_rate, channels, self.active_clipper_latency);
@@ -1727,6 +1753,7 @@ impl Processor for BroadcastProcessor {
             self.sample_rate,
             &BroadcastParams {
                 spike_guard_lookahead_ms: self.active_spike_lookahead_ms,
+                bass_clipper_lookahead_ms: self.active_bass_lookahead_ms,
                 limiter_lookahead_ms: self.active_lookahead_ms,
                 clipper_latency: self.active_clipper_latency,
                 ..self.params

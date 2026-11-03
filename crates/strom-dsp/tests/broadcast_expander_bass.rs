@@ -77,29 +77,34 @@ fn processor(p: &BroadcastParams, ch: usize) -> BroadcastProcessor {
     bp
 }
 
-/// An impulse comes out exactly at the reported latency (spike guard + bass lookahead +
-/// limiter lookahead + detector delay), with the multiband on and bypassed.
+/// An impulse comes out exactly at the reported latency (spike guard + bass
+/// lookahead + clipper + limiter lookahead + detector delay), with the
+/// multiband on and bypassed, at bass lookaheads of 0, 1 (standard) and
+/// 3 ms.
 #[test]
 fn impulse_at_reported_latency() {
-    for multiband in [true, false] {
-        let p = BroadcastParams {
-            multiband_enabled: multiband,
-            ..flat_with_bass()
-        };
-        let mut bp = processor(&p, 1);
-        let lat = bp.latency_frames();
-        assert_eq!(lat, 48 + 144 + 69 + 72 + 32);
-        let mut x = vec![0.0f32; lat + 4096];
-        x[1000] = 0.25;
-        for c in x.chunks_mut(333) {
-            bp.process(c);
-        }
-        // The crossover is an all-pass: its response starts at sample 0.
-        let at = x.iter().position(|&v| v != 0.0).unwrap();
-        assert_eq!(at, 1000 + lat, "multiband {multiband}");
-        if !multiband {
-            assert_eq!(x[at], 0.25);
-            assert!(x.iter().filter(|&&v| v != 0.0).count() == 1);
+    for (bass_ms, bass_frames) in [(0.0f32, 0usize), (1.0, 48), (3.0, 144)] {
+        for multiband in [true, false] {
+            let p = BroadcastParams {
+                multiband_enabled: multiband,
+                bass_clipper_lookahead_ms: bass_ms,
+                ..flat_with_bass()
+            };
+            let mut bp = processor(&p, 1);
+            let lat = bp.latency_frames();
+            assert_eq!(lat, 48 + bass_frames + 69 + 72 + 32);
+            let mut x = vec![0.0f32; lat + 4096];
+            x[1000] = 0.25;
+            for c in x.chunks_mut(333) {
+                bp.process(c);
+            }
+            // The crossover is an all-pass: its response starts at sample 0.
+            let at = x.iter().position(|&v| v != 0.0).unwrap();
+            assert_eq!(at, 1000 + lat, "multiband {multiband}, bass {bass_ms} ms");
+            if !multiband {
+                assert_eq!(x[at], 0.25);
+                assert!(x.iter().filter(|&&v| v != 0.0).count() == 1);
+            }
         }
     }
 }

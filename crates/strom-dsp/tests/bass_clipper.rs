@@ -18,7 +18,7 @@ mod measure_support;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use measure_support::{bass_into_highs, db, lin, sine, tone_amplitude};
+use measure_support::{bass_into_highs, db, lin, rms, sine, tone_amplitude};
 use strom_dsp::bassclip::{BassClipper, BassClipperParams, BassEnvelope};
 use strom_dsp::compressor::CompressorDetector;
 use strom_dsp::filter::{Crossover, CrossoverParams, LrOrder};
@@ -55,7 +55,8 @@ fn allocs() -> usize {
 }
 
 const FS: f64 = 48_000.0;
-const LOOKAHEAD_MS: f32 = 3.0;
+/// The broadcast chain's standard bass lookahead (1 ms).
+const LOOKAHEAD_MS: f32 = strom_dsp::broadcast::STANDARD_BASS_LOOKAHEAD_MS;
 
 fn flat_band() -> MultibandBandParams {
     MultibandBandParams {
@@ -79,9 +80,18 @@ fn params(nb: usize) -> MultibandParams {
 }
 
 fn multiband(ch: usize, nb: usize, bass: BassClipperParams) -> MultibandCompressor {
+    multiband_with_lookahead(ch, nb, bass, LOOKAHEAD_MS)
+}
+
+fn multiband_with_lookahead(
+    ch: usize,
+    nb: usize,
+    bass: BassClipperParams,
+    lookahead_ms: f32,
+) -> MultibandCompressor {
     let mut m = MultibandCompressor::new();
     m.set_params(&params(nb));
-    m.set_bass_lookahead_ms(LOOKAHEAD_MS);
+    m.set_bass_lookahead_ms(lookahead_ms);
     m.set_bass_clipper(&bass);
     m.configure(FS as f32, ch);
     m
@@ -228,7 +238,7 @@ fn im_feedback_lowers_sidebands() {
 #[test]
 fn bands_stay_aligned_with_lookahead() {
     let l = MultibandCompressor::bass_lookahead_frames(LOOKAHEAD_MS, FS as f32);
-    assert_eq!(l, 144);
+    assert_eq!(l, 48);
     for nb in 1..=MAX_BANDS {
         let mut m = multiband(
             1,
@@ -300,16 +310,25 @@ fn click_residual(y: &[f32], range: std::ops::Range<usize>) -> f64 {
 
 /// Changing the threshold (−40 ↔ 0 dB) and toggling `enabled` while a
 /// loud 60 Hz tone is clipped is click-free: the 60 Hz annihilator residual
-/// stays below −60 dB re the tone amplitude.
+/// stays below −60 dB re the tone amplitude, with the standard (1 ms) and
+/// the low-latency (no) lookahead. The threshold glides; without the glide
+/// the 1 ms setting read −56 dB.
 #[test]
 fn threshold_and_enable_changes_are_click_free() {
-    let mut m = multiband(
+    for la in [LOOKAHEAD_MS, 0.0] {
+        click_free_with_lookahead(la);
+    }
+}
+
+fn click_free_with_lookahead(lookahead_ms: f32) {
+    let mut m = multiband_with_lookahead(
         1,
         4,
         BassClipperParams {
             enabled: true,
             threshold_db: -12.0,
         },
+        lookahead_ms,
     );
     let amp = lin(-6.0);
     let mut y = sine(6 * FS as usize, FS, 60.0, amp);
@@ -360,8 +379,8 @@ fn threshold_and_enable_changes_are_click_free() {
     }
     let worst = click_residual(&y, FS as usize / 2..y.len());
     let rel = db(worst / amp);
-    eprintln!("worst annihilator residual {rel:.1} dB re the tone");
-    assert!(rel < -60.0, "{rel} dB");
+    eprintln!("lookahead {lookahead_ms} ms: worst annihilator residual {rel:.1} dB re the tone");
+    assert!(rel < -60.0, "lookahead {lookahead_ms} ms: {rel} dB");
 }
 
 /// Processing with the bass clipper, activity input, parameter changes and
@@ -388,4 +407,128 @@ fn no_allocation() {
         let _ = m.take_bass_clip_gain_reduction_db();
     }
     assert_eq!(allocs() - before, 0);
+}
+
+/// Second-order Butterworth high-pass (bilinear, pre-warped), in place,
+/// `passes` times in series.
+fn highpass(x: &mut [f32], fs: f64, fc: f64, passes: usize) {
+    let k = (std::f64::consts::PI * fc / fs).tan();
+    let q = std::f64::consts::FRAC_1_SQRT_2;
+    let norm = 1.0 / (1.0 + k / q + k * k);
+    let (b0, b1, b2) = (norm, -2.0 * norm, norm);
+    let a1 = 2.0 * (k * k - 1.0) * norm;
+    let a2 = (1.0 - k / q + k * k) * norm;
+    for _ in 0..passes {
+        let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+        for v in x.iter_mut() {
+            let x0 = *v as f64;
+            let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1;
+            x1 = x0;
+            y2 = y1;
+            y1 = y0;
+            *v = y0 as f32;
+        }
+    }
+}
+
+/// A bass clipper at threshold −12 dB with a lookahead of `la` frames.
+fn clipper_with_lookahead(la: usize) -> BassClipper {
+    let mut b = BassClipper::new();
+    b.set_allowed(true);
+    b.set_params(&BassClipperParams {
+        enabled: true,
+        threshold_db: -12.0,
+    });
+    b.configure(FS as f32, 1, la);
+    b
+}
+
+/// What the bass lookahead buys, per setting (dB over the −12 dB threshold
+/// or relative to the output):
+/// (steady 60 Hz 6 dB over: worst of 2nd/3rd harmonic in dBc;
+///  worst onset overshoot of bursts at 40/60/90 Hz, 6 and 12 dB over, five
+///  start phases; peak of decaying 60 Hz thumps 12 dB over;
+///  energy above 300 Hz of those thumps re the output).
+fn lookahead_cost(la: usize) -> (f64, f64, f64, f64) {
+    let mut b = clipper_with_lookahead(la);
+    let mut x = sine(3 * FS as usize, FS, 60.0, lin(-6.0));
+    for c in x.chunks_mut(480) {
+        b.process(c);
+    }
+    let (_, h2, h3) = harmonics(&x[2 * FS as usize..], 60.0);
+    let mut onset = f64::NEG_INFINITY;
+    for f in [40.0, 60.0, 90.0] {
+        for over in [6.0, 12.0] {
+            for ph in [0.0, 0.5, 1.0, 1.57, 2.5] {
+                let mut b = clipper_with_lookahead(la);
+                let start = 4800;
+                let mut x: Vec<f32> = (0..FS as usize / 2)
+                    .map(|i| {
+                        if i < start {
+                            0.0
+                        } else {
+                            let t = (i - start) as f64 / FS;
+                            (lin(-12.0 + over) * (2.0 * std::f64::consts::PI * f * t + ph).sin())
+                                as f32
+                        }
+                    })
+                    .collect();
+                for c in x.chunks_mut(480) {
+                    b.process(c);
+                }
+                onset = onset.max(db(measure_support::peak(&x)) + 12.0);
+            }
+        }
+    }
+    let thumps: Vec<f32> = (0..2 * FS as usize)
+        .map(|i| {
+            let t = (i % 12_000) as f64 / FS;
+            ((2.0 * std::f64::consts::PI * 60.0 * t).sin() * (-t / 0.06).exp()) as f32
+        })
+        .collect();
+    let mut b = clipper_with_lookahead(la);
+    let mut y = thumps.clone();
+    for c in y.chunks_mut(480) {
+        b.process(c);
+    }
+    let thump = db(measure_support::peak(&y)) + 12.0;
+    let mut hy = y.clone();
+    highpass(&mut hy, FS, 300.0, 4);
+    let s = FS as usize;
+    let splatter = db(rms(&hy[s..]) / rms(&y[s..]));
+    (h2.max(h3), onset, thump, splatter)
+}
+
+/// What a shorter bass lookahead costs, pinned for the settings the chain
+/// uses (1 ms standard, 0 low latency) against the earlier 3 ms. Steady
+/// bass stays clean at every setting (the analytic envelope is flat). The
+/// envelope's own delay at bass frequencies is longer than any of these
+/// lookaheads, so onsets mostly pass at every setting and the difference
+/// is small: 3 ms holds an onset 12 dB over to 11.3 dB over, 1 ms to
+/// 12.0 dB, none to 12.0 dB; decaying thumps peak 10.4 / 11.4 / 11.4 dB
+/// over. What passes goes on to the final clipper (which leaves bass alone)
+/// and the true-peak limiter; the chain-level cost is measured in
+/// `tests/broadcast_latency.rs`.
+#[test]
+fn lookahead_cost_is_pinned() {
+    // (lookahead ms, onset overshoot dB, thump peak dB over), measured.
+    let pins = [
+        (0.0, 12.00, 11.41),
+        (1.0, 11.95, 11.36),
+        (3.0, 11.32, 10.42),
+    ];
+    for (ms, onset_pin, thump_pin) in pins {
+        let la = MultibandCompressor::bass_lookahead_frames(ms as f32, FS as f32);
+        let (harm, onset, thump, splatter) = lookahead_cost(la);
+        eprintln!(
+            "bass lookahead {ms} ms: steady harmonics {harm:.1} dBc, onset overshoot \
+             {onset:.2} dB, thump peak {thump:.2} dB over, thump energy above 300 Hz \
+             {splatter:.1} dB"
+        );
+        assert!(harm < -100.0, "{ms} ms: harmonics {harm} dBc");
+        assert!((onset - onset_pin).abs() < 0.3, "{ms} ms: onset {onset} dB");
+        assert!((thump - thump_pin).abs() < 0.3, "{ms} ms: thump {thump} dB");
+        assert!(splatter < -34.0, "{ms} ms: splatter {splatter} dB");
+    }
 }
