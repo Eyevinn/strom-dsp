@@ -118,7 +118,9 @@
 //! - random and adversarially optimised clicks;
 //! - a property test over signals and parameters.
 //!
-//! The worst measured output is ceiling − 0.02 dB.
+//! The worst measured output is ceiling + 0.004 dB, on programme-like
+//! multitone material: that is the meter's own ripple. On the nasty and
+//! adversarial cases it is ceiling − 0.02 dB.
 //!
 //! # Bypass and parameter changes
 //!
