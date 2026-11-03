@@ -551,3 +551,13 @@ x86-64 timings (SSE4.2/AVX2/AVX-512 paths) have not been measured yet. CI runs
 the tests on those paths. For instruction-count benchmarks (gungraun), the
 RealtimeSanitizer tests, SIMD design notes and the denormal policy, see
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## Contributing
+
+Every element, present and future, follows the
+[element guidelines](docs/ELEMENT_GUIDELINES.md): `enabled` bypass that fades
+and ends bit-exact, click-free live changes of every PLAYING-mutable property,
+real-time safety, reported and constant latency, sensible standalone defaults,
+a test per rule, and clean-room provenance. strom-dsp is a clean-room project:
+keep [PROVENANCE.md](PROVENANCE.md) current with the reference for every
+algorithm and every reused crate.
