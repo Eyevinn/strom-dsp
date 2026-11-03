@@ -539,7 +539,11 @@ fn from_stereo(x: &[f32], ch: usize) -> Vec<f32> {
     if ch != 1 {
         return x.to_vec();
     }
-    x.chunks_exact(2).map(|f| 0.5 * (f[0] + f[1])).collect()
+    x.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|f| 0.5 * (f[0] + f[1]))
+        .collect()
 }
 
 /// The numbers every version gets.
