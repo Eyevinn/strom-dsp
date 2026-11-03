@@ -34,12 +34,17 @@
 //!
 //! # Parameter changes (same approach as the [`crate::Equalizer`])
 //!
-//! - **Cutoff**: a one-pole smoother with a 10 ms time constant in `ln f`.
-//!   Every 32 frames the sections are redesigned at the smoothed frequency and
+//! - **Cutoff**: a critically damped second-order smoother in `ln f` (two
+//!   cascaded one-poles of [`SMOOTHING_MS`] = 5 ms: the glide starts with
+//!   zero speed) whose speed is limited to [`MAX_OCTAVES_PER_MS`]
+//!   (0.05 octave/ms, so a large jump glides for a time proportional to its
+//!   size). It replaced a 10 ms one-pole, whose full-speed start clicked on a
+//!   steady tone for large jumps (plugin knob test). Every 32 frames the
+//!   sections are redesigned at the smoothed frequency and
 //!   the coefficients are interpolated linearly per sample in between. Each
 //!   end point is a stable design and the biquad stability triangle is convex,
 //!   so every intermediate filter is stable.
-//! - **Kind or order**: a 10 ms linear crossfade from the old cascade (with its
+//! - **Kind or order**: a 10 ms raised-cosine crossfade from the old cascade (with its
 //!   state) to the new one (starting from zero state), in a second state bank;
 //!   the old output is computed into a preallocated scratch buffer.
 //! - After `configure`/`reset`, the first `process` call takes the parameters
@@ -111,8 +116,11 @@ pub use design::{
 
 use crate::util::one_pole_coef;
 
-/// Time constant (ms) of the frequency smoother.
-pub const SMOOTHING_MS: f64 = 10.0;
+/// Time constant (ms) of each of the two cascaded one-pole stages of the
+/// frequency smoother (a critically damped second-order glide).
+pub const SMOOTHING_MS: f64 = 5.0;
+/// Rate limit of the smoothed frequency: 0.05 octave per ms.
+pub const MAX_OCTAVES_PER_MS: f64 = 0.05;
 /// Length (ms) of the crossfade used for structural changes.
 pub const CROSSFADE_MS: f64 = 10.0;
 
@@ -123,25 +131,33 @@ const FADE_CHUNK: usize = 64;
 /// The smoother snaps to its target below this distance (in `ln f`).
 const SNAP_LN_F: f64 = 1e-7;
 
-/// One-pole smoother of `N` log-frequencies, advanced in blocks.
+/// Second-order smoother of `N` log-frequencies, advanced in blocks: two
+/// cascaded one-poles (`pre`, then `cur`) with a rate limit on `cur` (see
+/// the module documentation, "Parameter changes").
 #[derive(Debug, Clone, Copy)]
 struct Glide<const N: usize> {
     cur: [f64; N],
+    /// First stage.
+    pre: [f64; N],
     target: [f64; N],
     settled: bool,
     /// Per-sample pole and its `RAMP_BLOCK`-th power.
     coef: f64,
     block_coef: f64,
+    /// Largest change of `cur` per frame (`ln f`).
+    max_step: f64,
 }
 
 impl<const N: usize> Default for Glide<N> {
     fn default() -> Self {
         Self {
             cur: [0.0; N],
+            pre: [0.0; N],
             target: [0.0; N],
             settled: true,
             coef: 0.0,
             block_coef: 0.0,
+            max_step: f64::INFINITY,
         }
     }
 }
@@ -152,6 +168,7 @@ impl<const N: usize> Glide<N> {
         Self {
             coef,
             block_coef: coef.powi(RAMP_BLOCK as i32),
+            max_step: MAX_OCTAVES_PER_MS * std::f64::consts::LN_2 * 1000.0 / sample_rate,
             ..Self::default()
         }
     }
@@ -170,31 +187,49 @@ impl<const N: usize> Glide<N> {
     fn snap(&mut self, target: [f64; N]) {
         self.target = target;
         self.cur = target;
+        self.pre = target;
         self.settled = true;
     }
 
-    /// Advance by `n` frames and return the new values.
+    /// Advance by `n` frames and return the new values. Exact `n`-step update
+    /// of the two stages as errors from the target, `e1 ← aⁿ·e1`,
+    /// `e2 ← aⁿ·e2 + n·(1 − a)·aⁿ·e1`, then the rate limit on `cur`.
     fn advance(&mut self, n: usize) -> [f64; N] {
         let k = if n == RAMP_BLOCK {
             self.block_coef
         } else {
             self.coef.powi(n as i32)
         };
+        let c = n as f64 * (1.0 - self.coef) * k;
+        let limit = self.max_step * n as f64;
         let mut close = true;
-        for (c, t) in self.cur.iter_mut().zip(self.target) {
-            *c = t + (*c - t) * k;
-            close &= (*c - t).abs() < SNAP_LN_F;
+        for ((cur, pre), t) in self.cur.iter_mut().zip(&mut self.pre).zip(self.target) {
+            let (e1, e2) = (*pre - t, *cur - t);
+            *pre = t + k * e1;
+            let next = t + k * e2 + c * e1;
+            *cur += (next - *cur).clamp(-limit, limit);
+            close &= (*cur - t).abs() < SNAP_LN_F && (*pre - t).abs() < SNAP_LN_F;
         }
         if close {
             self.cur = self.target;
+            self.pre = self.target;
             self.settled = true;
         }
         self.cur
     }
 }
 
+/// Raised-cosine crossfade weight at position `x ∈ [0, 1]`: zero slope at
+/// both ends, so a crossfade has no kink (a linear crossfade has one at each
+/// end, audible on a steady tone at about −55 dB).
+#[inline]
+pub(crate) fn raised_cosine(x: f64) -> f64 {
+    0.5 - 0.5 * (std::f64::consts::PI * x.clamp(0.0, 1.0)).cos()
+}
+
 /// Crossfade `data` (the new output) with `old`, frame by frame:
-/// `old + (new − old)·g`, `g = (done + i + 1)/len` capped at 1.
+/// `old + (new − old)·g`, `g` = [`raised_cosine`] of `(done + i + 1)/len`
+/// (1 from the end of the fade on).
 fn blend_into(data: &mut [f32], old: &[f32], channels: usize, done: usize, len: usize) {
     let inv = 1.0 / len as f64;
     for (i, (d, o)) in data
@@ -202,7 +237,7 @@ fn blend_into(data: &mut [f32], old: &[f32], channels: usize, done: usize, len: 
         .zip(old.chunks_exact(channels))
         .enumerate()
     {
-        let g = ((done + i + 1) as f64 * inv).min(1.0);
+        let g = raised_cosine((done + i + 1) as f64 * inv);
         for (d, &o) in d.iter_mut().zip(o) {
             let o = o as f64;
             *d = (o + (*d as f64 - o) * g) as f32;

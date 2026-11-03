@@ -441,8 +441,9 @@ fn cases() -> Vec<Case> {
     // crossfade between the split-band output (phase-shifted by the band
     // split) and dry reads -48 dB here; the same toggle with the band and the
     // tone at 1.2 kHz (below) must meet the normal bound.
-    const HF: &str = "smooth 20 ms crossfade on a 7 kHz tone: the annihilator reads a \
-                      fade 15.6 dB higher than at 1 kHz (sin w); see the 1.2 kHz case";
+    const HF: &str = "smooth change (crossfade or glide) on a 7 kHz tone: the annihilator \
+                      reads its slope 15.6 dB higher than at 1 kHz (sin w); the 1.2 kHz \
+                      cases check the same change at the normal bound";
     v.push(case(d, &[], &[("enabled", "false")]).exempt(-45.0, HF));
     v.push(case(d, &[("enabled", "false")], &[("enabled", "true")]).exempt(-45.0, HF));
     v.push(case(d, &[("frequency", "1000")], &[("enabled", "false")]).tone(1200.0, 0.25));
@@ -456,7 +457,8 @@ fn cases() -> Vec<Case> {
     );
     v.push(case(d, &[("threshold", "-10")], &[("threshold", "-40")]));
     v.push(case(d, &[], &[("threshold", "0")]));
-    v.push(case(d, &[], &[("frequency", "2000")]));
+    v.push(case(d, &[], &[("frequency", "2000")]).exempt(-45.0, HF));
+    v.push(case(d, &[("frequency", "1000")], &[("frequency", "2000")]).tone(1200.0, 0.25));
     v.push(case(d, &[], &[("max-reduction", "0")]));
     v.push(case(d, &[], &[("attack", "20")]));
     v.push(case(d, &[], &[("release", "500")]));

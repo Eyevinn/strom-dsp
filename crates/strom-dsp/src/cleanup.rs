@@ -54,7 +54,7 @@
 //!
 //! Each of the three stages is skipped entirely while it is off, so the
 //! default (everything off) is a bit-exact passthrough. Switching a stage on
-//! or off crossfades linearly between the dry and the filtered signal over
+//! or off crossfades (raised cosine) between the dry and the filtered signal over
 //! [`FADE_MS`]; a stage that has faded out is reset, so it starts from clean
 //! state when it is switched on again. A change of the hum frequency, the
 //! number of harmonics or `hum_q` crossfades over [`FADE_MS`] from the old
@@ -73,7 +73,7 @@ use fearless_simd::Simd;
 use crate::biquad::{
     run_chain, sanitize_bank, BiquadCoefficients, SteadyStage, MAX_STAGES, STATE_PER_CHANNEL,
 };
-use crate::filter::{Butterworth, ButterworthParams, FilterKind, MAX_ORDER};
+use crate::filter::{raised_cosine, Butterworth, ButterworthParams, FilterKind, MAX_ORDER};
 use crate::simd::Level;
 use crate::Processor;
 
@@ -368,8 +368,8 @@ impl Processor for NotchBank {
 }
 
 /// Replace `data` (the new signal) by `old + (new − old)·w` frame by frame,
-/// with `w` going linearly from `(done + 1)/len` (capped at 1) upward if
-/// `dir > 0`, or `1 − (done + 1)/len` downward if `dir < 0`.
+/// with `w` the raised cosine ([`raised_cosine`]) of `(done + 1)/len`
+/// (capped at 1) upward if `dir > 0`, or `1 −` that downward if `dir < 0`.
 fn crossfade(data: &mut [f32], old: &[f32], ch: usize, done: usize, len: usize, dir: f64) {
     let inv = 1.0 / len as f64;
     for (i, (d, o)) in data
@@ -377,7 +377,7 @@ fn crossfade(data: &mut [f32], old: &[f32], ch: usize, done: usize, len: usize, 
         .zip(old.chunks_exact(ch))
         .enumerate()
     {
-        let up = ((done + i + 1) as f64 * inv).min(1.0);
+        let up = raised_cosine((done + i + 1) as f64 * inv);
         let w = if dir > 0.0 { up } else { 1.0 - up };
         for (d, &o) in d.iter_mut().zip(o) {
             let o = o as f64;
@@ -386,7 +386,7 @@ fn crossfade(data: &mut [f32], old: &[f32], ch: usize, done: usize, len: usize, 
     }
 }
 
-/// Dry/wet switch of one stage: skipped while off, run while on, linear
+/// Dry/wet switch of one stage: skipped while off, run while on, raised-cosine
 /// crossfade of `fade_len` frames in between.
 #[derive(Debug, Clone, Copy)]
 struct Switch {
