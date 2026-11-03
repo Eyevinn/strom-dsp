@@ -144,6 +144,9 @@ impl AttackRelease {
     /// Advance one sample toward `target` and return the new value.
     #[inline]
     pub fn step(&mut self, target: f64) -> f64 {
+        // Branchy on purpose: once settled, the predicted snap branch makes
+        // the next value independent of the previous one (fast for a gate
+        // that sits at its target most of the time).
         let d = target - self.value;
         if d.abs() < self.snap {
             self.value = target;
@@ -156,6 +159,46 @@ impl AttackRelease {
             self.value += k * d;
         }
         self.value
+    }
+
+    /// The same smoother over a block, for signals that keep moving (a
+    /// compressor's gain reduction): each element of `buf` is a target on
+    /// input and the smoothed value after that step on output.
+    ///
+    /// It evaluates the one-pole as `a·y + k·x` (`a = 1 − k`) instead of
+    /// `y + k·(x − y)`, which shortens the loop-carried dependency, so results
+    /// may differ from [`step`](Self::step) in the last bits. Deterministic:
+    /// plain IEEE multiply/add/compare, no fused multiply-add.
+    #[inline]
+    pub fn step_block(&mut self, buf: &mut [f64]) {
+        let k = [self.k_attack, self.k_release];
+        let a = [1.0 - k[0], 1.0 - k[1]];
+        let snap = self.snap;
+        let mut y = self.value;
+        for v in buf {
+            y = Self::next(y, *v, k, a, snap);
+            *v = y;
+        }
+        self.value = y;
+    }
+
+    /// One step, `y ← a·y + k·x` with `(a, k)` = attack while `x > y`,
+    /// release otherwise (`a = 1 − k`), snapping onto `x` when within `snap`.
+    ///
+    /// This form keeps the loop-carried dependency short (multiply, add,
+    /// select): `k·x` and the direction test do not wait on the previous
+    /// step's arithmetic, and both candidates are computed before selecting,
+    /// so there is no data-dependent branch on noisy material.
+    #[inline(always)]
+    fn next(y: f64, x: f64, k: [f64; 2], a: [f64; 2], snap: f64) -> f64 {
+        let up = y * a[0] + k[0] * x;
+        let down = y * a[1] + k[1] * x;
+        let stepped = if x > y { up } else { down };
+        if (x - y).abs() < snap {
+            x
+        } else {
+            stepped
+        }
     }
 }
 

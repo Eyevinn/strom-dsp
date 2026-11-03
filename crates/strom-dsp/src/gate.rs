@@ -37,10 +37,12 @@
 //! [`flush_denormal`](crate::util::flush_denormal); the gain is snapped to its
 //! target once it is within `1e-12` (targets are ≥ 1e-4, so it never decays toward 0).
 
-use crate::dynamics::frame::{apply_gains, frame_peaks, BLOCK_FRAMES};
+use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{AttackRelease, GateStateMachine, PeakEnvelope};
+use crate::simd::{detect, Level};
 use crate::util::db_to_lin;
 use crate::Processor;
+use fearless_simd::{dispatch, Simd};
 
 /// Release time constant (ms) of the gate's internal peak detector (attack is instantaneous).
 pub const DETECTOR_RELEASE_MS: f64 = 20.0;
@@ -119,6 +121,10 @@ pub struct Gate {
     /// True from configure/reset until the first frame is processed: parameter
     /// changes apply instantly, including the initial (closed) gain.
     fresh: bool,
+    /// Instruction set of the hot loops (detected in `configure`).
+    level: Level,
+    /// Set by `set_simd_level`: `configure` keeps `level` instead of detecting.
+    level_forced: bool,
 }
 
 impl Default for Gate {
@@ -139,6 +145,8 @@ impl Gate {
             state: GateStateMachine::default(),
             fade: AttackRelease::default().with_snap(GAIN_SNAP),
             fresh: true,
+            level: Level::baseline(),
+            level_forced: false,
         };
         g.update_coefficients();
         g.reset();
@@ -170,6 +178,22 @@ impl Gate {
         self.state.is_open()
     }
 
+    /// Force the SIMD instruction set used by `process` (for hosts and tests),
+    /// e.g. `Level::fallback()` (needs fearless_simd's `force_support_fallback`
+    /// feature) to run the portable scalar path. By default
+    /// `configure` detects the best level ([`crate::simd::detect`]); a level
+    /// set here is kept across later `configure` calls. Every level produces
+    /// bit-identical output. Never allocates.
+    pub fn set_simd_level(&mut self, level: Level) {
+        self.level = level;
+        self.level_forced = true;
+    }
+
+    /// The SIMD instruction set `process` currently dispatches to.
+    pub fn simd_level(&self) -> Level {
+        self.level
+    }
+
     fn update_coefficients(&mut self) {
         let p = &self.params;
         let fs = self.sample_rate;
@@ -187,12 +211,35 @@ impl Gate {
             self.fade.set_value(self.reduction_lin);
         }
     }
+
+    /// Block loop, monomorphised per instruction set: per-frame linked peaks
+    /// (SIMD), then the serial detector → state → fade chain turns each
+    /// frame's peak into its gain (scalar), then the gains are applied (SIMD).
+    #[inline(always)]
+    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
+        let ch = self.channels;
+        let closed = self.reduction_lin;
+        let mut gains = [0.0f32; BLOCK_FRAMES];
+        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+            let gains = &mut gains[..block.len() / ch];
+            frame_peaks_simd(simd, block, ch, gains);
+            for v in gains.iter_mut() {
+                let env = self.detector.step(*v as f64);
+                let target = if self.state.step(env) { 1.0 } else { closed };
+                *v = self.fade.step(target) as f32;
+            }
+            apply_gains_simd(simd, block, ch, gains);
+        }
+    }
 }
 
 impl Processor for Gate {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
         self.sample_rate = (sample_rate as f64).clamp(1.0, 1.0e6);
         self.channels = channels;
+        if !self.level_forced {
+            self.level = detect();
+        }
         self.update_coefficients();
         self.reset();
     }
@@ -203,20 +250,7 @@ impl Processor for Gate {
             return;
         }
         self.fresh = false;
-        let closed = self.reduction_lin;
-        let mut gains = [0.0f32; BLOCK_FRAMES];
-        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
-            let gains = &mut gains[..block.len() / ch];
-            // Per-frame linked peaks, then the serial detector → state → fade
-            // chain turns each frame's peak into that frame's gain.
-            frame_peaks(block, ch, gains);
-            for v in gains.iter_mut() {
-                let env = self.detector.step(*v as f64);
-                let target = if self.state.step(env) { 1.0 } else { closed };
-                *v = self.fade.step(target) as f32;
-            }
-            apply_gains(block, ch, gains);
-        }
+        dispatch!(self.level, simd => self.process_blocks(simd, samples));
     }
 
     fn reset(&mut self) {

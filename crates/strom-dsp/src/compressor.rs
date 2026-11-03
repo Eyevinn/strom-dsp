@@ -53,10 +53,12 @@
 //!
 //! Ratio 1 gives `S = 0`, hence `r = 0` and exactly unity gain apart from makeup.
 
-use crate::dynamics::frame::{apply_gains, frame_peaks, BLOCK_FRAMES};
-use crate::dynamics::{AttackRelease, GainComputer, OnePole};
-use crate::util::lin_to_db;
+use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
+use crate::dynamics::{vmath, AttackRelease, GainComputer, OnePole};
+use crate::simd::{detect, Level};
 use crate::Processor;
+use fearless_simd::dispatch;
+use fearless_simd::prelude::*;
 
 pub use crate::dynamics::MIN_KNEE;
 
@@ -65,9 +67,6 @@ pub const PARAM_SMOOTHING_MS: f64 = 10.0;
 
 /// Snap distance of the parameter glides.
 const GLIDE_SNAP: f64 = 1e-9;
-
-/// `ln(10)/20`: `10^(−y/20) = exp(−y·LN10_OVER_20)`.
-const LN10_OVER_20: f64 = std::f64::consts::LN_10 / 20.0;
 
 /// Compressor parameters (units as in the GStreamer interface).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -226,6 +225,10 @@ pub struct Compressor {
     reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
     fresh: bool,
+    /// Instruction set of the hot loops (detected in `configure`).
+    level: Level,
+    /// Set by `set_simd_level`: `configure` keeps `level` instead of detecting.
+    level_forced: bool,
 }
 
 impl Default for Compressor {
@@ -256,6 +259,8 @@ impl Compressor {
             knee_start_lin: curve.computer().knee_start_lin(),
             reduction: AttackRelease::default(),
             fresh: true,
+            level: Level::baseline(),
+            level_forced: false,
         };
         c.update_coefficients();
         c
@@ -278,6 +283,102 @@ impl Compressor {
         self.reduction.value()
     }
 
+    /// Force the SIMD instruction set used by `process` (for hosts and tests),
+    /// e.g. `Level::fallback()` (needs fearless_simd's `force_support_fallback`
+    /// feature) to run the portable scalar path. By default
+    /// `configure` detects the best level ([`crate::simd::detect`]); a level
+    /// set here is kept across later `configure` calls. Every level produces
+    /// bit-identical output (the dB conversions use the same approximation on
+    /// every level, see the module docs). Never allocates.
+    pub fn set_simd_level(&mut self, level: Level) {
+        self.level = level;
+        self.level_forced = true;
+    }
+
+    /// The SIMD instruction set `process` currently dispatches to.
+    pub fn simd_level(&self) -> Level {
+        self.level
+    }
+
+    /// Block loop, monomorphised per instruction set (see "Efficiency" in
+    /// the module docs).
+    #[inline(always)]
+    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
+        let ch = self.channels;
+        let n = S::f64s::LEN;
+        // Per-frame scratch, reused through the stages of a block: peak →
+        // level (dB) → static reduction → smoothed reduction → gain.
+        let mut peaks = [0.0f32; BLOCK_FRAMES];
+        let mut level = [0.0f64; BLOCK_FRAMES];
+        let mut makeup = [0.0f64; BLOCK_FRAMES];
+        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+            let frames = block.len() / ch;
+            // Vector loops cover whole vectors; lanes past `frames` hold
+            // finite leftovers and are ignored. BLOCK_FRAMES is a multiple of
+            // every native width.
+            let lanes = frames.div_ceil(n) * n;
+            frame_peaks_simd(simd, block, ch, &mut peaks[..frames]);
+            // Settled curve and the whole block below the knee: the static
+            // reduction is exactly 0, no need for the logarithm.
+            let quiet = !self.gliding
+                && peaks[..frames].iter().fold(0.0f32, |m, &p| m.max(p)) as f64
+                    <= self.knee_start_lin;
+            if quiet {
+                level[..frames].fill(0.0);
+            } else {
+                for (l, &p) in level.iter_mut().zip(&peaks) {
+                    *l = p as f64;
+                }
+                for v in level[..lanes].chunks_exact_mut(n) {
+                    vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)).store_slice(v);
+                }
+            }
+
+            if quiet {
+                makeup.fill(self.current.makeup);
+            } else if self.gliding {
+                for (l, mk) in level[..frames].iter_mut().zip(&mut makeup) {
+                    self.current = self.glide.step(&self.target);
+                    if self.current == self.target {
+                        self.gliding = false;
+                        self.knee_start_lin = self.current.computer().knee_start_lin();
+                    }
+                    *l = self.current.computer().reduction_db(*l);
+                    *mk = self.current.makeup;
+                }
+            } else {
+                let gc = self.current.computer();
+                for v in level[..lanes].chunks_exact_mut(n) {
+                    reduction_db_simd(simd, &gc, S::f64s::from_slice(simd, v)).store_slice(v);
+                }
+                makeup.fill(self.current.makeup);
+            }
+            // Serial attack/release smoothing of the reduction (dB).
+            self.reduction.step_block(&mut level[..frames]);
+
+            // Gain 10^(−y/20)·makeup; exactly `makeup` at zero reduction
+            // (y ≥ 0 always, so a block without reduction skips the exp).
+            if level[..frames].iter().any(|&y| y > 0.0) {
+                let zero = S::f64s::splat(simd, 0.0);
+                for (v, mk) in level[..lanes]
+                    .chunks_exact_mut(n)
+                    .zip(makeup.chunks_exact(n))
+                {
+                    let y = S::f64s::from_slice(simd, v);
+                    let mk = S::f64s::from_slice(simd, mk);
+                    let g = vmath::db_to_gain(simd, y) * mk;
+                    y.simd_gt(zero).select(g, mk).store_slice(v);
+                }
+            } else {
+                level[..frames].copy_from_slice(&makeup[..frames]);
+            }
+            for (p, &g) in peaks.iter_mut().zip(&level[..frames]) {
+                *p = g as f32;
+            }
+            apply_gains_simd(simd, block, ch, &peaks[..frames]);
+        }
+    }
+
     fn update_coefficients(&mut self) {
         let fs = self.sample_rate;
         self.reduction.set_times(
@@ -296,10 +397,29 @@ impl Compressor {
     }
 }
 
+/// [`GainComputer::reduction_db`] per lane: the same operations in the same
+/// order, so every lane equals the scalar result bit for bit.
+#[inline(always)]
+fn reduction_db_simd<S: Simd>(simd: S, gc: &GainComputer, x: S::f64s) -> S::f64s {
+    let over = x - gc.threshold_db;
+    let half = 0.5 * gc.knee_db;
+    let d = over + half;
+    let in_knee = d * gc.slope * d / (2.0 * gc.knee_db);
+    let above = over * gc.slope;
+    let r = over
+        .simd_lt(S::f64s::splat(simd, half))
+        .select(in_knee, above);
+    over.simd_le(S::f64s::splat(simd, -half))
+        .select(S::f64s::splat(simd, 0.0), r)
+}
+
 impl Processor for Compressor {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
         self.sample_rate = (sample_rate as f64).clamp(1.0, 1.0e6);
         self.channels = channels;
+        if !self.level_forced {
+            self.level = detect();
+        }
         self.reset();
     }
 
@@ -309,35 +429,7 @@ impl Processor for Compressor {
             return;
         }
         self.fresh = false;
-        let mut gains = [0.0f32; BLOCK_FRAMES];
-        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
-            let gains = &mut gains[..block.len() / ch];
-            frame_peaks(block, ch, gains);
-            for v in gains.iter_mut() {
-                let peak = *v as f64;
-                let r = if self.gliding {
-                    self.current = self.glide.step(&self.target);
-                    if self.current == self.target {
-                        self.gliding = false;
-                        self.knee_start_lin = self.current.computer().knee_start_lin();
-                    }
-                    self.current.computer().reduction_db(lin_to_db(peak))
-                } else if peak > self.knee_start_lin {
-                    self.current.computer().reduction_db(lin_to_db(peak))
-                } else {
-                    0.0
-                };
-                let y = self.reduction.step(r);
-                let makeup = self.current.makeup;
-                let g = if y > 0.0 {
-                    (-y * LN10_OVER_20).exp() * makeup
-                } else {
-                    makeup
-                };
-                *v = g as f32;
-            }
-            apply_gains(block, ch, gains);
-        }
+        dispatch!(self.level, simd => self.process_blocks(simd, samples));
     }
 
     fn reset(&mut self) {
@@ -350,6 +442,7 @@ impl Processor for Compressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::lin_to_db;
 
     #[test]
     fn gain_computer_is_continuous_at_knee_edges() {

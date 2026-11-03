@@ -1,5 +1,6 @@
 //! Preallocated ring structures: a multichannel delay line and a sliding-window
-//! minimum (monotonic deque; the standard ascending-minima technique).
+//! minimum (monotonic deque, the standard ascending-minima technique, and the
+//! van Herk / Gil–Werman segment algorithm).
 
 /// Multichannel delay line for interleaved `f32` frames.
 ///
@@ -65,6 +66,49 @@ impl DelayLine {
         let i = (self.pos.wrapping_sub(delay) & self.mask) * self.channels;
         &self.buf[i..i + self.channels]
     }
+
+    /// Append several interleaved frames (`frames.len()` a multiple of the
+    /// channel count), equivalent to calling [`write`](Self::write) per frame
+    /// but with bulk copies.
+    #[inline]
+    pub fn write_frames(&mut self, frames: &[f32]) {
+        let ch = self.channels;
+        if ch == 0 {
+            return;
+        }
+        let cap = self.mask + 1;
+        let mut src = &frames[..frames.len() / ch * ch];
+        while !src.is_empty() {
+            let start = (self.pos + 1) & self.mask;
+            let n = (src.len() / ch).min(cap - start);
+            let (head, tail) = src.split_at(n * ch);
+            self.buf[start * ch..(start + n) * ch].copy_from_slice(head);
+            self.pos = (self.pos + n) & self.mask;
+            src = tail;
+        }
+    }
+
+    /// Copy `out.len() / channels` consecutive frames into `out`, oldest
+    /// first, ending with the frame [`read`](Self::read)`(delay)` returns.
+    /// `delay + frames − 1` must not exceed [`max_delay`](Self::max_delay).
+    #[inline]
+    pub fn read_frames(&self, delay: usize, out: &mut [f32]) {
+        let ch = self.channels;
+        if ch == 0 {
+            return;
+        }
+        let cap = self.mask + 1;
+        let frames = out.len() / ch;
+        let mut dst = &mut out[..frames * ch];
+        let mut idx = self.pos.wrapping_sub(delay + frames).wrapping_add(1) & self.mask;
+        while !dst.is_empty() {
+            let n = (dst.len() / ch).min(cap - idx);
+            let (head, tail) = dst.split_at_mut(n * ch);
+            head.copy_from_slice(&self.buf[idx * ch..(idx + n) * ch]);
+            idx = (idx + n) & self.mask;
+            dst = tail;
+        }
+    }
 }
 
 /// Sliding-window minimum over time-stamped values, O(1) amortised per push.
@@ -112,7 +156,7 @@ impl SlidingMin {
     }
 
     /// Add value `v` at time `t` (`t` not older than earlier pushes).
-    #[inline]
+    #[inline(always)]
     pub fn push(&mut self, t: u64, v: f64) {
         if self.ring.is_empty() {
             return;
@@ -130,7 +174,7 @@ impl SlidingMin {
     }
 
     /// Drop entries with time stamp `< oldest`.
-    #[inline]
+    #[inline(always)]
     pub fn expire(&mut self, oldest: u64) {
         while self.len > 0 && self.ring[self.head].0 < oldest {
             self.head = (self.head + 1) & self.mask;
@@ -139,13 +183,112 @@ impl SlidingMin {
     }
 
     /// Minimum of the live entries, or `None` if empty.
-    #[inline]
+    #[inline(always)]
     pub fn min(&self) -> Option<f64> {
         if self.len > 0 {
             Some(self.ring[self.head].1)
         } else {
             None
         }
+    }
+}
+
+/// Sliding-window minimum over the last `w` pushed values with a fixed,
+/// branch-light cost: the van Herk / Gil–Werman algorithm.
+///
+/// References: M. van Herk, "A fast algorithm for local minimum and maximum
+/// filters on rectangular and octagonal kernels", Pattern Recognition
+/// Letters 13(7), 1992; J. Gil and M. Werman, "Computing 2-D min, median,
+/// and max filters", IEEE Trans. PAMI 15(5), 1993.
+///
+/// The input stream is cut into segments of `w` consecutive values. A window
+/// of `w` values either is one whole segment, or covers the tail of one
+/// segment and the head of the next, so its minimum is
+/// `min(suffix_min(previous segment from the window start), prefix_min(current
+/// segment up to the newest value))`. The prefix minimum is a running value;
+/// the suffix minima of a segment are computed backwards once it is complete.
+/// That is about three comparisons per value, independent of the data,
+/// where the monotonic deque of [`SlidingMin`] has a data-dependent loop.
+///
+/// The result is the exact minimum (comparisons only, no arithmetic), so it
+/// equals [`SlidingMin`] for the same window. Before `w` values have been
+/// pushed after [`reset`](Self::reset), it is the minimum of the values pushed
+/// so far. NaN inputs are not supported (they are never the minimum).
+#[derive(Debug, Clone, Default)]
+pub struct SegmentedMin {
+    /// Values of the current (incomplete) segment, by position.
+    current: Vec<f64>,
+    /// Suffix minima of the previous segment, by position (`+∞` after reset).
+    suffix: Vec<f64>,
+    window: usize,
+    /// Position of the next value within its segment (`0 .. window`).
+    pos: usize,
+    /// Minimum of the current segment so far.
+    prefix: f64,
+}
+
+impl SegmentedMin {
+    /// Allocate for windows of up to `max_window` values and reset to a
+    /// window of 1. The only allocating method.
+    pub fn allocate(&mut self, max_window: usize) {
+        let cap = max_window.max(1);
+        self.current = vec![f64::INFINITY; cap];
+        // One spare slot: the window start's suffix index can be `window`.
+        self.suffix = vec![f64::INFINITY; cap + 1];
+        self.reset(1);
+    }
+
+    /// Window length in values (≥ 1).
+    pub fn window(&self) -> usize {
+        self.window
+    }
+
+    /// Forget all values and set the window length (clamped to
+    /// `1 ..= capacity`). O(window).
+    pub fn reset(&mut self, window: usize) {
+        self.window = window.clamp(1, self.current.len().max(1));
+        self.pos = 0;
+        self.prefix = f64::INFINITY;
+        let w = self.window;
+        if let Some(s) = self.suffix.get_mut(..=w) {
+            s.fill(f64::INFINITY);
+        }
+    }
+
+    /// Push the newest value and return the minimum of the last `window`
+    /// values (of fewer, right after a reset).
+    #[inline(always)]
+    pub fn push(&mut self, v: f64) -> f64 {
+        let w = self.window;
+        let j = self.pos;
+        let (Some(c), Some(&s)) = (self.current.get_mut(j), self.suffix.get(j + 1)) else {
+            return v; // not allocated
+        };
+        *c = v;
+        // Running prefix minimum of the current segment (restarts at j = 0).
+        let p = if j == 0 || v < self.prefix {
+            v
+        } else {
+            self.prefix
+        };
+        self.prefix = p;
+        // The window starts at position j + 1 of the previous segment
+        // (`suffix[w]` is +∞: then the window is exactly the current segment).
+        let out = if s < p { s } else { p };
+        if j + 1 == w {
+            // Segment complete: its suffix minima serve the next segment.
+            let mut m = f64::INFINITY;
+            for (s, &c) in self.suffix[..w].iter_mut().zip(&self.current[..w]).rev() {
+                if c < m {
+                    m = c;
+                }
+                *s = m;
+            }
+            self.pos = 0;
+        } else {
+            self.pos = j + 1;
+        }
+        out
     }
 }
 
@@ -167,6 +310,77 @@ mod tests {
         }
         d.clear();
         assert_eq!(d.read(0), &[0.0, 0.0][..]);
+    }
+
+    #[test]
+    fn delay_line_block_access_matches_per_frame() {
+        for ch in [1usize, 2, 3] {
+            let mut a = DelayLine::default();
+            let mut b = DelayLine::default();
+            a.allocate(20, ch);
+            b.allocate(20, ch);
+            let cap = a.max_delay() + 1;
+            let mut t = 0.0f32;
+            for (k, n) in [1usize, 5, 7, 31, 32, 3, 40, 2, 64].into_iter().enumerate() {
+                let frames: Vec<f32> = (0..n * ch)
+                    .map(|_| {
+                        t += 1.0;
+                        t
+                    })
+                    .collect();
+                a.write_frames(&frames);
+                for f in frames.chunks_exact(ch) {
+                    b.write(f);
+                }
+                for d in 0..cap {
+                    assert_eq!(a.read(d), b.read(d), "ch={ch} k={k} d={d}");
+                }
+                let m = n.min(cap);
+                for delay in 0..=cap - m {
+                    let mut out = vec![0.0; m * ch];
+                    a.read_frames(delay, &mut out);
+                    for (i, f) in out.chunks_exact(ch).enumerate() {
+                        assert_eq!(f, b.read(delay + m - 1 - i), "ch={ch} delay={delay}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_min_matches_brute_force_and_deque() {
+        let mut x = 777u64;
+        let mut seg = SegmentedMin::default();
+        seg.allocate(70);
+        for w in [1usize, 2, 3, 7, 16, 63, 64, 70] {
+            seg.reset(w);
+            let mut deque = SlidingMin::default();
+            deque.allocate(w);
+            let mut vals = Vec::new();
+            for t in 0..3000u64 {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                // Runs of equal values and ramps exercise ties and monotone input.
+                let v = match (t / 200) % 3 {
+                    0 => (x >> 40) as f64,
+                    1 => (t % 17) as f64,
+                    _ => -(t as f64),
+                };
+                vals.push(v);
+                let got = seg.push(v);
+                let lo = vals.len().saturating_sub(w);
+                let brute = vals[lo..].iter().cloned().fold(f64::INFINITY, f64::min);
+                assert_eq!(got, brute, "w={w} t={t}");
+                deque.push(t, v);
+                deque.expire((t + 1).saturating_sub(w as u64));
+                assert_eq!(Some(got), deque.min());
+            }
+        }
+        // Window larger than the capacity is clamped; unallocated passes through.
+        seg.reset(1000);
+        assert_eq!(seg.window(), 70);
+        assert_eq!(SegmentedMin::default().push(3.0), 3.0);
     }
 
     #[test]

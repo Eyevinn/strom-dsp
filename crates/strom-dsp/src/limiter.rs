@@ -16,10 +16,14 @@
 //!
 //! With attack length `A ≤ L` frames, split as `A = A1 + A2`:
 //!
-//! 1. **Sliding minimum** ([`SlidingMin`])
+//! 1. **Sliding minimum** ([`SegmentedMin`])
 //!    `h[m] = min { r[j] : m − L ≤ j ≤ m − L + A }`
 //!    (a window of `A + 1` required gains, ending `L − A` frames in the past, so
-//!    it is causal). Computed with a monotonic deque: O(1) amortised per frame.
+//!    it is causal). Computed with the van Herk / Gil–Werman segment algorithm
+//!    (prefix and suffix minima of fixed-length segments): a constant number of
+//!    comparisons per frame, independent of the material. It uses comparisons
+//!    only, so `h[m]` is the *exact* minimum of the window, which is all the
+//!    argument below needs.
 //! 2. **Two cascaded moving averages** ([`RampSmoother`]) of lengths `A1 + 1` and
 //!    `A2 + 1` over `h`. Their combined kernel is a trapezoid/triangle spanning offsets
 //!    `0 … A`, so a step in `h` becomes a smooth S-shaped ramp of `A` frames.
@@ -30,7 +34,9 @@
 //! *Why the ceiling is guaranteed*: the box output at `n` is a weighted mean
 //! (non-negative weights summing to 1) of `h[n − k]` for `0 ≤ k ≤ A`. The window
 //! of `h[n − k]` is `[n − k − L, n − k − L + A]`, which contains `n − L` for every
-//! such `k`. Hence each `h[n − k] ≤ r[n − L]`, so the mean is `≤ r[n − L]`, and the
+//! such `k`. Since each `h` is the exact window minimum (including right after
+//! a rebuild, which pre-fills the segment minimum with the full window from the
+//! stored history), each `h[n − k] ≤ r[n − L]`, so the mean is `≤ r[n − L]`, and the
 //! release stage never exceeds the box output. The gain reaches its target
 //! exactly when the peak is output, starting `A` frames earlier.
 //!
@@ -87,10 +93,13 @@
 //! from below; once the gap is under 1e-15 it snaps to the target, so it never
 //! decays through the subnormal range. The box stage is integer arithmetic.
 
-use crate::dynamics::frame::frame_peak;
-use crate::dynamics::{DelayLine, RampSmoother, SlidingMin};
+use crate::dynamics::frame::{frame_peaks_simd, BLOCK_FRAMES};
+use crate::dynamics::{DelayLine, RampSmoother, SegmentedMin};
+use crate::simd::{detect, Level};
 use crate::util::{db_to_lin, one_pole_coef, DENORMAL_FLUSH};
 use crate::Processor;
+use fearless_simd::dispatch;
+use fearless_simd::prelude::*;
 
 /// Largest supported lookahead (ms). The delay line is sized for this at
 /// `configure` time so lookahead changes never allocate.
@@ -209,8 +218,7 @@ pub struct Limiter {
     hist_mask: usize,
 
     // Gain pipeline.
-    window_min: SlidingMin,
-    win_hi: u64,
+    window_min: SegmentedMin,
     win_push_delay: u64,
     ramp: RampSmoother,
     gain: f64,
@@ -222,6 +230,10 @@ pub struct Limiter {
     safety_clips: u64,
     /// True from configure/reset until the first frame: parameters apply instantly.
     fresh: bool,
+    /// Instruction set of the hot loops (detected in `configure`).
+    level: Level,
+    /// Set by `set_simd_level`: `configure` keeps `level` instead of detecting.
+    level_forced: bool,
 }
 
 impl Default for Limiter {
@@ -249,8 +261,7 @@ impl Limiter {
             req_hist: Vec::new(),
             ceil_hist: Vec::new(),
             hist_mask: 0,
-            window_min: SlidingMin::default(),
-            win_hi: 0,
+            window_min: SegmentedMin::default(),
             win_push_delay: 0,
             ramp: RampSmoother::default(),
             gain: 1.0,
@@ -259,6 +270,8 @@ impl Limiter {
             xfade: None,
             safety_clips: 0,
             fresh: true,
+            level: Level::baseline(),
+            level_forced: false,
         };
         l.set_params(&LimiterParams::default());
         l
@@ -302,6 +315,22 @@ impl Limiter {
         self.gain
     }
 
+    /// Force the SIMD instruction set used by `process` (for hosts and tests),
+    /// e.g. `Level::fallback()` (needs fearless_simd's `force_support_fallback`
+    /// feature) to run the portable scalar path. By default
+    /// `configure` detects the best level ([`crate::simd::detect`]); a level
+    /// set here is kept across later `configure` calls. Every level produces
+    /// bit-identical output. Never allocates.
+    pub fn set_simd_level(&mut self, level: Level) {
+        self.level = level;
+        self.level_forced = true;
+    }
+
+    /// The SIMD instruction set `process` currently dispatches to.
+    pub fn simd_level(&self) -> Level {
+        self.level
+    }
+
     fn is_configured(&self) -> bool {
         self.channels != 0 && !self.req_hist.is_empty()
     }
@@ -338,23 +367,21 @@ impl Limiter {
         let hi = hi as u64;
         let mask = self.hist_mask;
         let m = self.now;
-        self.win_hi = hi;
         self.win_push_delay = d;
 
         // Replay h for t in [m-1-a, m-1]: the ramp's output depends only on
-        // its last a+1 inputs, so this restores its exact state.
+        // its last a+1 inputs, so this restores its exact state. The window
+        // of h[t] is [t − hi, t − d] (hi − d + 1 values); pre-fill the
+        // minimum with the w − 1 values before the first window's end.
         let start = m - 1 - a as u64;
-        self.window_min.clear();
+        self.window_min.reset((hi - d + 1) as usize);
         self.ramp.reset(a, 1.0);
-        let mut next = start - hi;
+        for e in start - hi..start - d {
+            self.window_min.push(self.req_hist[e as usize & mask]);
+        }
         for t in start..m {
-            while next + d <= t {
-                self.window_min
-                    .push(next, self.req_hist[next as usize & mask]);
-                next += 1;
-            }
-            self.window_min.expire(t - hi);
-            self.ramp.step(self.window_min.min().unwrap_or(1.0));
+            let h = self.window_min.push(self.req_hist[(t - d) as usize & mask]);
+            self.ramp.step(h);
         }
     }
 
@@ -368,28 +395,22 @@ impl Limiter {
         }
     }
 
-    /// Serial gain pipeline for input frame `now` with linked peak `peak`:
-    /// stores the required gain, advances the window minimum, ramp and release,
-    /// and returns the gain for the output frame `now`.
-    #[inline]
-    fn gain_step(&mut self, peak: f64, enabled: bool, rise: f64) -> f64 {
+    /// Serial gain pipeline for input frame `now` with required gain `req`
+    /// (from [`required_gains`]): stores it, advances the
+    /// window minimum, ramp and release, and returns the gain for the output
+    /// frame `now`.
+    #[inline(always)]
+    fn gain_step(&mut self, req: f64, enabled: bool, rise: f64) -> f64 {
         let m = self.now;
         let hmask = self.hist_mask;
-        let c = self.ceiling as f64;
-        let (req, ceil) = if enabled {
-            (if peak > c { c / peak } else { 1.0 }, self.ceiling)
-        } else {
-            (1.0, f32::INFINITY)
-        };
+        let ceil = if enabled { self.ceiling } else { f32::INFINITY };
         self.req_hist[m as usize & hmask] = req;
         self.ceil_hist[m as usize & hmask] = ceil;
 
         // Sliding minimum of required gain, then the two-box ramp.
         let pushed = m - self.win_push_delay;
-        self.window_min
-            .push(pushed, self.req_hist[pushed as usize & hmask]);
-        self.window_min.expire(m - self.win_hi);
-        let target = self.ramp.step(self.window_min.min().unwrap_or(1.0));
+        let h = self.window_min.push(self.req_hist[pushed as usize & hmask]);
+        let target = self.ramp.step(h);
 
         // Release.
         let g = self.gain;
@@ -410,27 +431,45 @@ impl Limiter {
         self.gain
     }
 
-    /// One frame with a single delay tap (no cross-fade running).
+    /// Frames with a single delay tap (no cross-fade running): the serial
+    /// gain pipeline for every frame, then one bulk delay-line write/read,
+    /// then gain and safety clip. `req` holds the frames' required gains.
+    /// `N` is the channel count, or 0 for "use `self.channels`".
     #[inline(always)]
-    fn process_frame(&mut self, frame: &mut [f32], enabled: bool, rise: f64) {
-        let peak = frame_peak(frame) as f64;
-        let g = self.gain_step(peak, enabled, rise);
-        self.delay.write(frame);
-        let la = self.lookahead;
-        let lim = self.ceil_hist[(self.now - la as u64) as usize & self.hist_mask];
+    fn run_block<const N: usize>(
+        &mut self,
+        frames: &mut [f32],
+        req: &[f64],
+        enabled: bool,
+        rise: f64,
+    ) {
+        let ch = if N == 0 { self.channels } else { N };
+        let nf = req.len();
+        let frames = &mut frames[..nf * ch];
+        let la = self.lookahead as u64;
+        let hmask = self.hist_mask;
+        let mut gains = [0.0f64; BLOCK_FRAMES];
+        let mut lims = [0.0f32; BLOCK_FRAMES];
+        for ((g, lim), &r) in gains.iter_mut().zip(&mut lims).zip(req) {
+            *g = self.gain_step(r, enabled, rise);
+            *lim = self.ceil_hist[(self.now - la) as usize & hmask];
+            self.now += 1;
+        }
+        self.delay.write_frames(frames);
+        self.delay.read_frames(la as usize, frames);
         let mut clips = 0;
-        for (y, &x) in frame.iter_mut().zip(self.delay.read(la)) {
-            *y = safety((g * x as f64) as f32, lim, &mut clips);
+        for ((f, &g), &lim) in frames.chunks_exact_mut(ch).zip(&gains).zip(&lims) {
+            for y in f {
+                *y = safety((g * *y as f64) as f32, lim, &mut clips);
+            }
         }
         self.safety_clips += clips;
-        self.now += 1;
     }
 
     /// One frame during a lookahead cross-fade (two delay taps).
     #[inline(never)]
-    fn process_frame_xfade(&mut self, frame: &mut [f32], enabled: bool, rise: f64) {
-        let peak = frame_peak(frame) as f64;
-        let g = self.gain_step(peak, enabled, rise);
+    fn process_frame_xfade(&mut self, frame: &mut [f32], req: f64, enabled: bool, rise: f64) {
+        let g = self.gain_step(req, enabled, rise);
         self.delay.write(frame);
         let m = self.now;
         let hmask = self.hist_mask;
@@ -505,6 +544,9 @@ impl Processor for Limiter {
         let fs = effective_rate(sample_rate);
         self.sample_rate = fs;
         self.channels = channels;
+        if !self.level_forced {
+            self.level = detect();
+        }
         if channels == 0 {
             self.delay = DelayLine::default();
             self.req_hist = Vec::new();
@@ -513,7 +555,10 @@ impl Processor for Limiter {
         self.max_frames = ms_to_frames(MAX_LOOKAHEAD_MS as f64, fs);
         self.xfade_frames = ms_to_frames(XFADE_MS, fs).max(1);
 
-        self.delay.allocate(self.max_frames, channels);
+        // Room for a whole block on top of the longest delay: a block is
+        // written before its delayed frames are read back.
+        self.delay
+            .allocate(self.max_frames + BLOCK_FRAMES, channels);
 
         // History must reach back 2·Lmax + 1 frames for a rebuild.
         let hist = (2 * self.max_frames + 2).next_power_of_two();
@@ -560,28 +605,68 @@ impl Processor for Limiter {
         }
         self.start_crossfade_if_needed();
 
-        let enabled = self.params.enabled;
-        let rise = 1.0 - self.release_coef;
-        // Mono/stereo get their own monomorphised loop (frame length known at
-        // compile time, so the per-channel loops are unrolled).
-        match ch {
-            1 => self.run_frames::<1>(samples, enabled, rise),
-            2 => self.run_frames::<2>(samples, enabled, rise),
-            _ => self.run_frames::<0>(samples, enabled, rise),
-        }
+        dispatch!(self.level, simd => self.process_blocks(simd, samples));
+    }
+}
+
+/// Required gains `min(1, c / p)` for a block of linked peaks (all 1 when
+/// disabled), at native `f64` vector width. IEEE division and compare/select
+/// only, so every lane equals [`Limiter::required_gain`] bit for bit.
+#[inline(always)]
+fn required_gains<S: Simd>(simd: S, ceiling: f32, enabled: bool, peaks: &[f32], out: &mut [f64]) {
+    let n = S::f64s::LEN;
+    if !enabled {
+        out.fill(1.0);
+        return;
+    }
+    let c = S::f64s::splat(simd, ceiling as f64);
+    let one = S::f64s::splat(simd, 1.0);
+    let mut dst = out.chunks_exact_mut(n);
+    let mut src = peaks.chunks_exact(n);
+    for (o, p) in (&mut dst).zip(&mut src) {
+        let p = S::f64s::from_fn(simd, |i| p[i] as f64);
+        p.simd_gt(c).select(c / p, one).store_slice(o);
+    }
+    let c = ceiling as f64;
+    for (o, &p) in dst.into_remainder().iter_mut().zip(src.remainder()) {
+        let p = p as f64;
+        *o = if p > c { c / p } else { 1.0 };
     }
 }
 
 impl Limiter {
-    /// Frame loop; `N` is the channel count, or 0 for "use `self.channels`".
+    /// Block loop, monomorphised per instruction set: per-frame linked peaks
+    /// and required gains (SIMD), then frame by frame through the serial gain
+    /// pipeline, with bulk delay-line access and gain application.
     #[inline(always)]
-    fn run_frames<const N: usize>(&mut self, samples: &mut [f32], enabled: bool, rise: f64) {
-        let ch = if N == 0 { self.channels } else { N };
-        for frame in samples.chunks_exact_mut(ch) {
-            if self.xfade.is_none() {
-                self.process_frame(frame, enabled, rise);
-            } else {
-                self.process_frame_xfade(frame, enabled, rise);
+    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
+        let ch = self.channels;
+        let enabled = self.params.enabled;
+        let rise = 1.0 - self.release_coef;
+        let mut peaks = [0.0f32; BLOCK_FRAMES];
+        let mut req = [0.0f64; BLOCK_FRAMES];
+        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+            let nf = block.len() / ch;
+            frame_peaks_simd(simd, block, ch, &mut peaks[..nf]);
+            required_gains(simd, self.ceiling, enabled, &peaks[..nf], &mut req[..nf]);
+            let mut i = 0;
+            // A cross-fade only starts at the top of `process` or right after
+            // another one ends, so once none is running the rest of the call
+            // takes the block path.
+            while i < nf && self.xfade.is_some() {
+                let f = &mut block[i * ch..(i + 1) * ch];
+                self.process_frame_xfade(f, req[i], enabled, rise);
+                i += 1;
+            }
+            if i < nf {
+                let (frames, req) = (&mut block[i * ch..], &req[i..nf]);
+                // Mono/stereo get their own monomorphised loop (frame length
+                // known at compile time).
+                match ch {
+                    1 => self.run_block::<1>(frames, req, enabled, rise),
+                    2 => self.run_block::<2>(frames, req, enabled, rise),
+                    _ => self.run_block::<0>(frames, req, enabled, rise),
+                }
             }
         }
     }

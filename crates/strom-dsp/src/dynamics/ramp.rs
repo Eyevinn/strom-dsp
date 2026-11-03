@@ -58,7 +58,7 @@ impl BoxAverage {
     }
 
     /// Push one input and return the floor of the window mean.
-    #[inline]
+    #[inline(always)]
     pub fn step(&mut self, v: u64) -> u64 {
         self.pos = (self.pos + 1) & self.mask;
         let old_idx = self.pos.wrapping_sub(self.len) & self.mask;
@@ -87,7 +87,7 @@ pub struct RampSmoother {
 }
 
 /// Quantise a value in `[0, 1]` down to fixed point (NaN → 0).
-#[inline]
+#[inline(always)]
 fn quantize(x: f64) -> u64 {
     // `as` truncates toward zero (floor for x ≥ 0), saturates (negative → 0)
     // and maps NaN to 0; `min` caps values above 1.
@@ -119,7 +119,7 @@ impl RampSmoother {
     }
 
     /// Push one input (clamped to `[0, 1]`) and return the smoothed output.
-    #[inline]
+    #[inline(always)]
     pub fn step(&mut self, x: f64) -> f64 {
         let a = self.first.step(quantize(x));
         let b = self.second.step(a);
