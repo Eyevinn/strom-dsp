@@ -34,7 +34,10 @@ use strom_dsp::presets::BroadcastPreset;
 use strom_dsp::spike_guard::THRESHOLD_RANGE_DB as SPIKE_THRESHOLD_RANGE_DB;
 use strom_dsp::Processor;
 
-use super::{StromDspBroadcastPreset as Preset, MESSAGE_NAME, MIN_CROSSOVER_GAP_HZ, SILENCE_DB};
+use super::{
+    StromDspBroadcastLatencyMode as LatencyModeEnum, StromDspBroadcastPreset as Preset,
+    MESSAGE_NAME, MIN_CROSSOVER_GAP_HZ, SILENCE_DB,
+};
 use crate::common::{self, Engine, SharedSettings};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -59,6 +62,8 @@ const FALLBACK_RATE: u32 = 48_000;
 struct Settings {
     params: BroadcastParams,
     preset: Preset,
+    /// Last `latency-mode` written (its settings are in `params`).
+    latency_mode: LatencyModeEnum,
     meter_interval_ms: u32,
 }
 
@@ -67,6 +72,7 @@ impl Default for Settings {
         Self {
             params: BroadcastParams::preset(BroadcastPreset::EbuR128, DEFAULT_NUM_BANDS),
             preset: Preset::EbuR128,
+            latency_mode: LatencyModeEnum::Standard,
             meter_interval_ms: DEFAULT_METER_INTERVAL_MS,
         }
     }
@@ -183,6 +189,7 @@ enum Prop {
     Bool(BoolField),
     Preset,
     NumBands,
+    LatencyMode,
     MeterInterval,
     CrossoverArray,
 }
@@ -508,6 +515,7 @@ fn lookup(name: &str) -> Prop {
         "enabled" => Prop::Bool(BoolField::Enabled),
         "preset" => Prop::Preset,
         "num-bands" => Prop::NumBands,
+        "latency-mode" => Prop::LatencyMode,
         "meter-interval" => Prop::MeterInterval,
         "crossover-frequencies" => Prop::CrossoverArray,
         "limiter-lookahead" => Prop::Float(FloatField::Lookahead),
@@ -617,16 +625,17 @@ fn apply(dsp: &mut BroadcastProcessor, s: &Settings) {
     let cur = dsp.params();
     let mut p = s.params;
     p.num_bands = cur.num_bands;
+    p.spike_guard_lookahead_ms = cur.spike_guard_lookahead_ms;
+    p.bass_clipper_lookahead_ms = cur.bass_clipper_lookahead_ms;
+    p.clipper_latency = cur.clipper_latency;
     p.limiter_lookahead_ms = cur.limiter_lookahead_ms;
     dsp.set_params(&p);
 }
 
-/// Latency of the chain as time, rounded up to whole nanoseconds.
-fn latency_time(rate: u32, lookahead_ms: f32) -> gst::ClockTime {
-    let rate = if rate == 0 { FALLBACK_RATE } else { rate };
-    let frames = BroadcastProcessor::latency_frames_for(rate as f32, lookahead_ms) as u64;
+/// `frames` at `rate` as time, rounded up to whole nanoseconds.
+fn latency_time(rate: u32, frames: u32) -> gst::ClockTime {
     gst::ClockTime::from_nseconds(
-        (frames * gst::ClockTime::SECOND.nseconds()).div_ceil(u64::from(rate)),
+        (u64::from(frames) * gst::ClockTime::SECOND.nseconds()).div_ceil(u64::from(rate)),
     )
 }
 
@@ -720,23 +729,26 @@ fn preset_structure(preset: BroadcastPreset, num_bands: usize) -> gst::Structure
 pub struct StromDspBroadcastProcessor {
     settings: SharedSettings<Settings>,
     stream: Mutex<Option<Stream>>,
-    /// Negotiated rate (0 = none) and configured lookahead (f32 bits), for
-    /// the latency without touching the streaming lock.
+    /// Negotiated rate (0 = none) and the configured chain's latency
+    /// (frames), for the latency without touching the streaming lock.
     rate: AtomicU32,
-    lookahead_bits: AtomicU32,
+    latency_frames: AtomicU32,
     /// `reset` signal: restart the output integrated loudness.
     reset_integrated: AtomicBool,
 }
 
 impl StromDspBroadcastProcessor {
+    /// The reported latency: the configured chain's, or before caps the
+    /// current settings' at [`FALLBACK_RATE`].
     fn latency(&self) -> gst::ClockTime {
         let rate = self.rate.load(Ordering::Acquire);
-        let lookahead = if rate == 0 {
-            self.settings.get().params.limiter_lookahead_ms
+        if rate == 0 {
+            let p = self.settings.get().params;
+            let frames = BroadcastProcessor::latency_frames_for_params(FALLBACK_RATE as f32, &p);
+            latency_time(FALLBACK_RATE, frames as u32)
         } else {
-            f32::from_bits(self.lookahead_bits.load(Ordering::Acquire))
-        };
-        latency_time(rate, lookahead)
+            latency_time(rate, self.latency_frames.load(Ordering::Acquire))
+        }
     }
 
     fn streaming(&self) -> bool {
@@ -800,7 +812,8 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     .nick("Preset")
                     .blurb(
                         "Starting point: sets every property except enabled, meter-interval, \
-                         num-bands and limiter-lookahead (for the current num-bands). Reads \
+                         num-bands, latency-mode and limiter-lookahead (for the current \
+                         num-bands). Reads \
                          custom after any of those properties is changed; writing custom \
                          changes nothing else",
                     )
@@ -919,11 +932,30 @@ impl ObjectImpl for StromDspBroadcastProcessor {
             ));
             v.push(float("limiter-release"));
             v.push(
+                glib::ParamSpecEnum::builder_with_default(
+                    "latency-mode",
+                    LatencyModeEnum::Standard,
+                )
+                .nick("Latency mode")
+                .blurb(
+                    "Latency of the whole chain: standard (at most 6 ms) or low (at most \
+                     3 ms; shorter lookaheads in the spike guard, bass clipper, clipper and \
+                     limiter). Sets limiter-lookahead to the mode's value; a later write of \
+                     limiter-lookahead overrides it. Structural: takes effect at the next caps \
+                     negotiation; presets do not change it",
+                )
+                .readwrite()
+                .mutable_ready()
+                .build(),
+            );
+            v.push(
                 glib::ParamSpecFloat::builder("limiter-lookahead")
                     .nick("Limiter lookahead")
                     .blurb(
                         "Lookahead of the true-peak limiter (ms); part of the reported latency \
-                         (structural: takes effect at the next caps negotiation)",
+                         (structural: takes effect at the next caps negotiation). latency-mode \
+                         sets it (1.5 ms standard, 0.6 ms low); write it after latency-mode to \
+                         override",
                     )
                     .minimum(0.5)
                     .maximum(20.0)
@@ -1028,6 +1060,25 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                 } else {
                     gst::debug!(CAT, imp = self, "limiter-lookahead set to {v} ms");
                 }
+                return;
+            }
+            Prop::LatencyMode => {
+                let v: LatencyModeEnum = value.get().expect("type checked upstream");
+                self.settings.update(|s| {
+                    s.latency_mode = v;
+                    v.library().apply(&mut s.params);
+                });
+                if self.streaming() {
+                    gst::warning!(
+                        CAT,
+                        imp = self,
+                        "latency-mode is READY-only: {v:?} takes effect at the next caps \
+                         negotiation"
+                    );
+                } else {
+                    gst::debug!(CAT, imp = self, "latency-mode set to {v:?}");
+                }
+                self.obj().notify("limiter-lookahead");
                 return;
             }
             Prop::NumBands => {
@@ -1153,6 +1204,7 @@ impl ObjectImpl for StromDspBroadcastProcessor {
             Prop::Bool(b) => b.get(&s.params).to_value(),
             Prop::Preset => s.preset.to_value(),
             Prop::NumBands => (s.params.num_bands as u32).to_value(),
+            Prop::LatencyMode => s.latency_mode.to_value(),
             Prop::MeterInterval => s.meter_interval_ms.to_value(),
             Prop::CrossoverArray => gst::Array::new(s.params.crossover_hz).to_value(),
         }
@@ -1203,7 +1255,7 @@ impl BaseTransformImpl for StromDspBroadcastProcessor {
     fn set_caps(&self, incaps: &gst::Caps, outcaps: &gst::Caps) -> Result<(), gst::LoggableError> {
         let (rate, channels) = common::parse_caps(incaps)?;
         let old_latency = self.latency();
-        let (num_bands, lookahead) = {
+        let (num_bands, lookahead, frames) = {
             let mut guard = self.stream.lock().unwrap();
             let mut dsp = guard.take().map(|s| s.engine.dsp).unwrap_or_default();
             let (s, generation) = self.settings.snapshot();
@@ -1220,18 +1272,18 @@ impl BaseTransformImpl for StromDspBroadcastProcessor {
                 phase: 0,
             };
             st.set_interval(s.meter_interval_ms);
+            let frames = st.engine.dsp.latency_frames() as u32;
             *guard = Some(st);
-            (p.num_bands, p.limiter_lookahead_ms)
+            (p.num_bands, p.limiter_lookahead_ms, frames)
         };
-        self.lookahead_bits
-            .store(lookahead.to_bits(), Ordering::Release);
+        self.latency_frames.store(frames, Ordering::Release);
         self.rate.store(rate, Ordering::Release);
         let new_latency = self.latency();
         gst::debug!(
             CAT,
             imp = self,
             "configured for {rate} Hz, {channels} channels, {num_bands} bands, \
-             lookahead {lookahead} ms: latency {new_latency}"
+             limiter lookahead {lookahead} ms: latency {frames} frames, {new_latency}"
         );
         if new_latency != old_latency {
             let obj = self.obj();
@@ -1416,6 +1468,7 @@ mod tests {
             "preset",
             "meter-interval",
             "num-bands",
+            "latency-mode",
             "limiter-lookahead",
             "crossover-frequencies",
         ] {

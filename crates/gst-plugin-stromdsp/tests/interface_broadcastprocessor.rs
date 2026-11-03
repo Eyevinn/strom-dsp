@@ -26,6 +26,7 @@ enum Kind {
     /// (min, max, default)
     UInt(u32, u32, u32),
     Preset,
+    LatencyMode,
     FloatArray,
 }
 
@@ -86,6 +87,7 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
             Kind::Float(1.0, 2000.0, 200.0),
             LIVE,
         ),
+        ("latency-mode".into(), Kind::LatencyMode, READY),
         (
             "limiter-lookahead".into(),
             Kind::Float(0.5, 20.0, 1.5),
@@ -165,7 +167,7 @@ fn property_set_is_exact() {
     let mut want: Vec<String> = spec().into_iter().map(|(n, _, _)| n).collect();
     want.sort();
     assert_eq!(own, want);
-    assert_eq!(want.len(), 25 + 3 + 4 + 40);
+    assert_eq!(want.len(), 26 + 3 + 4 + 40);
 }
 
 #[test]
@@ -247,6 +249,29 @@ fn every_property_type_range_default_and_flags() {
                     let v = e.property_value(ctx);
                     let (_, ev) = glib::EnumValue::from_value(&v).unwrap();
                     assert_eq!(ev.nick(), nick, "preset read-back");
+                }
+            }
+            Kind::LatencyMode => {
+                let ps = ps.downcast_ref::<glib::ParamSpecEnum>().expect(ctx);
+                assert_eq!(vt.name(), "StromDspBroadcastLatencyMode");
+                let mut got: Vec<(i32, String)> = ps
+                    .enum_class()
+                    .values()
+                    .iter()
+                    .map(|v| (v.value(), v.nick().to_string()))
+                    .collect();
+                got.sort();
+                let want: Vec<(i32, String)> = [(0, "standard"), (1, "low")]
+                    .into_iter()
+                    .map(|(v, n)| (v, n.to_string()))
+                    .collect();
+                assert_eq!(got, want, "latency-mode values and nicks");
+                assert_eq!(ps.default_value_as_i32(), 0, "default standard");
+                for nick in ["low", "standard"] {
+                    e.set_property_from_str(ctx, nick);
+                    let v = e.property_value(ctx);
+                    let (_, ev) = glib::EnumValue::from_value(&v).unwrap();
+                    assert_eq!(ev.nick(), nick, "latency-mode read-back");
                 }
             }
             Kind::FloatArray => {

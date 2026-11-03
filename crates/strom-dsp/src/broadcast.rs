@@ -242,8 +242,100 @@ pub const CLIPPER_MARGIN_DB: f32 = 0.5;
 /// the limiter handles only residue, so 1.5 ms is enough (see
 /// `docs/elements/broadcastprocessor.md`).
 pub const DEFAULT_LOOKAHEAD_MS: f32 = 1.5;
-/// Limiter lookahead (ms) of the low-latency configuration.
-pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.75;
+/// Limiter lookahead (ms) of the low-latency configuration. 0.75 ms would
+/// put the low configuration at 137 frames (3.11 ms) at 44.1 kHz, over its
+/// 3 ms budget: the spike guard's interpolator (24 frames), the clipper's
+/// low setting (48) and the limiter's detector delay (32) are fixed in
+/// frames, so they cost the most time at the lowest rate. 0.6 ms keeps
+/// 44.1 kHz at 130 frames (2.95 ms); the true-peak ceiling holds the same
+/// (`tests/broadcast_latency.rs`).
+pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.6;
+
+/// A named latency configuration of the chain: it sets every stage's
+/// latency setting at once (see [`LatencyMode::apply`]). Each mode has a
+/// latency budget ([`LatencyMode::budget_ms`]) that the chain stays within
+/// at 44.1, 48 and 96 kHz.
+///
+/// | Setting | `Standard` | `Low` |
+/// |---|---|---|
+/// | spike guard lookahead | 0.5 ms | 0 |
+/// | bass clipper lookahead | 1 ms | 0 |
+/// | final clipper | [`ClipperLatency::Standard`] (69 frames) | [`ClipperLatency::Low`] (48 frames) |
+/// | limiter lookahead | 1.5 ms | 0.6 ms |
+/// | budget | 6 ms | 3 ms |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LatencyMode {
+    /// The default: every stage keeps the margin its guarantees need at
+    /// little cost.
+    #[default]
+    Standard,
+    /// Shortest settings that keep the true-peak ceiling: for two-way use
+    /// (commentary, talkback, calls).
+    Low,
+}
+
+impl LatencyMode {
+    /// Every mode, in interface order.
+    pub const ALL: [LatencyMode; 2] = [LatencyMode::Standard, LatencyMode::Low];
+
+    /// Short name (`standard`, `low`).
+    pub fn nick(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Low => "low",
+        }
+    }
+
+    /// Spike guard lookahead (ms).
+    pub fn spike_guard_lookahead_ms(self) -> f32 {
+        match self {
+            Self::Standard => spike_guard::STANDARD_LOOKAHEAD_MS,
+            Self::Low => spike_guard::LOW_LATENCY_LOOKAHEAD_MS,
+        }
+    }
+
+    /// Bass clipper lookahead (ms).
+    pub fn bass_clipper_lookahead_ms(self) -> f32 {
+        match self {
+            Self::Standard => STANDARD_BASS_LOOKAHEAD_MS,
+            Self::Low => LOW_LATENCY_BASS_LOOKAHEAD_MS,
+        }
+    }
+
+    /// Final clipper latency setting.
+    pub fn clipper_latency(self) -> ClipperLatency {
+        match self {
+            Self::Standard => ClipperLatency::Standard,
+            Self::Low => ClipperLatency::Low,
+        }
+    }
+
+    /// Limiter lookahead (ms).
+    pub fn limiter_lookahead_ms(self) -> f32 {
+        match self {
+            Self::Standard => DEFAULT_LOOKAHEAD_MS,
+            Self::Low => LOW_LATENCY_LOOKAHEAD_MS,
+        }
+    }
+
+    /// Latency budget (ms) of the mode: the chain's latency stays at or
+    /// under it at 44.1, 48 and 96 kHz.
+    pub fn budget_ms(self) -> f64 {
+        match self {
+            Self::Standard => 6.0,
+            Self::Low => 3.0,
+        }
+    }
+
+    /// Set the four latency settings of `p` to this mode's (structural:
+    /// they take effect at the next `configure`).
+    pub fn apply(self, p: &mut BroadcastParams) {
+        p.spike_guard_lookahead_ms = self.spike_guard_lookahead_ms();
+        p.bass_clipper_lookahead_ms = self.bass_clipper_lookahead_ms();
+        p.clipper_latency = self.clipper_latency();
+        p.limiter_lookahead_ms = self.limiter_lookahead_ms();
+    }
+}
 
 /// Final clipper: knee width (dB) of its curve.
 pub const CLIPPER_KNEE_DB: f32 = 2.0;

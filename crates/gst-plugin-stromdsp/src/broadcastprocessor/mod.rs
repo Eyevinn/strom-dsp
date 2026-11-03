@@ -51,6 +51,7 @@
 //! | `clip-budget` | Float | dB | 0 … 6 | 2 | PLAYING |
 //! | `limiter-enabled` | Boolean | | | `true` | PLAYING |
 //! | `limiter-release` | Float | ms | 1 … 2000 | 200 | PLAYING |
+//! | `latency-mode` | enum [`StromDspBroadcastLatencyMode`] | | `standard`, `low` | `standard` | READY (not controllable) |
 //! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 1.5 | READY (not controllable) |
 //! | `meter-interval` | UInt | ms | 0 … 10000 (0 = off) | 100 | PLAYING |
 //!
@@ -58,10 +59,21 @@
 //! ([`strom_dsp::presets::BroadcastPreset`] documents every value and its
 //! reason).
 //!
-//! **READY-only properties.** `num-bands` and `limiter-lookahead` change the
-//! structure of the chain (and the latency). A value written while a stream
-//! is configured is stored and read back at once, but takes effect at the
-//! next caps negotiation (a warning is logged).
+//! **READY-only properties.** `num-bands`, `latency-mode` and
+//! `limiter-lookahead` change the structure of the chain (and the
+//! latency). A value written while a stream is configured is stored and
+//! read back at once, but takes effect at the next caps negotiation (a
+//! warning is logged).
+//!
+//! **`latency-mode` and `limiter-lookahead`.** Writing `latency-mode` sets
+//! the spike guard lookahead, the bass clipper lookahead, the final
+//! clipper's structure and `limiter-lookahead` to the mode's values
+//! ([`strom_dsp::broadcast::LatencyMode`]); `limiter-lookahead` reads the
+//! new value (1.5 ms standard, 0.6 ms low). A later write of
+//! `limiter-lookahead` overrides the limiter's lookahead only, and
+//! `latency-mode` keeps reading the mode written. Writing `latency-mode`
+//! again sets all four again. So set `latency-mode` first and
+//! `limiter-lookahead` after it, if at all. Presets change neither.
 //!
 //! **Crossovers** are kept strictly ascending, at least
 //! [`MIN_CROSSOVER_GAP_HZ`] apart. A write of `crossoverN-frequency` that
@@ -151,16 +163,21 @@
 //!
 //! # Latency
 //!
-//! The `LATENCY` query adds
-//! `BroadcastProcessor::latency_frames_for(rate, limiter-lookahead)` frames
-//! (the spike guard's 4× interpolator and 0.5 ms lookahead, the bass
-//! clipper's 3 ms lookahead, the final clipper's 69 frames, the limiter
-//! lookahead and its oversampling filter delay), as time rounded up to
-//! whole nanoseconds. Before caps are negotiated it assumes 48 kHz. It does
-//! not depend on `enabled` or on stage bypass. A `Latency` message is posted
-//! when it changes, which only happens at a caps negotiation (both
-//! structural properties are READY-only). Timestamps pass through
-//! unchanged.
+//! The `LATENCY` query adds the configured chain's
+//! `BroadcastProcessor::latency_frames_for_params` frames, as time rounded
+//! up to whole nanoseconds:
+//!
+//! `24 + round(spike lookahead · fs) + round(bass lookahead · fs) + C +
+//! round(limiter-lookahead · fs) + 32` frames, with the lookaheads in
+//! seconds and `C` the final clipper's 69 (standard) or 48 (low) frames.
+//! `standard`: 269 frames (5.60 ms) at 48 kHz, 5.83 ms at 44.1 kHz,
+//! 4.30 ms at 96 kHz (budget 6 ms). `low`: 133 frames (2.77 ms) at
+//! 48 kHz, 2.95 ms at 44.1 kHz, 1.69 ms at 96 kHz (budget 3 ms).
+//!
+//! Before caps are negotiated it assumes 48 kHz. It does not depend on
+//! `enabled` or on stage bypass. A `Latency` message is posted when it
+//! changes, which only happens at a caps negotiation (the structural
+//! properties are READY-only). Timestamps pass through unchanged.
 //!
 //! `enabled=false` gives unity gain with the same delay (the chain
 //! crossfades click-free); it is never a BaseTransform passthrough.
@@ -203,6 +220,37 @@ pub enum StromDspBroadcastPreset {
     /// Read-only state after manual edits; writing it changes nothing else.
     #[enum_value(name = "Custom: values edited after a preset", nick = "custom")]
     Custom = 4,
+}
+
+/// Value type of the `latency-mode` property (GType
+/// `StromDspBroadcastLatencyMode`).
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy, Default, glib::Enum)]
+#[repr(i32)]
+#[enum_type(name = "StromDspBroadcastLatencyMode")]
+pub enum StromDspBroadcastLatencyMode {
+    /// Every stage at its standard latency: at most 6 ms (5.60 ms at
+    /// 48 kHz).
+    #[default]
+    #[enum_value(name = "Standard: at most 6 ms (5.6 ms at 48 kHz)", nick = "standard")]
+    Standard = 0,
+    /// The shortest settings that keep the true-peak ceiling: at most 3 ms
+    /// (2.77 ms at 48 kHz), for two-way use.
+    #[enum_value(
+        name = "Low: at most 3 ms (2.8 ms at 48 kHz), for commentary, talkback and calls",
+        nick = "low"
+    )]
+    Low = 1,
+}
+
+impl StromDspBroadcastLatencyMode {
+    /// The library's latency mode.
+    pub fn library(self) -> strom_dsp::broadcast::LatencyMode {
+        use strom_dsp::broadcast::LatencyMode as M;
+        match self {
+            Self::Standard => M::Standard,
+            Self::Low => M::Low,
+        }
+    }
 }
 
 impl StromDspBroadcastPreset {

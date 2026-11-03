@@ -14,7 +14,7 @@ use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
 use gststromdsp::broadcastprocessor::{MESSAGE_NAME, SILENCE_DB};
-use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor};
+use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::presets::BroadcastPreset;
 use strom_dsp::Processor;
 use util::{Action, FORMATS, TOL};
@@ -32,11 +32,12 @@ fn make() -> gst::Element {
 
 /// Properties a preset never sets (and `preset` itself, and the array that
 /// only mirrors the individual crossovers).
-const NOT_SET_BY_PRESET: [&str; 6] = [
+const NOT_SET_BY_PRESET: [&str; 7] = [
     "enabled",
     "preset",
     "meter-interval",
     "num-bands",
+    "latency-mode",
     "limiter-lookahead",
     "crossover-frequencies",
 ];
@@ -738,6 +739,10 @@ fn ready_only_properties_wait_for_caps() {
             2,
             Action::SetProperty("limiter-lookahead", 15.0f32.to_value()),
         ),
+        (
+            3,
+            Action::SetProperty("latency-mode", latency_mode_value("low")),
+        ),
     ];
     let out = run(&props(&p), rate, channels, &input, 1024, &actions);
     let mut dsp = BroadcastProcessor::new();
@@ -849,6 +854,162 @@ fn latency_message_on_renegotiation() {
     h.set_src_caps_str(&util::caps_str(44_100, 1));
     push_one(&mut h, 1);
     assert!(bus.pop_filtered(&[gst::MessageType::Latency]).is_none());
+    e.set_bus(None);
+}
+
+fn latency_mode_value(nick: &str) -> glib::Value {
+    let t = glib::Type::from_name("StromDspBroadcastLatencyMode").expect("type registered");
+    let class = glib::EnumClass::with_type(t).unwrap();
+    class.to_value_by_nick(nick).expect("nick")
+}
+
+/// Latency (frames) of `mode` at `rate`, with the limiter lookahead
+/// overridden when given.
+fn mode_frames(rate: u32, mode: LatencyMode, lookahead_ms: Option<f32>) -> usize {
+    let mut p = BroadcastParams::default();
+    mode.apply(&mut p);
+    if let Some(ms) = lookahead_ms {
+        p.limiter_lookahead_ms = ms;
+    }
+    BroadcastProcessor::latency_frames_for_params(rate as f32, &p)
+}
+
+fn frames_time(rate: u32, frames: usize) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds((frames as u64 * 1_000_000_000).div_ceil(u64::from(rate)))
+}
+
+/// `latency-mode` at 44.1, 48 and 96 kHz: the LATENCY query adds the
+/// mode's latency (spike guard, bass clipper, clipper and limiter
+/// settings together), which stays within the mode's budget (standard
+/// 6 ms, low 3 ms; the test fails above it), and with `enabled=false` the
+/// output is the input delayed by exactly that latency.
+#[test]
+fn latency_mode_query_budget_and_delay() {
+    util::init();
+    for (nick, mode) in [
+        ("standard", LatencyMode::Standard),
+        ("low", LatencyMode::Low),
+    ] {
+        for rate in [44_100u32, 48_000, 96_000] {
+            let ctx = format!("{nick} at {rate} Hz");
+            let frames = mode_frames(rate, mode, None);
+            let ours = frames_time(rate, frames);
+            assert!(
+                ours.nseconds() as f64 <= mode.budget_ms() * 1e6,
+                "{ctx}: {ours} over the {} ms budget",
+                mode.budget_ms()
+            );
+            let mut h = Harness::new(FACTORY);
+            let upstream = gst::ClockTime::from_mseconds(10);
+            h.set_upstream_latency(upstream);
+            let e = h.element().unwrap();
+            e.set_property_from_value("latency-mode", &latency_mode_value(nick));
+            h.set_src_caps_str(&util::caps_str(rate, 2));
+            h.play();
+            push_one(&mut h, 2);
+            assert_eq!(query_latency(&h).1, upstream + ours, "{ctx}");
+            println!("{ctx}: {frames} frames, {ours}");
+
+            // enabled=false: the input delayed by exactly the latency.
+            let input = util::test_signal(rate, 1, rate as usize / 4);
+            let out = run(
+                &[
+                    ("latency-mode", latency_mode_value(nick)),
+                    ("enabled", false.to_value()),
+                ],
+                rate,
+                1,
+                &input,
+                512,
+                &[],
+            );
+            assert!(
+                out[..frames].iter().all(|&v| v == 0.0),
+                "{ctx}: leading zeros"
+            );
+            util::assert_bit_exact(&out[frames..], &input[..input.len() - frames]);
+        }
+    }
+}
+
+/// `latency-mode` and `limiter-lookahead`: writing the mode sets the
+/// limiter lookahead to the mode's value (1.5 ms standard, 0.6 ms low); a
+/// later write of `limiter-lookahead` overrides it (the mode keeps reading
+/// what was written); writing the mode again sets the lookahead again.
+/// Presets change neither.
+#[test]
+fn latency_mode_sets_limiter_lookahead() {
+    util::init();
+    let e = gst::ElementFactory::make(FACTORY).build().unwrap();
+    let mode = |e: &gst::Element| {
+        let v = e.property_value("latency-mode");
+        glib::EnumValue::from_value(&v)
+            .unwrap()
+            .1
+            .nick()
+            .to_string()
+    };
+    assert_eq!(mode(&e), "standard");
+    assert_eq!(e.property::<f32>("limiter-lookahead"), 1.5);
+
+    e.set_property_from_value("latency-mode", &latency_mode_value("low"));
+    assert_eq!(mode(&e), "low");
+    assert_eq!(e.property::<f32>("limiter-lookahead"), 0.6);
+
+    e.set_property("limiter-lookahead", 2.0f32);
+    assert_eq!(mode(&e), "low");
+    assert_eq!(e.property::<f32>("limiter-lookahead"), 2.0);
+
+    // Presets leave the latency settings alone.
+    e.set_property_from_str("preset", "speech");
+    assert_eq!(mode(&e), "low");
+    assert_eq!(e.property::<f32>("limiter-lookahead"), 2.0);
+    let s = e
+        .emit_by_name::<Option<gst::Structure>>("get-preset-values", &[&"speech"])
+        .unwrap();
+    assert!(!s.has_field("latency-mode") && !s.has_field("limiter-lookahead"));
+
+    // The override is what gets configured: low settings, 2 ms lookahead.
+    let mut h = Harness::with_element(&e, Some("sink"), Some("src"));
+    h.set_upstream_latency(gst::ClockTime::ZERO);
+    h.set_src_caps_str(&util::caps_str(48_000, 2));
+    h.play();
+    push_one(&mut h, 2);
+    let want = frames_time(48_000, mode_frames(48_000, LatencyMode::Low, Some(2.0)));
+    assert_eq!(query_latency(&h).1, want);
+
+    e.set_property_from_value("latency-mode", &latency_mode_value("standard"));
+    assert_eq!(e.property::<f32>("limiter-lookahead"), 1.5);
+}
+
+/// A `latency-mode` write while playing changes nothing until the next
+/// caps negotiation, which applies it and posts a Latency message.
+#[test]
+fn latency_mode_waits_for_caps_and_posts_latency() {
+    util::init();
+    let mut h = Harness::new(FACTORY);
+    let e = h.element().unwrap();
+    let bus = gst::Bus::new();
+    e.set_bus(Some(&bus));
+    h.set_upstream_latency(gst::ClockTime::ZERO);
+    h.set_src_caps_str(&util::caps_str(48_000, 2));
+    h.play();
+    push_one(&mut h, 2);
+    while bus.pop().is_some() {}
+    let standard = frames_time(48_000, mode_frames(48_000, LatencyMode::Standard, None));
+    assert_eq!(query_latency(&h).1, standard);
+
+    e.set_property_from_value("latency-mode", &latency_mode_value("low"));
+    push_one(&mut h, 2);
+    assert!(bus.pop_filtered(&[gst::MessageType::Latency]).is_none());
+    assert_eq!(query_latency(&h).1, standard);
+
+    h.set_src_caps_str(&util::caps_str(48_000, 1));
+    push_one(&mut h, 1);
+    bus.pop_filtered(&[gst::MessageType::Latency])
+        .expect("no latency message after renegotiation");
+    let low = frames_time(48_000, mode_frames(48_000, LatencyMode::Low, None));
+    assert_eq!(query_latency(&h).1, low);
     e.set_bus(None);
 }
 
