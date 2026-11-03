@@ -63,7 +63,7 @@
 //!   faster than running each biquad over the whole buffer in turn (Apple M5
 //!   Pro, 4 bands). A software-pipelined ("skewed") schedule and a
 //!   bands-as-lanes ("wavefront") schedule for mono were measured and rejected,
-//!   see `docs/PERFORMANCE.md`.
+//!   see PROVENANCE.md (explicit SIMD, biquad/EQ kernels).
 //!
 //! The DF-I sum is evaluated as `s = x2·b2; s += x1·b1; s += y2·(−a2);
 //! t = x·b0 + s; y = y1·(−a1) + t`: the loop-carried path through `y1` is a

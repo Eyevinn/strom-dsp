@@ -1,6 +1,6 @@
 //! Denormal policy check.
 //!
-//! The library does not set FTZ/DAZ in the CPU (see docs/PERFORMANCE.md);
+//! The library does not set FTZ/DAZ in the CPU (see PROVENANCE.md, "Engineering policies");
 //! instead every recursive state is flushed explicitly. This test makes sure
 //! that works: each processor gets a loud signal, then several seconds of
 //! exact digital silence, with extreme parameters (long releases, very

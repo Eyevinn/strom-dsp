@@ -183,7 +183,7 @@ types, and the per-level `mul_add` semantics.
   crossfades and type changes.
 - **Rejected after measurement:** a skewed (software-pipelined) schedule and
   bands-as-lanes for mono, both textbook pipelining ideas implemented from
-  first principles (see `docs/PERFORMANCE.md`).
+  first principles; both were measured slower on NEON (2–6 % and about 2.5×).
 
 ### Explicit SIMD: dynamics (`src/dynamics/frame.rs`, `vmath.rs`, `SegmentedMin`)
 
@@ -526,7 +526,30 @@ written from its crate documentation. Both are optional features used only
 by tests and benches, never by library code. `tests/denormals.rs` (own
 design) verifies the explicit-flush policy: no subnormal output or gain state
 after loud input followed by long silence at extreme parameters. FTZ/DAZ is
-deliberately not set (see `docs/PERFORMANCE.md`).
+deliberately not set (see "Engineering policies").
+
+### Engineering policies
+
+- **No FTZ/DAZ.** We do not set flush-to-zero or denormals-are-zero in the
+  CPU, for three reasons:
+  - Rust treats changing MXCSR (x86) or FPCR (aarch64) outside inline assembly
+    as undefined behaviour.
+  - The FP mode is per-thread state owned by the host, so changing it on a
+    GStreamer streaming thread would affect other elements.
+  - It is not needed. Every recursive state is flushed to exactly zero below
+    1e-15, or snapped to its target. `tests/denormals.rs` enforces this.
+- **No thread pools in the streaming path.** Processing stays on the caller's
+  thread, with no rayon or worker pools, for three reasons:
+  - Waking and joining workers costs about as much as the microseconds of
+    work per buffer, and the worst case is unbounded.
+  - Real-time-priority streaming threads would wait on normal-priority
+    workers (priority inversion).
+  - Strom already runs each strip on its own streaming thread.
+  - Speed-ups come from algorithms and SIMD instead.
+- **Portable binaries.** We never build with `target-cpu=native`. SIMD levels
+  are dispatched at runtime.
+- **`panic = unwind`.** gstreamer-rs turns a panic in an element into an
+  element error. `abort` would take down the host.
 
 ## Incident log
 
