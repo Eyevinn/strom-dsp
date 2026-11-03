@@ -27,6 +27,7 @@ use std::f64::consts::PI;
 
 use agc_support::{pink, scale_to_lufs, Looper, Rng};
 use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, SILENCE_DB};
+use strom_dsp::clipper::ClipperLatency;
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};
 use strom_dsp::multiband::MAX_BANDS;
 use strom_dsp::Processor;
@@ -123,16 +124,18 @@ enum Bypass {
     None,
     Agc,
     Multiband,
+    Clipper,
     Limiter,
     AllStages,
     Chain,
 }
 
 impl Bypass {
-    const ALL: [Bypass; 6] = [
+    const ALL: [Bypass; 7] = [
         Bypass::None,
         Bypass::Agc,
         Bypass::Multiband,
+        Bypass::Clipper,
         Bypass::Limiter,
         Bypass::AllStages,
         Bypass::Chain,
@@ -143,10 +146,12 @@ impl Bypass {
             Bypass::None => {}
             Bypass::Agc => p.agc_enabled = on,
             Bypass::Multiband => p.multiband_enabled = on,
+            Bypass::Clipper => p.clipper_enabled = on,
             Bypass::Limiter => p.limiter_enabled = on,
             Bypass::AllStages => {
                 p.agc_enabled = on;
                 p.multiband_enabled = on;
+                p.clipper_enabled = on;
                 p.limiter_enabled = on;
             }
             Bypass::Chain => p.enabled = on,
@@ -229,18 +234,34 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
-    // Lookahead plus the true-peak detector delay (24 + 8 frames).
+    // Final clipper (69 frames, standard setting) plus the limiter:
+    // lookahead plus the true-peak detector delay (24 + 8 frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        240 + 32
+        69 + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        221 + 32
+        69 + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        480 + 32
+        69 + 480 + 32
+    );
+    // Defaults: 1.5 ms lookahead, 173 frames (3.60 ms) at 48 kHz; the
+    // low-latency configuration (low clipper setting, 0.75 ms): 116 frames.
+    let d = BroadcastParams::default();
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for_config(
+            48_000.0,
+            d.limiter_lookahead_ms,
+            d.clipper_latency
+        ),
+        69 + 72 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for_config(48_000.0, 0.75, ClipperLatency::Low),
+        48 + 36 + 32
     );
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
@@ -253,7 +274,7 @@ fn latency_formula() {
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, f32::NAN),
-        BroadcastProcessor::latency_frames_for(48_000.0, 5.0)
+        BroadcastProcessor::latency_frames_for(48_000.0, 1.5)
     );
 }
 
@@ -282,10 +303,14 @@ fn abs_peak(y: &[f32], ch: usize, range: std::ops::Range<usize>) -> f64 {
 }
 
 /// An active configuration: default 4 bands compressing a −12 dBFS tone,
-/// the limiter limiting (ceiling −18 dBTP), the AGC riding.
+/// the limiter limiting (ceiling −18 dBTP), the AGC riding. The final
+/// clipper is off: it would clip the tone, and the annihilator would read
+/// the clipping's harmonics as clicks. Its toggle is tested on a tone
+/// under its knee ([`clipper_toggle_is_click_free`]).
 fn active_params() -> BroadcastParams {
     BroadcastParams {
         true_peak_ceiling_dbtp: -18.0,
+        clipper_enabled: false,
         ..BroadcastParams::default()
     }
 }
@@ -301,7 +326,12 @@ fn bypass_toggles_are_click_free() {
     let toggles = [96_000usize, 120_000]; // off at 2.0 s, on at 2.5 s
     let total = 150_000;
     let x = sine(total, ch, FS as f64, freq, 0.25);
-    for by in Bypass::ALL.into_iter().skip(1) {
+    // The clipper is off in `active_params`; its toggle has its own test.
+    for by in Bypass::ALL
+        .into_iter()
+        .skip(1)
+        .filter(|b| !matches!(b, Bypass::Clipper))
+    {
         let base = active_params();
         let mut bp = processor(FS, ch, &base);
         let mut y = x.clone();
@@ -310,8 +340,11 @@ fn bypass_toggles_are_click_free() {
             for c in y[start * ch..t * ch].chunks_mut(BLOCK * ch) {
                 bp.process(c);
             }
+            // Off at the first toggle, back to the base at the second.
             let mut p = base;
-            by.apply(&mut p, i == 1);
+            if i == 0 {
+                by.apply(&mut p, false);
+            }
             bp.set_params(&p);
             start = t;
         }
@@ -328,6 +361,32 @@ fn bypass_toggles_are_click_free() {
                 "{by:?} toggle at {t}: residual {rel:.1} dB (settled amplitude {settled})"
             );
         }
+    }
+}
+
+/// Toggling the final clipper is click-free and keeps the timing: on a
+/// tone under its knee the processed and the bypassed signal are the same,
+/// so any step in the delay would show in the annihilator.
+#[test]
+fn clipper_toggle_is_click_free() {
+    let ch = 2;
+    let freq = 1000.0;
+    let w = 2.0 * PI * freq / FS as f64;
+    let mut p = flat_params();
+    p.agc_enabled = false;
+    let x = sine(72_000, ch, FS as f64, freq, 0.25);
+    let mut bp = processor(FS, ch, &p);
+    let mut y = x.clone();
+    for (i, c) in y.chunks_mut(BLOCK * ch).enumerate() {
+        if i == 50 || i == 100 {
+            p.clipper_enabled = i == 100;
+            bp.set_params(&p);
+        }
+        bp.process(c);
+    }
+    for t in [50 * BLOCK, 100 * BLOCK] {
+        let r = annihilator_peak(&y, ch, w, t - 960..t + 9600);
+        assert!(db(r / 0.25) < -50.0, "residual {:.1} dB", db(r / 0.25));
     }
 }
 
@@ -396,6 +455,8 @@ fn input_gain_change_is_click_free() {
     let mut p = flat_params();
     p.agc_enabled = false;
     p.limiter_enabled = false;
+    // +24 dB takes the tone into the final clipper's knee.
+    p.clipper_enabled = false;
     let x = sine(48_000, ch, FS as f64, freq, 0.05);
     let mut bp = processor(FS, ch, &p);
     let mut y = x.clone();
@@ -489,6 +550,9 @@ fn meter_sign_conventions() {
             agc_rate_up_db_s: 10.0,
             agc_rate_down_db_s: 10.0,
             true_peak_ceiling_dbtp: -20.0,
+            // The limiter is what this checks; the clipper would take the
+            // peaks first.
+            clipper_enabled: false,
             ..BroadcastParams::default()
         };
         for b in &mut p.bands {
@@ -548,6 +612,7 @@ fn limiter_gain_reduction_is_positive_when_limiting() {
     let ch = 2;
     let mut p = flat_params();
     p.agc_enabled = false;
+    p.clipper_enabled = false;
     p.true_peak_ceiling_dbtp = -6.0;
     let mut bp = processor(FS, ch, &p);
     let x = sine(48_000, ch, FS as f64, 200.0, 1.0);
@@ -1058,53 +1123,7 @@ mod peaky_acceptance {
     /// [`programme`] with a single-sample click every `click_s` seconds
     /// instead of every 1.1 s (same bed, hits and bursts).
     pub(super) fn programme_with_clicks(ch: usize, fs: f64, click_s: f64) -> Vec<f32> {
-        let frames = 1 << 19;
-        let mut x = pink(frames, ch, fs, 31);
-        x.iter_mut().for_each(|v| *v *= 0.12);
-        let mut rng = Rng::new(17);
-        // Hits: every 250 ms ± 20 ms.
-        let mut at = 0.0f64;
-        while at < frames as f64 / fs - 0.3 {
-            let start = (at * fs) as usize;
-            let amp = 0.42 + 0.18 * rng.uniform();
-            for k in 0..(0.25 * fs) as usize {
-                let n = start + k;
-                if n >= frames {
-                    break;
-                }
-                let t = k as f64 / fs;
-                let thump = (2.0 * PI * 60.0 * t).sin() * (-t / 0.06).exp();
-                let burst = (-t / 0.012).exp();
-                for c in 0..ch {
-                    let v = amp * (thump + burst * rng.bipolar());
-                    x[n * ch + c] += v as f32;
-                }
-            }
-            at += 0.25 + 0.04 * (rng.uniform() - 0.5);
-        }
-        // fs/4 bursts at 45° phase, 5 ms, every 2.3 s.
-        let burst_len = (0.005 * fs) as usize;
-        let mut start = (0.7 * fs) as usize;
-        while start + burst_len < frames {
-            for k in 0..burst_len {
-                let v = (1.2 * (PI / 2.0 * k as f64 + PI / 4.0).sin()) as f32;
-                for c in 0..ch {
-                    x[(start + k) * ch + c] += v;
-                }
-            }
-            start += (2.3 * fs) as usize;
-        }
-        // Single-sample clicks every `click_s`.
-        let mut n = (0.37 * fs) as usize;
-        let mut sign = 1.0f32;
-        while n < frames {
-            for c in 0..ch {
-                x[n * ch + c] += 4.0 * sign;
-            }
-            sign = -sign;
-            n += (click_s * fs) as usize;
-        }
-        x
+        agc_support::peaky_programme(ch, fs, click_s)
     }
 
     /// Run one preset at three input levels and check all three bounds;
@@ -1206,17 +1225,18 @@ mod peaky_acceptance {
 /// every 1.1 s, through the `streaming` preset (4 bands) at −35, −23 and
 /// −10 LUFS input; integrated output loudness from 10 s to 60 s.
 ///
-/// The clicks carry much of the input's measured loudness, and the limiter
-/// takes about 13 dB off them, so the output-referenced trim runs into its
-/// +6 dB bound at −23 and −10 LUFS input (short-term output settles near
-/// −16.9 LUFS), and at −35 LUFS the AGC also reaches its 24 dB maximum gain
-/// (near −17.4 LUFS). The integrated value also includes the 10 … 25 s
-/// in which the trim is still rising.
+/// Without the final clipper the limiter took about 13 dB off the clicks
+/// and the output missed the target by 1.1 … 1.7 LU. The final clipper now
+/// takes the clicks: with the governor off the output lands within ±1 LU.
+/// The clip budget governor counts that clipping (and the limiting of what
+/// the one-pass clipper leaves of each click) against the preset's 3 dB
+/// budget, so it holds the trim, cuts the AGC target and reports a
+/// loudness deficit: −18.7 … −19.7 LUFS. Removing such clicks before the
+/// AGC is the job of a stage ahead of it, not of the budget.
 ///
-/// This misses the ±1 LU goal of [`peaky_acceptance`], so the test
-/// documents the current result instead: each value must stay within
-/// `BAND_LU` of the value measured when it was written (`MEASURED`), so a
-/// change in either direction shows up.
+/// The test documents both results: each value must stay within `BAND_LU`
+/// of the value measured when it was written, so a change in either
+/// direction shows up.
 mod dense_clicks {
     use super::*;
     use strom_dsp::presets::BroadcastPreset;
@@ -1224,48 +1244,63 @@ mod dense_clicks {
     const SECONDS: usize = 60;
     const SKIP_SECONDS: usize = 10;
     const CLICK_S: f64 = 0.3;
-    /// (input LUFS, measured integrated output LUFS).
-    const MEASURED: [(f64, f64); 3] = [(-35.0, -17.69), (-23.0, -17.15), (-10.0, -17.11)];
+    const INPUTS: [f64; 3] = [-35.0, -23.0, -10.0];
+    /// Measured integrated output (LUFS) per input level: preset defaults
+    /// (clipper and governor on), and with the governor off.
+    const MEASURED: [f64; 3] = [-18.72, -19.13, -19.68];
+    const MEASURED_GOVERNOR_OFF: [f64; 3] = [-16.52, -16.37, -16.33];
     const BAND_LU: f64 = 0.5;
+
+    fn integrated(p: &BroadcastParams, src: &[f32], input_lufs: f64) -> f64 {
+        let ch = 2;
+        let mut x = src.to_vec();
+        scale_to_lufs(&mut x, ch, FS as f64, input_lufs);
+        let mut bp = processor(FS, ch, p);
+        let mut meter = LoudnessMeter::new(&LoudnessConfig {
+            sample_rate: FS,
+            channels: ch,
+            layout: ChannelLayout::Unknown,
+            true_peak: false,
+        })
+        .unwrap();
+        let mut looper = Looper::new(&x);
+        let mut buf = vec![0.0f32; BLOCK * ch];
+        let per_s = FS as usize / BLOCK;
+        for i in 0..SECONDS * per_s {
+            looper.fill(&mut buf);
+            bp.process(&mut buf);
+            if i >= SKIP_SECONDS * per_s {
+                meter.process(&buf);
+            }
+        }
+        meter.integrated()
+    }
 
     #[test]
     fn streaming_with_clicks_every_300_ms() {
-        let ch = 2;
-        let fs = FS as f64;
+        let src = peaky_acceptance::programme_with_clicks(2, FS as f64, CLICK_S);
         let p = BroadcastParams::preset(BroadcastPreset::Streaming, 4);
-        let src = peaky_acceptance::programme_with_clicks(ch, fs, CLICK_S);
+        let off = BroadcastParams {
+            governor_enabled: false,
+            ..p
+        };
         let mut failures = Vec::new();
-        for (input_lufs, expected) in MEASURED {
-            let mut x = src.clone();
-            scale_to_lufs(&mut x, ch, fs, input_lufs);
-            let mut bp = processor(FS, ch, &p);
-            let mut meter = LoudnessMeter::new(&LoudnessConfig {
-                sample_rate: FS,
-                channels: ch,
-                layout: ChannelLayout::Unknown,
-                true_peak: false,
-            })
-            .unwrap();
-            let mut looper = Looper::new(&x);
-            let mut buf = vec![0.0f32; BLOCK * ch];
-            let per_s = FS as usize / BLOCK;
-            for i in 0..SECONDS * per_s {
-                looper.fill(&mut buf);
-                bp.process(&mut buf);
-                if i >= SKIP_SECONDS * per_s {
-                    meter.process(&buf);
+        for (k, input_lufs) in INPUTS.into_iter().enumerate() {
+            for (name, params, expected) in [
+                ("defaults", &p, MEASURED[k]),
+                ("governor off", &off, MEASURED_GOVERNOR_OFF[k]),
+            ] {
+                let got = integrated(params, &src, input_lufs);
+                println!(
+                    "clicks every 300 ms, streaming, {name}, at {input_lufs} LUFS: integrated \
+                     {got:.2} LUFS (target {}, recorded {expected:.2})",
+                    p.target_loudness_lufs
+                );
+                if (got - expected).abs() > BAND_LU {
+                    failures.push(format!(
+                        "{name} at {input_lufs} LUFS: integrated {got:.2} LUFS, recorded {expected:.2}"
+                    ));
                 }
-            }
-            let integrated = meter.integrated();
-            println!(
-                "clicks every 300 ms, streaming at {input_lufs} LUFS: integrated \
-                 {integrated:.2} LUFS (target {}, recorded {expected:.2})",
-                p.target_loudness_lufs
-            );
-            if (integrated - expected).abs() > BAND_LU {
-                failures.push(format!(
-                    "at {input_lufs} LUFS: integrated {integrated:.2} LUFS, recorded {expected:.2}"
-                ));
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

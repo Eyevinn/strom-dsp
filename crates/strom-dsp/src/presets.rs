@@ -150,17 +150,20 @@ impl LimiterParams {
 /// | `multiband_enabled` | true | |
 /// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
 /// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
+/// | `clipper_enabled` | true | the final clipper takes the last peaks cleanly, so the limiter mostly catches inter-sample residue and bass |
+/// | `clipper_bandwidth_hz` | 20 000 Hz | [`BROADCAST_CLIPPER_BANDWIDTH_HZ`] |
+/// | `governor_enabled` | true | keeps the clipper and the limiter within the clip budget |
 /// | band `makeup_db` | 0 dB | the AGC sets the level; makeup would only move the loudness away from the target |
 /// | band `knee_db` | 6 dB | soft knee, compression sets in gradually (Giannoulis et al. 2012). Not an element property: fixed for every preset |
 ///
 /// # Values per preset
 ///
-/// | Preset | target | ceiling | AGC max gain / cut | AGC rate up / down | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` |
-/// |---|---|---|---|---|---|---|---|---|
-/// | `EbuR128` | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 | −18 dB | 2 | 200 |
-/// | `AtscA85` | −24 LKFS | −2 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −19 dB | 2 | 200 |
-/// | `Streaming` | −16 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −11 dB | 2 | 200 |
-/// | `Speech` | −18 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −40 | −11 dB | 1.5 | 150 |
+/// | Preset | target | ceiling | AGC max gain / cut | AGC rate up / down | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` | `clip_budget_db` |
+/// |---|---|---|---|---|---|---|---|---|---|
+/// | `EbuR128` | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 | −18 dB | 2 | 200 | 2 |
+/// | `AtscA85` | −24 LKFS | −2 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −19 dB | 2 | 200 | 2 |
+/// | `Streaming` | −16 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −11 dB | 2 | 200 | 3 |
+/// | `Speech` | −18 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −40 | −11 dB | 1.5 | 150 | 2 |
 ///
 /// - **Target and ceiling** are those of the standard: EBU R 128 (−23 LUFS,
 ///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
@@ -197,6 +200,15 @@ impl LimiterParams {
 ///   presets compress the same relative to their own loudness. **Speech:
 ///   target + 7 dB at 1.5:1** ("gentler multiband"): speech is already
 ///   levelled by the AGC; the bands only tame the loudest syllables.
+/// - **Clip budget** (see [`crate::governor`]): 2 dB (clip depth up to
+///   −30 dB, limiter mean gain reduction up to 1 dB) for the broadcast and
+///   speech presets: at −18 … −24 LUFS a programme rarely reaches the
+///   clipper, so the budget only matters for hot, peaky material, and the
+///   peaky acceptance programme stays within ±1 LU. Speech is not given a
+///   smaller budget: with 1 dB the governor took 1.6 … 1.9 LU off the
+///   peaky programme. Streaming gets 3 dB (−25 dB, 1.5 dB): at −16 LUFS
+///   peaks reach the clipper more often, and a 2 dB budget cost the peaky
+///   programme 0.5 … 1.5 LU.
 /// - **Limiter release**: 200 ms for programme, long compared with bass
 ///   periods (no low-frequency distortion) and short enough to recover
 ///   between phrases (the same reasoning as [`LimiterParams::broadcast`]).
@@ -278,6 +290,14 @@ impl BroadcastPreset {
         }
     }
 
+    /// Clip budget (dB) of the preset. See the type docs.
+    fn clip_budget_db(self) -> f32 {
+        match self {
+            Self::EbuR128 | Self::AtscA85 | Self::Speech => 2.0,
+            Self::Streaming => 3.0,
+        }
+    }
+
     fn row(self) -> (f32, f32, f32, f32, f32, f32) {
         match self {
             Self::EbuR128 => (-23.0, -1.0, -50.0, 5.0, 2.0, 200.0),
@@ -287,6 +307,11 @@ impl BroadcastPreset {
         }
     }
 }
+
+/// Band limit of the final clipper's clippings in every broadcast preset
+/// (Hz): the top of the audio band, so the clipper removes no audible
+/// content above what it must.
+pub const BROADCAST_CLIPPER_BANDWIDTH_HZ: f32 = 20_000.0;
 
 /// Soft-knee width (dB) of every band in every broadcast preset.
 pub const BROADCAST_BAND_KNEE_DB: f32 = 6.0;
@@ -326,13 +351,13 @@ pub fn broadcast_band_times(num_bands: usize) -> [(f32, f32); MAX_BANDS] {
 
 impl BroadcastParams {
     /// The parameters of `preset` for `num_bands` bands, with `enabled` true
-    /// and the default 5 ms limiter lookahead (the fields a preset does not
+    /// and the default 1.5 ms limiter lookahead (the fields a preset does not
     /// set). See [`BroadcastPreset`] for every value and its reason.
     pub fn preset(preset: BroadcastPreset, num_bands: usize) -> Self {
         let mut p = Self {
             enabled: true,
             num_bands: num_bands.clamp(1, MAX_BANDS),
-            limiter_lookahead_ms: 5.0,
+            limiter_lookahead_ms: crate::broadcast::DEFAULT_LOOKAHEAD_MS,
             ..Self::default()
         };
         p.apply_preset(preset);
@@ -366,6 +391,10 @@ impl BroadcastParams {
             makeup_db: 0.0,
             knee_db: BROADCAST_BAND_KNEE_DB,
         });
+        self.clipper_enabled = true;
+        self.clipper_bandwidth_hz = BROADCAST_CLIPPER_BANDWIDTH_HZ;
+        self.clip_budget_db = preset.clip_budget_db();
+        self.governor_enabled = true;
         self.limiter_enabled = true;
         self.limiter_release_ms = limiter_release;
     }
@@ -437,7 +466,7 @@ mod tests {
                 let p = BroadcastParams::preset(preset, n);
                 let ctx = format!("{preset:?} @ {n}");
                 assert!(p.enabled && p.num_bands == n, "{ctx}");
-                assert_eq!(p.limiter_lookahead_ms, 5.0, "{ctx}");
+                assert_eq!(p.limiter_lookahead_ms, 1.5, "{ctx}");
                 assert!(r(p.input_gain_db, -24.0, 24.0), "{ctx}");
                 assert!(r(p.target_loudness_lufs, -40.0, -5.0), "{ctx}");
                 assert!(r(p.true_peak_ceiling_dbtp, -12.0, 0.0), "{ctx}");
@@ -450,6 +479,9 @@ mod tests {
                 assert!(p.agc_gate_lufs < p.target_loudness_lufs - 15.0, "{ctx}");
                 assert_eq!(p.multiband_drive_db, 0.0, "{ctx}: modest drive");
                 assert!(r(p.limiter_release_ms, 1.0, 2000.0), "{ctx}");
+                assert!(p.clipper_enabled && p.governor_enabled, "{ctx}");
+                assert!(r(p.clip_budget_db, 0.0, 6.0), "{ctx}");
+                assert!(r(p.clipper_bandwidth_hz, 8000.0, 22_000.0), "{ctx}");
                 assert!(r(p.crossover_hz[0], 20.0, 20_000.0), "{ctx}");
                 for w in p.crossover_hz.windows(2) {
                     assert!(w[1] - w[0] >= 1.0 && r(w[1], 20.0, 20_000.0), "{ctx}");
@@ -496,7 +528,7 @@ mod tests {
         assert_eq!(p.agc_gate_lufs, -50.0);
         assert_eq!(p.multiband_drive_db, 0.0);
         assert_eq!(p.crossover_hz, [120.0, 800.0, 4000.0, 10_000.0]);
-        assert_eq!(p.limiter_lookahead_ms, 5.0);
+        assert_eq!(p.limiter_lookahead_ms, 1.5);
     }
 
     /// `apply_preset` leaves `enabled`, `num_bands` and the lookahead alone
