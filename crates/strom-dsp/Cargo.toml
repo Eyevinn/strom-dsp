@@ -78,3 +78,7 @@ harness = false
 [[bench]]
 name = "channel_tools"
 harness = false
+
+[[bench]]
+name = "cleanup"
+harness = false
