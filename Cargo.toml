@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/strom-dsp", "crates/gst-plugin-stromdsp"]
+members = ["crates/strom-dsp", "crates/gst-plugin-stromdsp", "crates/strom-dsp-harness"]
 
 [workspace.package]
 version = "0.1.1"

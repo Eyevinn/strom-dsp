@@ -10,7 +10,7 @@
 //!
 //! Further processors live in their modules: [`deesser`], [`ducker`],
 //! [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`],
-//! [`truepeak`] (true-peak limiter) and [`broadcast`] (the broadcast chain,
+//! [`truepeak`] (true-peak limiter), [`spike_guard`] and [`broadcast`] (the broadcast chain,
 //! with its [`presets`]). Measurement is in [`meter`]; the building blocks
 //! ([`biquad`], [`filter`], [`oversample`], [`resample`], [`stft`],
 //! [`dynamics`]) are public too.
@@ -48,6 +48,7 @@ pub mod oversample;
 pub mod presets;
 pub mod resample;
 pub mod simd;
+pub mod spike_guard;
 pub mod stereo;
 pub mod stft;
 pub mod truepeak;

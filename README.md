@@ -77,6 +77,12 @@ gst-launch-1.0 audiotestsrc wave=pink-noise ! audioconvert ! \
   audioconvert ! autoaudiosink
 ```
 
+`cargo test --all` includes the measurement harness
+(`crates/strom-dsp-harness`, test support only): fixed synthetic signals
+through every broadcast preset, reduced to loudness, true-peak,
+gain-reduction, clip-depth, aliasing, intermodulation and noise-to-mask
+numbers, and checked against `crates/strom-dsp-harness/baseline.json`.
+
 To link statically into an application, depend on the crate and call:
 
 ```rust

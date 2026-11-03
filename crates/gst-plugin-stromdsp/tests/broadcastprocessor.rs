@@ -101,7 +101,11 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "input-gain" | "multiband-drive" => f(0.0),
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
-        "agc-enabled" | "multiband-enabled" | "limiter-enabled" => true.to_value(),
+        "agc-enabled" | "multiband-enabled" | "limiter-enabled" | "spike-guard-enabled" => {
+            true.to_value()
+        }
+        // Every preset: spike guard at 8 dB.
+        "spike-threshold" => f(8.0),
         // Every preset has ±24 dB of AGC range; ebu-r128 rides slower.
         "agc-max-gain" | "agc-max-cut" => f(24.0),
         "agc-rate-up" if nick == "ebu-r128" => f(1.0),
@@ -258,6 +262,8 @@ fn library_value(p: &BroadcastParams, name: &str) -> glib::Value {
         "target-loudness" => p.target_loudness_lufs.to_value(),
         "true-peak-ceiling" => p.true_peak_ceiling_dbtp.to_value(),
         "agc-enabled" => p.agc_enabled.to_value(),
+        "spike-guard-enabled" => p.spike_guard_enabled.to_value(),
+        "spike-threshold" => p.spike_threshold_db.to_value(),
         "agc-max-gain" => p.agc_max_gain_db.to_value(),
         "agc-max-cut" => p.agc_max_cut_db.to_value(),
         "agc-rate-up" => p.agc_rate_up_db_s.to_value(),
@@ -762,6 +768,7 @@ fn latency_query_adds_chain_latency() {
         // Unchanged by enabled and stage bypass.
         for (name, v) in [
             ("enabled", false),
+            ("spike-guard-enabled", false),
             ("agc-enabled", false),
             ("multiband-enabled", false),
             ("limiter-enabled", false),
@@ -956,7 +963,7 @@ fn reference_meters(
     out
 }
 
-const FIELDS: [&str; 12] = [
+const FIELDS: [&str; 13] = [
     "running-time",
     "stream-time",
     "input-momentary",
@@ -966,6 +973,7 @@ const FIELDS: [&str; 12] = [
     "output-integrated",
     "input-true-peak",
     "output-true-peak",
+    "spike-events",
     "agc-gain",
     "band-gain-reduction",
     "limiter-gain-reduction",
@@ -1013,6 +1021,11 @@ fn check_message(r: &Received, m: &BroadcastMeters, num_bands: usize) {
             get_f64(s, name)
         );
     }
+    assert_eq!(
+        s.get::<u64>("spike-events").unwrap(),
+        m.spike_events,
+        "{ctx}: spike-events"
+    );
     let agc = s.get::<f64>("agc-gain").unwrap();
     assert!((agc - m.agc_gain_db).abs() < 1e-9, "{ctx}: agc-gain");
     let lim = s.get::<f64>("limiter-gain-reduction").unwrap();
@@ -1108,6 +1121,40 @@ fn meter_interval_rate_limiting() {
             .len(),
         4
     );
+}
+
+/// Clicks every 50 ms over a tone: the messages count the spike guard's
+/// events, the same as the library, about one per click.
+#[test]
+fn meter_counts_spike_events() {
+    let (rate, channels) = (48_000u32, 2usize);
+    let frames = rate as usize * 2;
+    let mut input = vec![0.0f32; frames * channels];
+    for n in 0..frames {
+        let v = (0.05 * (2.0 * std::f64::consts::PI * 440.0 * n as f64 / 48_000.0).sin()) as f32;
+        let click = if n % 2400 == 1200 { 0.8 } else { 0.0 };
+        for c in 0..channels {
+            input[n * channels + c] = v + click;
+        }
+    }
+    let msgs = run_meter(&[], rate, channels, &input, 480, |_, _| {});
+    let reference = reference_meters(
+        &BroadcastParams::preset(BroadcastPreset::EbuR128, 4),
+        rate,
+        channels,
+        &input,
+        480,
+        100,
+        &[],
+    );
+    assert_eq!(msgs.len(), reference.len());
+    let mut total = 0;
+    for (r, (_, lib)) in msgs.iter().zip(&reference) {
+        check_message(r, lib, 4);
+        total += r.s.get::<u64>("spike-events").unwrap();
+    }
+    // 40 clicks; the last ones are still inside the latency at the end.
+    assert!((36..=40).contains(&total), "{total} spike events");
 }
 
 /// Silence reads −200, never NaN or −∞.

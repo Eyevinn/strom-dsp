@@ -395,8 +395,10 @@ No commercial-processor material and no patent-driven method was used.
 ### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
 **The chain** is our own composition of existing parts, not a new algorithm:
-input gain → wideband AGC (`agc.rs`) → multiband compressor
-(`multiband.rs`) → true-peak limiter (`truepeak.rs`). Levelling comes first,
+input gain → spike guard (`spike_guard.rs`) → wideband AGC (`agc.rs`) →
+multiband compressor (`multiband.rs`) → true-peak limiter (`truepeak.rs`).
+The spike guard sits ahead of the AGC so clicks neither pump it nor count
+toward the loudness it measures. Levelling comes first,
 so the band dynamics work on programme at the target loudness, and the
 true-peak ceiling comes last, so no later stage can push a peak over it.
 
@@ -441,6 +443,50 @@ sport-like programme (hits, clicks, inter-sample peaks) under the same
 bounds plus no short-term overshoot after a 10 s pause.
 
 No commercial broadcast-processor manuals, presets or tuning were used.
+
+### Spike guard (`src/spike_guard.rs`)
+
+Removes short, isolated peaks (clicks) ahead of the AGC, so they neither
+pump the gain control nor count toward the measured loudness.
+
+- **Detection:** impulsive-noise detection against a signal envelope
+  (S. Godsill, P. Rayner, *Digital Audio Restoration*, Springer 1998): the
+  4× interpolated per-frame peak (`Oversampler`, as in ITU-R BS.1770
+  Annex 2) against a peak envelope (`PeakEnvelope`, 40 ms release) fed
+  0.33 ms late and only with frames that are not part of an event.
+- **Look-ahead gain with a band-limited control signal** (US 5,737,434,
+  look-ahead clipping with a band-limited gain control signal; expired;
+  status not legally reviewed): the gain is written ahead of the output
+  (0.5 ms standard lookahead, none in the low-latency setting) as a dip
+  with raised-cosine ramps, so it creates no harmonics.
+- **Soft knee:** the event's peak goes through a static curve
+  `a + (L − a)·tanh((P − a)/(L − a))` (identity below the knee `a`, never
+  above the cap `L`), as in the soft-knee gain computers of Giannoulis,
+  Massberg & Reiss (JAES 2012) and Zölzer (*DAFX*, dynamics chapter).
+- **Reused:** `Oversampler` (detector), `PeakEnvelope`, `DelayLine` (main
+  path).
+
+Own design choices:
+- **Causal event rule:** a frame over the cap starts an event at once. It
+  is abandoned as programme if its core (frames within 20 dB of its peak
+  and above the knee) reappears more than 0.25 ms after its start within
+  the next 0.15 ms; otherwise it is a spike. Tones, noise bursts and drum
+  onsets are abandoned because their peaks recur; a click is not. With the
+  standard 0.5 ms lookahead the decision is made before the output reads
+  any of the dip, so an abandoned event leaves the programme bit-exact;
+  with no lookahead the output keeps up to 0.4 ms of the dip (an onset
+  "nip"), which the tests measure.
+- **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
+  interpolator's ringing before a large click) and the ramp after a spike
+  stay out of the envelope; an abandoned event's peak goes into it at once.
+- **A gain dip, not a waveform clipper:** a 4× soft clipper whose
+  clippings are band-limited back to the base rate (US 6,337,999; expired;
+  status not legally reviewed) was built first and measured: on a
+  single-sample click the band-limited clippings are much smaller than the
+  clippings, so the peak grew back (a 1.0 click over a 0.1 tone came out
+  at 0.40 against a cap of 0.25; a 10.0 click at 0.87 against 0.13). The
+  gain dip lands the click on the cap and adds no harmonics.
+- Bit-exact outside dips: the gain is exactly 1 there and is not applied.
 
 ### Multiband compressor (`src/multiband.rs`)
 
@@ -749,6 +795,44 @@ it relies on explicitly, so these defaults do not change Strom's sound. The
 compressor's `auto-makeup` default is `false`, so inserting the element never
 raises the level by itself.
 
+### Measurement harness (`crates/strom-dsp-harness`, tests only)
+
+A test-support crate, never linked into the plugin. It runs fixed synthetic
+signals through the broadcast chain per preset and compares a fixed set of
+numbers with a checked-in baseline (`baseline.json`). All signals are
+generated in code with fixed seeds. The programme generators of
+`tests/broadcast.rs` live in `tests/programme_support/` and are shared with
+the harness.
+
+- **Signals:** sine; exponential sweep (A. Farina, "Simultaneous
+  measurement of impulse response and distortion with a swept-sine
+  technique", AES 108th Convention, 2000: the phase law); the SMPTE
+  RP 120 pair (60 Hz + 7 kHz, 4:1); the CCIF twin tone (19 + 20 kHz); a
+  bass-into-highs pair (50 Hz + 3 kHz at −20 dB); a band-limited square
+  wave through a first-order high-pass (tilted tops), and a hard-clipped
+  sine synthesised from its Fourier series (no aliasing in the source);
+  speech-like noise (band-limited pink noise under an own word and
+  syllable envelope, with room tone between words), with and without
+  clicks; the music-like and sport-like programmes of the chain tests.
+- **Metrics:**
+  - loudness, LRA and true peak through `ebur128` (ITU-R BS.1770,
+    EBU Tech 3342);
+  - spectra with a 4-term Blackman-Harris window (F. J. Harris, "On the use
+    of windows for harmonic analysis with the discrete Fourier transform",
+    Proc. IEEE 66(1), 1978);
+  - SMPTE RP 120 and CCIF intermodulation, sidebands around a carrier, and
+    non-harmonic spurs of a tone (aliasing);
+  - clip depth (removed energy per 10 ms block relative to the programme,
+    own definition) and gain reduction split into "on peaks" and "on
+    programme" around known event frames (own definition);
+  - noise-to-mask ratio after K. Brandenburg, "Evaluation of quality for
+    audio encoding at low bit rates", AES 82nd Convention, 1987, with our
+    own simple masking model: integer Bark bands (Zwicker & Terhardt's
+    critical-band-rate formula, in Zwicker & Fastl, *Psychoacoustics*),
+    per-band least-squares gain matching, a spreading function of
+    −10/−25 dB per Bark and a 10 dB offset. **The masking model is a test
+    metric only**; nothing in the processing or control path uses it.
+
 ### Performance and real-time-safety tooling
 
 The `tests/rtsan*.rs` files use RealtimeSanitizer through `rtsan-standalone`, written
@@ -802,12 +886,13 @@ deliberately not set (see "Engineering policies").
 |---|---|---|
 | `fearless_simd` 1.2 | `strom-dsp` (SIMD with runtime dispatch) | Apache-2.0 OR MIT |
 | `ebur128` 0.1 | `strom-dsp` meter (BS.1770 loudness, gating, LRA, sample and true peak) | MIT |
-| `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT) | MIT / MIT OR Apache-2.0 |
+| `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT); harness spectra | MIT / MIT OR Apache-2.0 |
 | `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
 | `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
 | `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
 | `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
 | `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
+| `serde_json` 1 | measurement harness only (baseline file; already in the tree through `criterion`) | MIT OR Apache-2.0 |
 | `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
 | RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
 | `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |

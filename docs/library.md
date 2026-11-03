@@ -54,8 +54,10 @@ Reusable building blocks are public too:
   compressor per band (1–5 bands).
 - `strom_dsp::truepeak`: `TruePeakLimiter`, a lookahead limiter with a 4×
   oversampled true-peak detector (BS.1770 Annex 2).
+- `strom_dsp::spike_guard`: `SpikeGuard`, removes short, isolated peaks
+  (clicks) with a look-ahead gain dip; an exact delay outside its dips.
 - `strom_dsp::broadcast`: `BroadcastProcessor`, the chain behind
-  `stromdsp-broadcastprocessor` (input gain → AGC → multiband → true-peak
+  `stromdsp-broadcastprocessor` (input gain → spike guard → AGC → multiband → true-peak
   limiter), with its meters.
 - `strom_dsp::presets`: the element defaults (`GateParams::broadcast()` and
   friends) and the broadcast presets (`BroadcastPreset`).

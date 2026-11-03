@@ -23,6 +23,7 @@ use strom_dsp::multiband::{
     ATTACK_RANGE_MS, MAKEUP_RANGE_DB, MAX_BANDS, RATIO_RANGE, RELEASE_RANGE_MS, THRESHOLD_RANGE_DB,
 };
 use strom_dsp::presets::BroadcastPreset;
+use strom_dsp::spike_guard::THRESHOLD_RANGE_DB as SPIKE_THRESHOLD_RANGE_DB;
 use strom_dsp::Processor;
 
 use super::{StromDspBroadcastPreset as Preset, MESSAGE_NAME, MIN_CROSSOVER_GAP_HZ, SILENCE_DB};
@@ -71,6 +72,7 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloatField {
     InputGain,
+    SpikeThreshold,
     Target,
     Ceiling,
     AgcMaxGain,
@@ -93,6 +95,7 @@ impl FloatField {
     fn get_mut(self, p: &mut BroadcastParams) -> &mut f32 {
         match self {
             Self::InputGain => &mut p.input_gain_db,
+            Self::SpikeThreshold => &mut p.spike_threshold_db,
             Self::Target => &mut p.target_loudness_lufs,
             Self::Ceiling => &mut p.true_peak_ceiling_dbtp,
             Self::AgcMaxGain => &mut p.agc_max_gain_db,
@@ -122,6 +125,7 @@ impl FloatField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoolField {
     Enabled,
+    SpikeGuard,
     Agc,
     Multiband,
     Limiter,
@@ -131,6 +135,7 @@ impl BoolField {
     fn get_mut(self, p: &mut BroadcastParams) -> &mut bool {
         match self {
             Self::Enabled => &mut p.enabled,
+            Self::SpikeGuard => &mut p.spike_guard_enabled,
             Self::Agc => &mut p.agc_enabled,
             Self::Multiband => &mut p.multiband_enabled,
             Self::Limiter => &mut p.limiter_enabled,
@@ -179,6 +184,14 @@ fn float_specs() -> &'static [FloatSpec] {
                 "Gain before the chain (dB)",
                 (-24.0, 24.0),
                 FloatField::InputGain,
+            ),
+            s(
+                "spike-threshold",
+                "Spike threshold",
+                "Spikes (at most 0.25 ms, isolated) more than this far above the \
+                 programme's own peak envelope are brought down to it (dB)",
+                SPIKE_THRESHOLD_RANGE_DB,
+                FloatField::SpikeThreshold,
             ),
             s(
                 "target-loudness",
@@ -300,7 +313,8 @@ fn float_specs() -> &'static [FloatSpec] {
 }
 
 /// Names of the boolean properties a preset sets.
-const PRESET_BOOLS: [(&str, BoolField); 3] = [
+const PRESET_BOOLS: [(&str, BoolField); 4] = [
+    ("spike-guard-enabled", BoolField::SpikeGuard),
     ("agc-enabled", BoolField::Agc),
     ("multiband-enabled", BoolField::Multiband),
     ("limiter-enabled", BoolField::Limiter),
@@ -314,13 +328,23 @@ fn preset_props() -> &'static [(String, Prop)] {
         let push_float = |v: &mut Vec<(String, Prop)>, f: &FloatSpec| {
             v.push((f.name.clone(), Prop::Float(f.field)));
         };
-        // Interface order: input, AGC, multiband, limiter.
+        // Interface order: input, spike guard, AGC, multiband, limiter.
         for f in floats.iter().filter(|f| {
             matches!(
                 f.field,
                 FloatField::InputGain | FloatField::Target | FloatField::Ceiling
             )
         }) {
+            push_float(&mut v, f);
+        }
+        v.push((
+            "spike-guard-enabled".into(),
+            Prop::Bool(BoolField::SpikeGuard),
+        ));
+        for f in floats
+            .iter()
+            .filter(|f| f.field == FloatField::SpikeThreshold)
+        {
             push_float(&mut v, f);
         }
         v.push(("agc-enabled".into(), Prop::Bool(BoolField::Agc)));
@@ -529,6 +553,7 @@ fn meter_structure(
         .field("output-integrated", level(m.output_integrated_lufs))
         .field("input-true-peak", level(m.input_true_peak_dbtp))
         .field("output-true-peak", level(m.output_true_peak_dbtp))
+        .field("spike-events", m.spike_events)
         .field(
             "agc-gain",
             if m.agc_gain_db.is_finite() {
@@ -662,6 +687,14 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                 float("input-gain"),
                 float("target-loudness"),
                 float("true-peak-ceiling"),
+                common::bool_prop(
+                    "spike-guard-enabled",
+                    "Spike guard enabled",
+                    "Remove clicks and other short, isolated peaks before the AGC (bypassed: \
+                     unity gain, same delay)",
+                    d.spike_guard_enabled,
+                ),
+                float("spike-threshold"),
                 common::bool_prop(
                     "agc-enabled",
                     "AGC enabled",
@@ -978,7 +1011,8 @@ impl ElementImpl for StromDspBroadcastProcessor {
             gst::subclass::ElementMetadata::new(
                 "strom-dsp broadcast processor",
                 "Filter/Effect/Audio",
-                "Broadcast/streaming final processor: input gain, loudness-targeting AGC, \
+                "Broadcast/streaming final processor: input gain, spike guard, \
+                 loudness-targeting AGC, \
                  multiband compressor (1-5 bands, LR4) and true-peak limiter, with presets \
                  for EBU R 128, ATSC A/85, streaming and speech. Reports its latency \
                  (lookahead + oversampling filter); enabled=false keeps the delay. Posts \
@@ -1208,8 +1242,8 @@ mod tests {
     #[test]
     fn preset_props_cover_every_preset_field() {
         let names: Vec<&str> = preset_props().iter().map(|(n, _)| n.as_str()).collect();
-        // 9 scalars + 4 crossovers + 25 band values + limiter-release + 3 booleans.
-        assert_eq!(names.len(), 9 + 4 + 25 + 1 + 3);
+        // 10 scalars + 4 crossovers + 25 band values + limiter-release + 4 booleans.
+        assert_eq!(names.len(), 10 + 4 + 25 + 1 + 4);
         for excluded in [
             "enabled",
             "preset",

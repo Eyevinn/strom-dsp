@@ -101,3 +101,7 @@ harness = false
 [[bench]]
 name = "broadcast"
 harness = false
+
+[[bench]]
+name = "spike_guard"
+harness = false

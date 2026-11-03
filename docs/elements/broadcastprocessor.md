@@ -5,9 +5,17 @@ leaves Strom. Its job is consistent, standards-compliant loudness under a
 guaranteed true-peak ceiling. The chain is:
 
 ```
-input gain → wideband AGC → multiband compressor (LR4) → true-peak limiter
+input gain → spike guard → wideband AGC → multiband compressor (LR4) → true-peak limiter
 ```
 
+- **Spike guard:** removes clicks and other short, isolated peaks before
+  they pump the AGC or count toward the loudness it measures. A peak more
+  than `spike-threshold` over the programme's own peak envelope starts an
+  event at once; if the peak recurs within about 0.4 ms (a tone, a noise
+  burst, a drum onset) it is programme and left alone, otherwise a short
+  gain dip with smooth ramps brings it down to the threshold through a
+  soft knee. Each channel on its own; outside its dips the stage is an
+  exact delay.
 - **AGC:** slow and loudness-targeting. Its BS.1770 detector freezes in
   pauses and below `agc-gate`.
 - **Multiband:** LR4 crossover, one compressor per band.
@@ -22,8 +30,13 @@ The conventions shared by all elements are in the
 
 ## Latency
 
-`round(limiter-lookahead · fs / 1000) + 32` frames: 272 frames at
-48 kHz with 5 ms. It is reported in the LATENCY query, is the same with
+`24 + round(spike lookahead · fs / 1000) + round(limiter-lookahead · fs /
+1000) + 32` frames: the spike guard's 4× interpolator (24) and lookahead
+(0.5 ms), the limiter's lookahead and its true-peak detector delay (32).
+That is 48 + 272 = 320 frames (6.67 ms) at 48 kHz with the defaults. The
+spike guard's lookahead is a configuration value of the library (0.5 ms
+standard, 0 for low latency: 24 frames, 0.5 ms); the element uses the
+standard one. It is reported in the LATENCY query, is the same with
 `enabled=false` and with any stage bypassed, and a `Latency` message is posted
 when it changes (only at caps negotiation). With `enabled=false` the output is
 the input delayed by exactly that latency. The element never uses
@@ -41,6 +54,8 @@ mutable in PLAYING unless noted.
 | `input-gain` | float, dB | −24…24 | 0 |
 | `target-loudness` | float, LUFS | −40…−5 | −23 |
 | `true-peak-ceiling` | float, dBTP | −12…0 | −1 |
+| `spike-guard-enabled` | bool | | true |
+| `spike-threshold` | float, dB | 6…30 | 8 |
 | `agc-enabled` | bool | | true |
 | `agc-max-gain` | float, dB | 0…30 | 24 |
 | `agc-max-cut` | float, dB | 0…30 | 24 |
@@ -96,7 +111,8 @@ and deliberately gentle:
 | `streaming` | −16 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −50 | −11 | 2 | 200 |
 | `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 |
 
-All presets: `input-gain` 0, all stages on, `multiband-drive` 0, band makeup 0.
+All presets: `input-gain` 0, all stages on, `spike-threshold` 8 dB,
+`multiband-drive` 0, band makeup 0.
 
 **Why these values:**
 - **Targets and ceilings:** EBU R 128, ATSC A/85, and the AES TD1004/TD1008
@@ -112,6 +128,9 @@ All presets: `input-gain` 0, all stages on, `multiband-drive` 0, band makeup 0.
   not a compressor, that brings a loud item down faster than it lifts a
   quiet one. The others sit further from typical delivery levels, so they
   use 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
+- **Spike threshold 8 dB:** gentle. Only peaks more than 8 dB over the
+  programme's own recent peaks, that do not recur within about 0.4 ms,
+  count; they come down to that level, not to the programme's.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, and a
   150 ms limiter release.
 
@@ -163,19 +182,27 @@ little make-up, and can land below target by what the multiband and limiter
 remove. Material the limiter already holds at the ceiling cannot get louder
 either; the trim then stops at its 6 dB range.
 
-Measured case: the peaky programme above with a click every 300 ms instead
-of every 1.1 s, `streaming` preset. The limiter takes about 13 dB off the
-clicks, the trim reaches +6 dB, and at −35 LUFS input the AGC also reaches
-its 24 dB maximum gain. Integrated output (10 … 60 s, target −16 LUFS):
+Measured case: the peaky programme above with a click every 300 ms
+instead of every 1.1 s, `streaming` preset, integrated output from 10 to
+60 s (target −16 LUFS). Without the spike guard the limiter took about
+13 dB off the clicks, the trim ran into its +6 dB range and every input
+level missed ±1 LU. With it the clicks are removed before the AGC:
 
-| Input | Output | Off target |
-|---|---|---|
-| −35 LUFS | −17.69 LUFS | −1.69 LU |
-| −23 LUFS | −17.15 LUFS | −1.15 LU |
-| −10 LUFS | −17.11 LUFS | −1.11 LU |
+| Input | Spike guard off | On (standard) | On (low latency) | Limiter GR on clicks, mean (off → on) |
+|---|---|---|---|---|
+| −35 LUFS | −17.69 LUFS | −16.18 LUFS | −16.16 LUFS | 9.9 → 0.4 dB |
+| −23 LUFS | −17.15 LUFS | −16.12 LUFS | −16.12 LUFS | 10.7 → 0.4 dB |
+| −10 LUFS | −17.11 LUFS | −16.11 LUFS | −16.10 LUFS | 10.8 → 0.5 dB |
 
-All three miss ±1 LU. Short-term output settles near −16.9 LUFS (−17.4 at
-−35 LUFS input); the rest is the time the trim takes to rise.
+The largest reduction around a single click is 4.5 dB: a click that lands
+on a loud hit gets the hit's own reduction.
+
+**Spike guard limits:** a spike is at most 0.25 ms long at its core
+(single-sample clicks and glitches; a longer microphone bump or plosive
+is programme to it). With the low-latency lookahead (none), programme that
+jumps more than `spike-threshold` over its own recent peaks, such as a
+drum hit or a word after silence, loses up to 0.4 ms of its onset to the
+threshold; with the standard lookahead programme is never touched.
 
 ## Signals
 
@@ -204,6 +231,7 @@ reads −200.0, never NaN.
 | `output-momentary`, `output-short-term` | gdouble, LUFS | |
 | `output-integrated` | gdouble, LUFS | gated, since start or `reset` |
 | `input-true-peak`, `output-true-peak` | gdouble, dBTP | max since the last message; input is measured before `input-gain` |
+| `spike-events` | guint64 | spikes removed since the last message; 0 while the spike guard is off |
 | `agc-gain` | gdouble, dB | signed; + is boost |
 | `band-gain-reduction` | GstValueArray of gdouble | positive dB of reduction, one per active band |
 | `limiter-gain-reduction` | gdouble | positive dB of reduction; max of values sampled every 512 frames |

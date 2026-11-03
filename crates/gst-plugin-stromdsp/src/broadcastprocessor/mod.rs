@@ -1,7 +1,7 @@
 //! `stromdsp-broadcastprocessor`: broadcast/streaming final processor.
 //!
 //! ```text
-//! input gain → wideband AGC → multiband compressor → true-peak limiter
+//! input gain → spike guard → wideband AGC → multiband compressor → true-peak limiter
 //! ```
 //!
 //! An in-place `BaseTransform` on interleaved F32LE, any rate and channel
@@ -19,6 +19,8 @@
 //! | `input-gain` | Float | dB | −24 … 24 | 0 | PLAYING |
 //! | `target-loudness` | Float | LUFS | −40 … −5 | −23 | PLAYING |
 //! | `true-peak-ceiling` | Float | dBTP | −12 … 0 | −1 | PLAYING |
+//! | `spike-guard-enabled` | Boolean | | | `true` | PLAYING |
+//! | `spike-threshold` | Float | dB | 6 … 30 | 8 | PLAYING |
 //! | `agc-enabled` | Boolean | | | `true` | PLAYING |
 //! | `agc-max-gain` | Float | dB | 0 … 30 | 24 | PLAYING |
 //! | `agc-max-cut` | Float | dB | 0 … 30 | 24 | PLAYING |
@@ -122,6 +124,7 @@
 //! | `output-integrated` | `gdouble` | LUFS | gated output integrated loudness since start, flush or `reset` |
 //! | `input-true-peak` | `gdouble` | dBTP | max input true peak since the last message, before `input-gain` |
 //! | `output-true-peak` | `gdouble` | dBTP | max output true peak since the last message |
+//! | `spike-events` | `guint64` | | spikes the spike guard removed since the last message (0 while it is off) |
 //! | `agc-gain` | `gdouble` | dB | AGC gain, signed (+ = boost) |
 //! | `band-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of reduction, one per active band, lowest first |
 //! | `limiter-gain-reduction` | `gdouble` | dB | positive dB of reduction |
@@ -133,7 +136,8 @@
 //!
 //! The `LATENCY` query adds
 //! `BroadcastProcessor::latency_frames_for(rate, limiter-lookahead)` frames
-//! (lookahead plus the oversampling filter delay), as time rounded up to
+//! (the spike guard's 4× interpolator and 0.5 ms lookahead, the limiter
+//! lookahead and its oversampling filter delay), as time rounded up to
 //! whole nanoseconds. Before caps are negotiated it assumes 48 kHz. It does
 //! not depend on `enabled` or on stage bypass. A `Latency` message is posted
 //! when it changes, which only happens at a caps negotiation (both
