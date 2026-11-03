@@ -26,8 +26,10 @@
 //! Every value below states its reason. The README (per element, "Why these
 //! defaults") and `PROVENANCE.md` repeat them.
 
+use crate::broadcast::{BroadcastParams, MAX_CROSSOVERS};
 use crate::compressor::CompressorDetector;
 use crate::gate::GateMode;
+use crate::multiband::{MultibandBandParams, MAX_BANDS};
 use crate::{CompressorParams, GateParams, LimiterParams};
 
 impl GateParams {
@@ -126,6 +128,222 @@ impl LimiterParams {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Broadcast final processor presets (phase 2 spec §3.2)
+// ---------------------------------------------------------------------------
+
+/// A preset of the broadcast final processor (`stromdsp-broadcastprocessor`,
+/// phase 2 spec §3.2). Every value is strom-dsp's own, derived from the
+/// loudness standards (EBU R 128, ATSC A/85, AES TD1004/TD1008) and textbook
+/// dynamics practice (Giannoulis, Massberg & Reiss, JAES 2012; Zölzer,
+/// *DAFX*). The presets are deliberately **gentle** (low ratios, no drive):
+/// over-processing is the usual failure, and an operator can always push
+/// harder.
+///
+/// # Values common to every preset
+///
+/// | Field | Value | Why |
+/// |---|---|---|
+/// | `input_gain_db` | 0 dB | the AGC does the levelling; the input is not touched |
+/// | `agc_enabled` | true | the AGC is what makes the output land on the target |
+/// | `agc_max_gain_db` / `agc_max_cut_db` | 12 / 12 dB | covers programme delivered anywhere between −35 and −11 LUFS for a −23 LUFS target, without lifting near-silence by more than 12 dB |
+/// | `agc_rate_up_db_s` / `agc_rate_down_db_s` | 1 / 3 dB/s | slow enough to be a "fader", not a compressor (well below the syllable rate); cutting faster than boosting, so a sudden loud item is brought down within a few seconds while a quiet one is raised gently |
+/// | `multiband_enabled` | true | |
+/// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
+/// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
+/// | band `makeup_db` | 0 dB | the AGC sets the level; makeup would only move the loudness away from the target |
+/// | band `knee_db` | 6 dB | soft knee, compression sets in gradually (Giannoulis et al. 2012). Not an element property: fixed for every preset |
+///
+/// # Values per preset
+///
+/// | Preset | target | ceiling | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` |
+/// |---|---|---|---|---|---|---|
+/// | `EbuR128` | −23 LUFS | −1 dBTP | −50 | −18 dB | 2 | 200 |
+/// | `AtscA85` | −24 LKFS | −2 dBTP | −50 | −19 dB | 2 | 200 |
+/// | `Streaming` | −16 LUFS | −1 dBTP | −50 | −11 dB | 2 | 200 |
+/// | `Speech` | −18 LUFS | −1 dBTP | −40 | −11 dB | 1.5 | 150 |
+///
+/// - **Target and ceiling** are those of the standard: EBU R 128 (−23 LUFS,
+///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
+///   TD1008 range for streaming (−16 LUFS, −1 dBTP) and the phase 2 spec's
+///   speech target (−18 LUFS, −1 dBTP).
+/// - **AGC gate** −50 LUFS for programme: room tone and pauses sit below it,
+///   while even quiet programme material delivered 12 LU under target
+///   (−35 LUFS) stays well above it. **Speech: −40 LUFS** (the "faster AGC
+///   gate"): 10 LU closer to speech, so after a talker stops the AGC freezes
+///   earlier in the decay of its loudness detector and lifts less during the
+///   pause; quiet speech (−30 … −35 LUFS input) still stays above it.
+/// - **Band threshold = target + 5 dB** (programme) against each band's
+///   sine-calibrated level: after the AGC the programme sits at the target,
+///   so only loud passages and peaks of a band are compressed, at a low
+///   textbook ratio of 2:1. It follows the target so that all programme
+///   presets compress the same relative to their own loudness. **Speech:
+///   target + 7 dB at 1.5:1** ("gentler multiband"): speech is already
+///   levelled by the AGC; the bands only tame the loudest syllables.
+/// - **Limiter release**: 200 ms for programme, long compared with bass
+///   periods (no low-frequency distortion) and short enough to recover
+///   between phrases (the same reasoning as [`LimiterParams::broadcast`]).
+///   Speech: 150 ms, shorter than the syllable spacing (200 … 250 ms) so a
+///   limited plosive does not hold down the next syllable.
+///
+/// # Crossovers and band time constants per band count
+///
+/// The same for every preset (see [`broadcast_crossovers`] and
+/// [`broadcast_band_times`]):
+///
+/// | Bands | crossovers (Hz) | attack / release per band, low → high (ms) |
+/// |---|---|---|
+/// | 1 | (none) | 30/300 |
+/// | 2 | 200 | 30/300, 10/150 |
+/// | 3 | 200, 3000 | 30/300, 10/150, 5/100 |
+/// | 4 | 120, 800, 4000 | 30/300, 15/200, 8/150, 5/100 |
+/// | 5 | 120, 800, 4000, 10000 | 30/300, 15/200, 8/150, 5/100, 3/80 |
+///
+/// Time constants: a band's attack is at least about one period of the
+/// lowest frequency it carries (a bass band reaching down to ~40 Hz:
+/// 25 ms → 30 ms; a band starting at 120 … 200 Hz: 5 … 8 ms → 10 … 15 ms),
+/// so the compressor does not modulate the waveform it follows; its release
+/// is long compared with those periods (≥ 10 of them) and close to the
+/// syllable spacing (200 … 250 ms) for the bands that carry the body of
+/// speech and music. Higher bands recover faster, after sibilants and
+/// transients. One band is a wideband compressor that still carries the
+/// bass, so it uses the bass band's times.
+///
+/// Crossovers: 2 bands split off the bass at 200 Hz (the energy of kick,
+/// bass and the fundamentals of voices lies below it, so bass peaks no
+/// longer pump everything else); 3 bands add 3 kHz, the region where the
+/// ear is most sensitive (ISO 226 equal-loudness contours), so presence and
+/// sibilance are controlled apart from the body; 4 and 5 bands use the
+/// phase 2 spec's defaults (120, 800, 4000, 10000 Hz). Crossovers that a
+/// band count does not use keep ascending placeholder values. Bands at or
+/// above the band count are inactive; they get the 5-band values of their
+/// index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BroadcastPreset {
+    /// EBU R 128 broadcast delivery: −23 LUFS, −1 dBTP.
+    EbuR128,
+    /// ATSC A/85 (US broadcast): −24 LKFS, −2 dBTP.
+    AtscA85,
+    /// Online/streaming (AES TD1004/TD1008 range): −16 LUFS, −1 dBTP.
+    Streaming,
+    /// Talk and commentary: −18 LUFS, −1 dBTP, gentler multiband, faster
+    /// AGC gate.
+    Speech,
+}
+
+impl BroadcastPreset {
+    /// Every preset, in element enum order.
+    pub const ALL: [Self; 4] = [Self::EbuR128, Self::AtscA85, Self::Streaming, Self::Speech];
+
+    /// The element's enum nick (`ebu-r128`, `atsc-a85`, `streaming`, `speech`).
+    pub fn nick(self) -> &'static str {
+        match self {
+            Self::EbuR128 => "ebu-r128",
+            Self::AtscA85 => "atsc-a85",
+            Self::Streaming => "streaming",
+            Self::Speech => "speech",
+        }
+    }
+
+    /// The preset with this nick, if any (`custom` is not a preset).
+    pub fn from_nick(nick: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.nick() == nick)
+    }
+
+    /// (target LUFS, ceiling dBTP, AGC gate LUFS, band threshold offset dB
+    /// re target, band ratio, limiter release ms). See the type docs.
+    fn row(self) -> (f32, f32, f32, f32, f32, f32) {
+        match self {
+            Self::EbuR128 => (-23.0, -1.0, -50.0, 5.0, 2.0, 200.0),
+            Self::AtscA85 => (-24.0, -2.0, -50.0, 5.0, 2.0, 200.0),
+            Self::Streaming => (-16.0, -1.0, -50.0, 5.0, 2.0, 200.0),
+            Self::Speech => (-18.0, -1.0, -40.0, 7.0, 1.5, 150.0),
+        }
+    }
+}
+
+/// Soft-knee width (dB) of every band in every broadcast preset.
+pub const BROADCAST_BAND_KNEE_DB: f32 = 6.0;
+
+/// Crossover frequencies (Hz) of the broadcast presets for `num_bands`
+/// (clamped to 1 … 5); see [`BroadcastPreset`]. Strictly ascending; only the
+/// first `num_bands − 1` are used.
+pub fn broadcast_crossovers(num_bands: usize) -> [f32; MAX_CROSSOVERS] {
+    match num_bands.clamp(1, MAX_BANDS) {
+        2 => [200.0, 800.0, 4000.0, 10_000.0],
+        3 => [200.0, 3000.0, 4000.0, 10_000.0],
+        _ => [120.0, 800.0, 4000.0, 10_000.0],
+    }
+}
+
+/// (attack ms, release ms) of every band of the broadcast presets for
+/// `num_bands` (clamped to 1 … 5); see [`BroadcastPreset`]. Bands at or above
+/// `num_bands` get the 5-band values of their index.
+pub fn broadcast_band_times(num_bands: usize) -> [(f32, f32); MAX_BANDS] {
+    const FIVE: [(f32, f32); MAX_BANDS] = [
+        (30.0, 300.0),
+        (15.0, 200.0),
+        (8.0, 150.0),
+        (5.0, 100.0),
+        (3.0, 80.0),
+    ];
+    let n = num_bands.clamp(1, MAX_BANDS);
+    let active: &[(f32, f32)] = match n {
+        1 => &[(30.0, 300.0)],
+        2 => &[(30.0, 300.0), (10.0, 150.0)],
+        3 => &[(30.0, 300.0), (10.0, 150.0), (5.0, 100.0)],
+        4 => &FIVE[..4],
+        _ => &FIVE,
+    };
+    core::array::from_fn(|k| active.get(k).copied().unwrap_or(FIVE[k]))
+}
+
+impl BroadcastParams {
+    /// The parameters of `preset` for `num_bands` bands, with `enabled` true
+    /// and the default 5 ms limiter lookahead (the fields a preset does not
+    /// set). See [`BroadcastPreset`] for every value and its reason.
+    pub fn preset(preset: BroadcastPreset, num_bands: usize) -> Self {
+        let mut p = Self {
+            enabled: true,
+            num_bands: num_bands.clamp(1, MAX_BANDS),
+            limiter_lookahead_ms: 5.0,
+            ..Self::default()
+        };
+        p.apply_preset(preset);
+        p
+    }
+
+    /// Set every field of `preset` for the current `num_bands`, except
+    /// `enabled`, `num_bands` and `limiter_lookahead_ms`, which a preset
+    /// never changes.
+    pub fn apply_preset(&mut self, preset: BroadcastPreset) {
+        let (target, ceiling, gate, offset, ratio, limiter_release) = preset.row();
+        let times = broadcast_band_times(self.num_bands);
+        self.input_gain_db = 0.0;
+        self.target_loudness_lufs = target;
+        self.true_peak_ceiling_dbtp = ceiling;
+        self.agc_enabled = true;
+        self.agc_max_gain_db = 12.0;
+        self.agc_max_cut_db = 12.0;
+        self.agc_rate_up_db_s = 1.0;
+        self.agc_rate_down_db_s = 3.0;
+        self.agc_gate_lufs = gate;
+        self.multiband_enabled = true;
+        self.multiband_drive_db = 0.0;
+        self.crossover_hz = broadcast_crossovers(self.num_bands);
+        self.bands = core::array::from_fn(|k| MultibandBandParams {
+            threshold_db: target + offset,
+            ratio,
+            attack_ms: times[k].0,
+            release_ms: times[k].1,
+            makeup_db: 0.0,
+            knee_db: BROADCAST_BAND_KNEE_DB,
+        });
+        self.limiter_enabled = true;
+        self.limiter_release_ms = limiter_release;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +396,102 @@ mod tests {
             (out_db - expected).abs() < 0.5,
             "out {out_db} dB, expected {expected} dB"
         );
+    }
+
+    /// Every broadcast preset, at every band count, is in the element's
+    /// ranges (phase 2 spec §3.1), has strictly ascending crossovers (≥ 1 Hz
+    /// apart, the element's rule), and is gentle.
+    #[test]
+    fn broadcast_presets_are_in_range_and_gentle() {
+        let r = |v: f32, lo: f32, hi: f32| (lo..=hi).contains(&v);
+        for preset in BroadcastPreset::ALL {
+            assert_eq!(BroadcastPreset::from_nick(preset.nick()), Some(preset));
+            for n in 1..=MAX_BANDS {
+                let p = BroadcastParams::preset(preset, n);
+                let ctx = format!("{preset:?} @ {n}");
+                assert!(p.enabled && p.num_bands == n, "{ctx}");
+                assert_eq!(p.limiter_lookahead_ms, 5.0, "{ctx}");
+                assert!(r(p.input_gain_db, -24.0, 24.0), "{ctx}");
+                assert!(r(p.target_loudness_lufs, -40.0, -5.0), "{ctx}");
+                assert!(r(p.true_peak_ceiling_dbtp, -12.0, 0.0), "{ctx}");
+                assert!(r(p.agc_max_gain_db, 0.0, 30.0), "{ctx}");
+                assert!(r(p.agc_max_cut_db, 0.0, 30.0), "{ctx}");
+                assert!(r(p.agc_rate_up_db_s, 0.1, 20.0), "{ctx}");
+                assert!(r(p.agc_rate_down_db_s, 0.1, 40.0), "{ctx}");
+                assert!(p.agc_rate_down_db_s > p.agc_rate_up_db_s, "{ctx}");
+                assert!(r(p.agc_gate_lufs, -80.0, -20.0), "{ctx}");
+                assert!(p.agc_gate_lufs < p.target_loudness_lufs - 15.0, "{ctx}");
+                assert_eq!(p.multiband_drive_db, 0.0, "{ctx}: modest drive");
+                assert!(r(p.limiter_release_ms, 1.0, 2000.0), "{ctx}");
+                assert!(r(p.crossover_hz[0], 20.0, 20_000.0), "{ctx}");
+                for w in p.crossover_hz.windows(2) {
+                    assert!(w[1] - w[0] >= 1.0 && r(w[1], 20.0, 20_000.0), "{ctx}");
+                }
+                for b in &p.bands {
+                    assert_eq!(b.clamped(), *b, "{ctx}: band in range");
+                    assert!(b.ratio <= 2.0, "{ctx}: gentle ratio");
+                    assert_eq!(b.makeup_db, 0.0, "{ctx}");
+                }
+            }
+        }
+        // Speech is gentler than programme.
+        let s = BroadcastParams::preset(BroadcastPreset::Speech, 4);
+        let e = BroadcastParams::preset(BroadcastPreset::EbuR128, 4);
+        assert!(s.bands[0].ratio < e.bands[0].ratio);
+        assert!(s.agc_gate_lufs > e.agc_gate_lufs, "faster AGC gate");
+    }
+
+    /// Targets and ceilings are those of the standards (phase 2 spec §3.2).
+    #[test]
+    fn broadcast_preset_targets() {
+        for (preset, t, c) in [
+            (BroadcastPreset::EbuR128, -23.0, -1.0),
+            (BroadcastPreset::AtscA85, -24.0, -2.0),
+            (BroadcastPreset::Streaming, -16.0, -1.0),
+            (BroadcastPreset::Speech, -18.0, -1.0),
+        ] {
+            let p = BroadcastParams::preset(preset, 4);
+            assert_eq!((p.target_loudness_lufs, p.true_peak_ceiling_dbtp), (t, c));
+        }
+    }
+
+    /// The default preset (`ebu-r128`, 4 bands) matches the spec §3.1
+    /// defaults of every property the spec fixes.
+    #[test]
+    fn ebu_r128_matches_spec_defaults() {
+        let p = BroadcastParams::preset(BroadcastPreset::EbuR128, 4);
+        assert_eq!(p.input_gain_db, 0.0);
+        assert_eq!(p.target_loudness_lufs, -23.0);
+        assert_eq!(p.true_peak_ceiling_dbtp, -1.0);
+        assert!(p.agc_enabled && p.multiband_enabled && p.limiter_enabled);
+        assert_eq!((p.agc_max_gain_db, p.agc_max_cut_db), (12.0, 12.0));
+        assert_eq!((p.agc_rate_up_db_s, p.agc_rate_down_db_s), (1.0, 3.0));
+        assert_eq!(p.agc_gate_lufs, -50.0);
+        assert_eq!(p.multiband_drive_db, 0.0);
+        assert_eq!(p.crossover_hz, [120.0, 800.0, 4000.0, 10_000.0]);
+        assert_eq!(p.limiter_lookahead_ms, 5.0);
+    }
+
+    /// `apply_preset` leaves `enabled`, `num_bands` and the lookahead alone
+    /// and uses the current band count.
+    #[test]
+    fn apply_preset_keeps_excluded_fields() {
+        let mut p = BroadcastParams::preset(BroadcastPreset::EbuR128, 4);
+        p.enabled = false;
+        p.num_bands = 2;
+        p.limiter_lookahead_ms = 12.0;
+        p.input_gain_db = 5.0;
+        p.apply_preset(BroadcastPreset::Speech);
+        assert!(!p.enabled);
+        assert_eq!(p.num_bands, 2);
+        assert_eq!(p.limiter_lookahead_ms, 12.0);
+        let mut q = BroadcastParams::preset(BroadcastPreset::Speech, 2);
+        q.enabled = false;
+        q.limiter_lookahead_ms = 12.0;
+        assert_eq!(p, q);
+        assert_eq!(p.crossover_hz[0], 200.0);
+        assert_eq!((p.bands[1].attack_ms, p.bands[1].release_ms), (10.0, 150.0));
+        // Inactive bands get the 5-band values of their index.
+        assert_eq!((p.bands[4].attack_ms, p.bands[4].release_ms), (3.0, 80.0));
     }
 }
