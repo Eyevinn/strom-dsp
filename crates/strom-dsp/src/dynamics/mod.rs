@@ -13,8 +13,10 @@
 //! | [`OnePole`] | one-pole smoother toward a target (parameter glides, fades) |
 //! | [`AttackRelease`] | one-pole with separate rising/falling time constants |
 //! | [`PeakEnvelope`] | peak follower: instant attack, exponential release |
+//! | [`MeanSquareEnvelope`] | one-pole mean-square (RMS) average, sine-calibrated power |
 //! | [`GainComputer`] | static compressor curve with quadratic soft knee (dB in, dB out) |
 //! | [`GateStateMachine`] | open/close hysteresis with hold counter |
+//! | [`KeyDetector`] | sidechain front end: optional key filter (HPF/BPF) + linked key peak |
 //! | [`DelayLine`] | multichannel interleaved ring buffer with frame taps |
 //! | [`SlidingMin`] | O(1) amortised sliding-window minimum (monotonic deque) |
 //! | [`SegmentedMin`] | sliding-window minimum with constant per-value cost (van Herk / Gil–Werman) |
@@ -30,6 +32,7 @@
 pub mod frame;
 mod gain_computer;
 mod gate_state;
+mod key;
 mod ramp;
 mod ring;
 mod smoother;
@@ -37,6 +40,7 @@ pub(crate) mod vmath;
 
 pub use gain_computer::{GainComputer, MIN_KNEE};
 pub use gate_state::GateStateMachine;
+pub use key::{KeyDetector, KeyFilter, KEY_FILTER_MAX_HZ, KEY_FILTER_MIN_HZ, KEY_FILTER_Q_RANGE};
 pub use ramp::{BoxAverage, RampSmoother, RAMP_FRAC_BITS};
 pub use ring::{DelayLine, SegmentedMin, SlidingMin};
-pub use smoother::{AttackRelease, OnePole, PeakEnvelope};
+pub use smoother::{AttackRelease, MeanSquareEnvelope, OnePole, PeakEnvelope};

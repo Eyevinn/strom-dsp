@@ -52,9 +52,19 @@
 //! parameter smoothers snap to their target when within `1e-9`.
 //!
 //! Ratio 1 gives `S = 0`, hence `r = 0` and exactly unity gain apart from makeup.
+//!
+//! # Sidechain (key input)
+//!
+//! [`Compressor::process_with_key`] feeds the level detector (step 1) from a
+//! separate key signal through a [`KeyDetector`]: optional key filter
+//! ([`Compressor::set_key_filter`], high-pass or band-pass) and the linked
+//! peak over the key's channels, which may differ in number from the
+//! programme's ([`Compressor::set_key_channels`]). Steps 2–4 are unchanged.
+//! [`Processor::process`] never touches the key path and is bit-identical to
+//! the compressor without sidechain support.
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
-use crate::dynamics::{vmath, AttackRelease, GainComputer, OnePole};
+use crate::dynamics::{vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, OnePole};
 use crate::simd::{detect, Level};
 use crate::Processor;
 use fearless_simd::dispatch;
@@ -229,6 +239,10 @@ pub struct Compressor {
     level: Level,
     /// Set by `set_simd_level`: `configure` keeps `level` instead of detecting.
     level_forced: bool,
+    /// Sidechain front end, used only by `process_with_key`.
+    key: KeyDetector,
+    /// Key channel count set by `set_key_channels` (0 = follow `channels`).
+    key_channels: usize,
 }
 
 impl Default for Compressor {
@@ -261,9 +275,51 @@ impl Compressor {
             fresh: true,
             level: Level::baseline(),
             level_forced: false,
+            key: KeyDetector::new(),
+            key_channels: 0,
         };
         c.update_coefficients();
         c
+    }
+
+    /// Set the key's channel count for
+    /// [`process_with_key`](Self::process_with_key) (≥ 1). **Allocates**
+    /// (key-filter state): call it at setup time, like `configure`. Without
+    /// this call the key has the programme's channel count.
+    pub fn set_key_channels(&mut self, key_channels: usize) {
+        self.key_channels = key_channels.max(1);
+        self.key
+            .configure(self.sample_rate as f32, self.key_channels);
+    }
+
+    /// Key channel count expected by `process_with_key`.
+    pub fn key_channels(&self) -> usize {
+        self.key.key_channels()
+    }
+
+    /// Set the key filter of the sidechain detector path. Never allocates.
+    pub fn set_key_filter(&mut self, filter: KeyFilter) {
+        self.key.set_filter(filter);
+    }
+
+    /// Current key filter.
+    pub fn key_filter(&self) -> KeyFilter {
+        self.key.filter()
+    }
+
+    /// Process interleaved `samples` in place, with the level detector fed
+    /// from the interleaved `key` (`key_channels` channels, same rate and
+    /// frame count) instead of `samples`. Real-time safe. `key_channels` must
+    /// equal [`key_channels`](Self::key_channels); a mismatching or too short
+    /// key is detected as silence (see [`KeyDetector`]).
+    pub fn process_with_key(&mut self, samples: &mut [f32], key: &[f32], key_channels: usize) {
+        let ch = self.channels;
+        if ch == 0 || samples.len() < ch {
+            return;
+        }
+        self.fresh = false;
+        let key = Some((key, key_channels));
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, key));
     }
 
     /// Update parameters (clamped to their ranges). Never allocates.
@@ -293,6 +349,7 @@ impl Compressor {
     pub fn set_simd_level(&mut self, level: Level) {
         self.level = level;
         self.level_forced = true;
+        self.key.set_simd_level(level);
     }
 
     /// The SIMD instruction set `process` currently dispatches to.
@@ -303,7 +360,12 @@ impl Compressor {
     /// Block loop, monomorphised per instruction set (see "Efficiency" in
     /// the module docs).
     #[inline(always)]
-    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
+    fn process_blocks<S: Simd>(
+        &mut self,
+        simd: S,
+        samples: &mut [f32],
+        key: Option<(&[f32], usize)>,
+    ) {
         let ch = self.channels;
         let n = S::f64s::LEN;
         // Per-frame scratch, reused through the stages of a block: peak →
@@ -311,13 +373,20 @@ impl Compressor {
         let mut peaks = [0.0f32; BLOCK_FRAMES];
         let mut level = [0.0f64; BLOCK_FRAMES];
         let mut makeup = [0.0f64; BLOCK_FRAMES];
-        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+        for (b, block) in samples.chunks_mut(BLOCK_FRAMES * ch).enumerate() {
             let frames = block.len() / ch;
             // Vector loops cover whole vectors; lanes past `frames` hold
             // finite leftovers and are ignored. BLOCK_FRAMES is a multiple of
             // every native width.
             let lanes = frames.div_ceil(n) * n;
-            frame_peaks_simd(simd, block, ch, &mut peaks[..frames]);
+            match key {
+                None => frame_peaks_simd(simd, block, ch, &mut peaks[..frames]),
+                Some((k, kc)) => {
+                    let start = (b * BLOCK_FRAMES * kc).min(k.len());
+                    self.key
+                        .linked_peaks_simd(simd, &k[start..], kc, &mut peaks[..frames]);
+                }
+            }
             // Settled curve and the whole block below the knee: the static
             // reduction is exactly 0, no need for the logarithm.
             let quiet = !self.gliding
@@ -420,6 +489,12 @@ impl Processor for Compressor {
         if !self.level_forced {
             self.level = detect();
         }
+        let kc = if self.key_channels > 0 {
+            self.key_channels
+        } else {
+            channels
+        };
+        self.key.configure(sample_rate, kc);
         self.reset();
     }
 
@@ -429,10 +504,11 @@ impl Processor for Compressor {
             return;
         }
         self.fresh = false;
-        dispatch!(self.level, simd => self.process_blocks(simd, samples));
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, None));
     }
 
     fn reset(&mut self) {
+        self.key.reset();
         self.reduction.set_value(0.0);
         self.fresh = true;
         self.update_coefficients();

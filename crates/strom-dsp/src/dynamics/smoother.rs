@@ -251,11 +251,86 @@ impl PeakEnvelope {
     }
 }
 
+/// Mean-square (RMS) envelope: a one-pole average of the squared input,
+/// `m[n] = a·m[n−1] + (1−a)·x[n]²`, `a = exp(−1/(τ·fs))`.
+///
+/// [`step`](Self::step) returns the **sine-calibrated power** `2·m`, so that
+/// `sqrt(2·m)` of a steady sine equals its peak amplitude (+3.01 dB over the
+/// plain RMS); a constant `|x| = c` reads `√2·c`. Compare it with squared
+/// linear thresholds. After the input stops, `sqrt(2·m)` decays with time
+/// constant `2τ`. The state is denormal-flushed.
+///
+/// Unlike [`PeakEnvelope`], single peaks do not move it much: a level must be
+/// sustained over about `τ` to register (J. O. Smith III, one-pole averager;
+/// Zölzer, *DAFX*, RMS measurement in the dynamics chapter).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MeanSquareEnvelope {
+    a: f64,
+    value: f64,
+}
+
+impl MeanSquareEnvelope {
+    /// Envelope with averaging time constant `time_ms` at `sample_rate` Hz, starting at 0.
+    pub fn new(time_ms: f64, sample_rate: f64) -> Self {
+        Self {
+            a: one_pole_coef(time_ms, sample_rate),
+            value: 0.0,
+        }
+    }
+
+    /// Change the averaging time constant (ms). The current value is kept.
+    pub fn set_time(&mut self, time_ms: f64, sample_rate: f64) {
+        self.a = one_pole_coef(time_ms, sample_rate);
+    }
+
+    /// Current sine-calibrated power `2·m`.
+    #[inline]
+    pub fn value(&self) -> f64 {
+        2.0 * self.value
+    }
+
+    /// Clear to 0.
+    pub fn reset(&mut self) {
+        self.value = 0.0;
+    }
+
+    /// Feed one amplitude sample (any sign) and return the new sine-calibrated
+    /// power `2·m`. NaN input is treated as 0; ±∞ saturates at `f64::MAX`.
+    #[inline]
+    pub fn step(&mut self, x: f64) -> f64 {
+        let sq = if x.is_nan() {
+            0.0
+        } else {
+            (x * x).min(f64::MAX)
+        };
+        self.value = flush_denormal(self.a * self.value + (1.0 - self.a) * sq);
+        2.0 * self.value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FS: f64 = 48_000.0;
+
+    #[test]
+    fn mean_square_reads_sine_peak_and_decays_with_two_tau() {
+        let mut e = MeanSquareEnvelope::new(10.0, FS);
+        let mut v = 0.0;
+        for n in 0..48_000 {
+            v = e.step(0.5 * (2.0 * std::f64::consts::PI * 1000.0 * n as f64 / FS).sin());
+        }
+        assert!((v.sqrt() / 0.5 - 1.0).abs() < 0.01, "{}", v.sqrt());
+        let start = e.value();
+        for _ in 0..960 {
+            e.step(0.0);
+        }
+        // Amplitude falls by 1/e after 2τ = 20 ms.
+        assert!(((e.value() / start).sqrt() - (-1.0f64).exp()).abs() < 1e-9);
+        assert!(e.step(f64::NAN).is_finite());
+        assert!(e.step(f64::INFINITY).is_finite());
+    }
 
     #[test]
     fn one_pole_reaches_63_percent_after_tau() {
