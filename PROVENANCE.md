@@ -233,7 +233,7 @@ deliberately not set (see `docs/PERFORMANCE.md`).
 
 | Crate | Used by | Licence |
 |---|---|---|
-| (none at runtime) | `strom-dsp` | |
+| `fearless_simd` 1.2 | `strom-dsp` (SIMD with runtime dispatch) | Apache-2.0 OR MIT |
 | `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
 | `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
 | `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |

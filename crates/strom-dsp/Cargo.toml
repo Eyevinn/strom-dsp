@@ -19,6 +19,8 @@ rtsan = ["dep:rtsan-standalone"]
 gungraun = ["dep:gungraun"]
 
 [dependencies]
+# Portable SIMD with runtime dispatch (SSE4.2/AVX2/AVX-512/NEON), safe API.
+fearless_simd = "1.2"
 # Optional so they can be gated by features (dev-dependencies cannot be
 # optional). Neither is used by the library code itself.
 rtsan-standalone = { version = "0.3", optional = true }
