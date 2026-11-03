@@ -419,7 +419,19 @@ fn cases() -> Vec<Case> {
     // ---- limiter ----
     let l = "stromdsp-limiter";
     v.push(case(l, &[], &[("enabled", "false")]));
-    v.push(case(l, &[("enabled", "false")], &[("enabled", "true")]));
+    // Re-enabling while the tone is 9 dB over the threshold: the limiter must
+    // hold the ceiling from the first frame that entered while enabled (a
+    // theory-tested guarantee), so the gain reduction ramps in within the
+    // attack time (an S-ramp over `attack`): a limiter attack, not a crossfade.
+    const ENGAGE: &str = "re-enabling a limiter on a signal 9 dB over its threshold \
+                          engages within the 1 ms attack, as the ceiling guarantee \
+                          requires; with a 5 ms attack (next case) it meets the bound";
+    v.push(case(l, &[("enabled", "false")], &[("enabled", "true")]).exempt(-40.0, ENGAGE));
+    v.push(case(
+        l,
+        &[("enabled", "false"), ("attack", "5")],
+        &[("enabled", "true")],
+    ));
     v.push(case(l, &[("threshold", "-3")], &[("threshold", "-15")]));
     v.push(case(l, &[], &[("threshold", "0")]));
     v.push(case(l, &[], &[("attack", "0.1")]));
@@ -804,7 +816,7 @@ fn every_knob_is_click_free() {
             c.label(),
             if c.generic { "  [generic]" } else { "" },
             c.exemption
-                .map(|w| format!("  [exempt to {:.0} dB: {w}]", c.bound))
+                .map(|w| format!("  [exempt to {bound:.1} dB: {w}]"))
                 .unwrap_or_default(),
         );
     }
