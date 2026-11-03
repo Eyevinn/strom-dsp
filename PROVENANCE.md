@@ -442,6 +442,50 @@ bounds plus no short-term overshoot after a 10 s pause.
 
 No commercial broadcast-processor manuals, presets or tuning were used.
 
+### Spike guard (`src/spike_guard.rs`)
+
+Removes short, isolated peaks (clicks) ahead of the AGC, so they neither
+pump the gain control nor count toward the measured loudness.
+
+- **Detection:** impulsive-noise detection against a signal envelope
+  (S. Godsill, P. Rayner, *Digital Audio Restoration*, Springer 1998): the
+  4× interpolated per-frame peak (`Oversampler`, as in ITU-R BS.1770
+  Annex 2) against a peak envelope (`PeakEnvelope`, 40 ms release) fed
+  0.33 ms late and only with frames that are not part of an event.
+- **Look-ahead gain with a band-limited control signal** (US 5,737,434,
+  look-ahead clipping with a band-limited gain control signal; expired;
+  status not legally reviewed): the gain is written ahead of the output
+  (0.5 ms standard lookahead, none in the low-latency setting) as a dip
+  with raised-cosine ramps, so it creates no harmonics.
+- **Soft knee:** the event's peak goes through a static curve
+  `a + (L − a)·tanh((P − a)/(L − a))` (identity below the knee `a`, never
+  above the cap `L`), as in the soft-knee gain computers of Giannoulis,
+  Massberg & Reiss (JAES 2012) and Zölzer (*DAFX*, dynamics chapter).
+- **Reused:** `Oversampler` (detector), `PeakEnvelope`, `DelayLine` (main
+  path).
+
+Own design choices:
+- **Causal event rule:** a frame over the cap starts an event at once. It
+  is abandoned as programme if its core (frames within 20 dB of its peak
+  and above the knee) reappears more than 0.25 ms after its start within
+  the next 0.15 ms; otherwise it is a spike. Tones, noise bursts and drum
+  onsets are abandoned because their peaks recur; a click is not. With the
+  standard 0.5 ms lookahead the decision is made before the output reads
+  any of the dip, so an abandoned event leaves the programme bit-exact;
+  with no lookahead the output keeps up to 0.4 ms of the dip (an onset
+  "nip"), which the tests measure.
+- **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
+  interpolator's ringing before a large click) and the ramp after a spike
+  stay out of the envelope; an abandoned event's peak goes into it at once.
+- **A gain dip, not a waveform clipper:** a 4× soft clipper whose
+  clippings are band-limited back to the base rate (US 6,337,999; expired;
+  status not legally reviewed) was built first and measured: on a
+  single-sample click the band-limited clippings are much smaller than the
+  clippings, so the peak grew back (a 1.0 click over a 0.1 tone came out
+  at 0.40 against a cap of 0.25; a 10.0 click at 0.87 against 0.13). The
+  gain dip lands the click on the cap and adds no harmonics.
+- Bit-exact outside dips: the gain is exactly 1 there and is not applied.
+
 ### Multiband compressor (`src/multiband.rs`)
 
 This is our own composition of existing parts, not a new algorithm. The
