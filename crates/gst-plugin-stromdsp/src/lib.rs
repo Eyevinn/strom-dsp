@@ -13,11 +13,13 @@ mod common;
 pub mod compressor;
 pub mod equalizer;
 pub mod gate;
+pub mod limiter;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gate::register(plugin)?;
     compressor::register(plugin)?;
     equalizer::register(plugin)?;
+    limiter::register(plugin)?;
     Ok(())
 }
 
