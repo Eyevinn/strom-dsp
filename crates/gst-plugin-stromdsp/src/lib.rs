@@ -9,6 +9,7 @@
 
 use gst::glib;
 
+pub mod broadcastprocessor;
 pub mod cleanup;
 mod common;
 pub mod compressor;
@@ -32,6 +33,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     stereo::register(plugin)?;
     cleanup::register(plugin)?;
     meter::register(plugin)?;
+    broadcastprocessor::register(plugin)?;
     Ok(())
 }
 
