@@ -1,15 +1,17 @@
-//! Criterion benchmark of the full broadcast chain (input gain → AGC →
-//! 4-band multiband compressor → final clipper → limiter, governor, plus all
-//! meters), 48 kHz stereo, 480-frame (10 ms) buffers, with `take_meters`
-//! once per buffer; and of the final clipper on its own (idle, and
-//! clipping every sample's neighbourhood, at both latency settings).
+//! Criterion benchmark of the full broadcast chain (input gain → spike
+//! guard → AGC → 4-band multiband compressor with expanders and bass
+//! clipper → final clipper → limiter, governor, plus all meters), 48 kHz
+//! stereo, 480-frame (10 ms) buffers, with `take_meters` once per buffer,
+//! with the `ebu-r128` and `streaming` defaults in both latency modes; and
+//! of the final clipper on its own (idle, and clipping every sample's
+//! neighbourhood, at both latency settings).
 //! Throughput is in frames, so the share of one core is
 //! `48 000 frames/s ÷ measured frames/s`.
 use std::f64::consts::PI;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
+use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::clipper::{ClipperLatency, FinalClipper};
 use strom_dsp::presets::BroadcastPreset;
 use strom_dsp::Processor;
@@ -67,20 +69,20 @@ fn bench(c: &mut Criterion) {
             black_box(bp.take_meters());
         })
     });
-    for (name, preset) in [
-        (
-            "full_chain_defaults_ebu_r128_48k_stereo_480",
-            BroadcastPreset::EbuR128,
-        ),
-        (
-            "full_chain_defaults_streaming_48k_stereo_480",
-            BroadcastPreset::Streaming,
-        ),
-    ] {
+    let configs = [
+        ("ebu_r128", BroadcastPreset::EbuR128),
+        ("streaming", BroadcastPreset::Streaming),
+    ]
+    .into_iter()
+    .flat_map(|(pname, preset)| LatencyMode::ALL.map(move |mode| (pname, preset, mode)));
+    for (pname, preset, mode) in configs {
+        let mut p = BroadcastParams::preset(preset, 4);
+        mode.apply(&mut p);
         let mut bp = BroadcastProcessor::new();
-        bp.set_params(&BroadcastParams::preset(preset, 4));
+        bp.set_params(&p);
         bp.configure(FS, 2);
         let mut pos = 0;
+        let name = format!("full_chain_defaults_{pname}_{}_48k_stereo_480", mode.nick());
         group.bench_function(name, |b| {
             b.iter(|| {
                 let len = buf.len();
