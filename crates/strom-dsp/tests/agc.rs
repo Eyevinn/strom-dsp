@@ -226,7 +226,7 @@ fn pause_holds_the_gain_and_recovery_does_not_overshoot() {
         let mut det = LoudnessDetector::new();
         det.configure(FS as f32, 2, ChannelLayout::Stereo);
         let mut max_m = f64::MIN;
-        for (b, blk) in out.chunks_exact(BLOCK * 2).enumerate() {
+        for (b, blk) in out.as_chunks::<{ BLOCK * 2 }>().0.iter().enumerate() {
             det.process(blk);
             if b >= p1 + 40 {
                 max_m = max_m.max(det.momentary_lufs());
@@ -515,7 +515,7 @@ fn speech_like_programme_with_gaps_reaches_target() {
     // every second: the gaps are gated out of the measurement.
     let target = -23.0;
     let mut x = pink(NOISE_FRAMES, 2, FS, 91);
-    for (n, f) in x.chunks_exact_mut(2).enumerate() {
+    for (n, f) in x.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let t = n as f64 / FS;
         let env = if t.fract() >= 0.7 {
             0.0

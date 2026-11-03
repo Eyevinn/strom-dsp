@@ -711,13 +711,13 @@ impl StromDspDucker {
 }
 
 fn from_le(bytes: &[u8], out: &mut [f32]) {
-    for (s, b) in out.iter_mut().zip(bytes.chunks_exact(4)) {
+    for (s, b) in out.iter_mut().zip(bytes.as_chunks::<4>().0) {
         *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     }
 }
 
 fn to_le(samples: &[f32], bytes: &mut [u8]) {
-    for (b, s) in bytes.chunks_exact_mut(4).zip(samples) {
+    for (b, s) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(samples) {
         b.copy_from_slice(&s.to_le_bytes());
     }
 }

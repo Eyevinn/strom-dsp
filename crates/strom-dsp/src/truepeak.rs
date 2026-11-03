@@ -297,7 +297,10 @@ const _: () = assert!(HF_DELAY <= HF_RING_MASK);
 #[inline(always)]
 fn hf_term(frame: &[f32], prev: &mut [f32]) -> f64 {
     let mut m = 0.0f64;
-    for (&x, h) in frame.iter().zip(prev.chunks_exact_mut(HF_ORDER)) {
+    for (&x, h) in frame
+        .iter()
+        .zip(prev.as_chunks_mut::<HF_ORDER>().0.iter_mut())
+    {
         let mut acc = HF_TAPS[0] * x as f64;
         for (c, &v) in HF_TAPS[1..].iter().zip(h.iter()) {
             acc += c * v as f64;

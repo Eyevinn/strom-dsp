@@ -138,7 +138,7 @@ impl State {
         let usable = data.len() / (4 * ch) * (4 * ch);
         for chunk in data[..usable].chunks(self.scratch.len() * 4) {
             let samples = &mut self.scratch[..chunk.len() / 4];
-            for (s, b) in samples.iter_mut().zip(chunk.chunks_exact(4)) {
+            for (s, b) in samples.iter_mut().zip(chunk.as_chunks::<4>().0) {
                 *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             }
             self.loudness.process(samples);

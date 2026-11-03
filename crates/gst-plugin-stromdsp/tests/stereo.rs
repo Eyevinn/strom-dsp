@@ -97,7 +97,7 @@ fn routing_is_bit_exact() {
         ("invert-left", true.to_value()),
     ];
     let out = util::run_element("stromdsp-stereo", &props, 48_000, 2, &input, 480, &[]);
-    for (o, i) in out.chunks_exact(2).zip(input.chunks_exact(2)) {
+    for (o, i) in out.as_chunks::<2>().0.iter().zip(input.as_chunks::<2>().0) {
         // invert-left acts on the input, then swap: L out = R in, R out = −L in.
         assert_eq!(o[0].to_bits(), i[1].to_bits());
         assert_eq!(o[1].to_bits(), (-i[0]).to_bits());

@@ -667,7 +667,7 @@ fn weighted_energy(buf: &[f32], weights: &[f64], acc: &mut [f64]) -> f64 {
         }
         2 => {
             let (mut l, mut r) = (0.0f64, 0.0f64);
-            for f in buf.chunks_exact(2) {
+            for f in buf.as_chunks::<2>().0 {
                 l += f64::from(f[0]) * f64::from(f[0]);
                 r += f64::from(f[1]) * f64::from(f[1]);
             }

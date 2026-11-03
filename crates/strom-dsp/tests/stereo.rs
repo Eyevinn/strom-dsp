@@ -216,7 +216,7 @@ fn routing_modes_are_bit_exact() {
                 ..StereoParams::default()
             };
             let out = processed(&p, &x);
-            for (o, i) in out.chunks_exact(2).zip(x.chunks_exact(2)) {
+            for (o, i) in out.as_chunks::<2>().0.iter().zip(x.as_chunks::<2>().0) {
                 let l = if il { -i[0] } else { i[0] };
                 let r = if ir { -i[1] } else { i[1] };
                 let want = match mode {
@@ -271,7 +271,7 @@ fn mixing_modes_match_their_formula() {
     ];
     for (p, f) in cases {
         let out = processed(&p, &x);
-        for (o, i) in out.chunks_exact(2).zip(x.chunks_exact(2)) {
+        for (o, i) in out.as_chunks::<2>().0.iter().zip(x.as_chunks::<2>().0) {
             let (l, r) = f(f64::from(i[0]), f64::from(i[1]));
             assert_eq!(o[0], l as f32, "{p:?}");
             assert_eq!(o[1], r as f32, "{p:?}");
@@ -285,7 +285,7 @@ fn ms_round_trip() {
     let x = noise(48_000, 5);
     let enc = processed(&with_mode(StereoMode::MsEncode), &x);
     let dec = processed(&with_mode(StereoMode::MsDecode), &enc);
-    for (o, i) in dec.chunks_exact(2).zip(x.chunks_exact(2)) {
+    for (o, i) in dec.as_chunks::<2>().0.iter().zip(x.as_chunks::<2>().0) {
         // Two f32 roundings of the intermediate M/S signal: ≤ 1 ulp of the
         // larger input each.
         let tol = 2.0 * f32::EPSILON * i[0].abs().max(i[1].abs());
@@ -355,7 +355,7 @@ fn width_definition() {
             ..StereoParams::default()
         };
         let out = processed(&p, &x);
-        for (o, i) in out.chunks_exact(2).zip(x.chunks_exact(2)) {
+        for (o, i) in out.as_chunks::<2>().0.iter().zip(x.as_chunks::<2>().0) {
             let (m_in, s_in) = (
                 (f64::from(i[0]) + f64::from(i[1])) / 2.0,
                 (f64::from(i[0]) - f64::from(i[1])) / 2.0,

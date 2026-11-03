@@ -65,7 +65,9 @@ fn sine_1k(amp: f32, n: usize, start: usize) -> Vec<f32> {
 fn run_with_probe(g: &mut Gate, key: &[f32]) -> Vec<f64> {
     let mut buf: Vec<f32> = key.iter().flat_map(|&k| [k, PROBE]).collect();
     g.process(&mut buf);
-    buf.chunks_exact(2)
+    buf.as_chunks::<2>()
+        .0
+        .iter()
         .map(|f| f[1] as f64 / PROBE as f64)
         .collect()
 }

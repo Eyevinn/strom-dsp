@@ -35,7 +35,7 @@ pub fn frame_peaks(samples: &[f32], channels: usize, out: &mut [f32]) {
             }
         }
         2 => {
-            for (o, f) in out.iter_mut().zip(samples.chunks_exact(2)) {
+            for (o, f) in out.iter_mut().zip(samples.as_chunks::<2>().0) {
                 *o = f[0].abs().max(f[1].abs()).max(0.0);
             }
         }
@@ -59,7 +59,7 @@ pub fn apply_gains(samples: &mut [f32], channels: usize, gains: &[f32]) {
             }
         }
         2 => {
-            for (f, &g) in samples.chunks_exact_mut(2).zip(gains) {
+            for (f, &g) in samples.as_chunks_mut::<2>().0.iter_mut().zip(gains) {
                 f[0] *= g;
                 f[1] *= g;
             }
@@ -139,7 +139,7 @@ pub fn frame_peaks_simd<S: Simd>(simd: S, samples: &[f32], channels: usize, out:
             for (o, f) in dst
                 .into_remainder()
                 .iter_mut()
-                .zip(src.remainder().chunks_exact(2))
+                .zip(src.remainder().as_chunks::<2>().0)
             {
                 *o = max_ignore_nan_scalar(max_ignore_nan_scalar(0.0, f[0].abs()), f[1].abs());
             }
@@ -207,7 +207,9 @@ pub fn apply_gains_simd<S: Simd>(simd: S, samples: &mut [f32], channels: usize, 
             }
             for (f, &g) in dst
                 .into_remainder()
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
                 .zip(src.remainder())
             {
                 f[0] *= g;

@@ -1,0 +1,80 @@
+name: Extended checks
+
+# Slower, specialised checks: minimum Rust versions, RealtimeSanitizer and
+# instruction counts. Weekly and on demand (Actions tab → Run workflow).
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msrv:
+    name: MSRV (library 1.89, plugin 1.92)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89, 1.92"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.89 check -p strom-dsp --all-targets
+      # Cargo.lock pins kstring 2.0.2: 2.0.3+ (pulled in by gstreamer) needs a
+      # newer compiler than the plugin's declared rust-version.
+      - run: cargo +1.92 check -p gst-plugin-stromdsp --all-targets
+
+  rtsan:
+    name: RealtimeSanitizer
+    runs-on: ubuntu-latest
+    env:
+      # Read by rtsan-standalone's build script: link the sanitizer runtime
+      # (pre-built, downloaded with curl) and turn the scopes on.
+      RTSAN_ENABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every tests/rtsan*.rs file (each starts with #![cfg(feature = "rtsan")]).
+      - name: Real-time safety tests
+        run: |
+          for f in crates/strom-dsp/tests/rtsan*.rs; do
+            cargo test -p strom-dsp --features rtsan --test "$(basename "$f" .rs)"
+          done
+      # The canary allocates inside a real-time scope. It must abort; if it
+      # passes, the sanitizer is not active and the step above proved nothing.
+      - name: Sanitizer canary (must fail)
+        run: |
+          if cargo test -p strom-dsp --features rtsan --test rtsan -- \
+               --ignored --exact canary_allocation_is_detected; then
+            echo "::error::RTSan canary passed: the sanitizer is not active"
+            exit 1
+          fi
+
+  gungraun:
+    name: Instruction counts (gungraun)
+    runs-on: ubuntu-latest
+    env:
+      # Must match the `gungraun` version pinned in crates/strom-dsp/Cargo.toml.
+      GUNGRAUN_VERSION: 0.20.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+      - run: cargo install --locked gungraun-runner --version "$GUNGRAUN_VERSION"
+      - run: cargo clippy -p strom-dsp --features rtsan,gungraun --all-targets -- -D warnings
+      # Report-only: no regression limits are configured.
+      - run: cargo bench -p strom-dsp --features gungraun --bench strip_gungraun

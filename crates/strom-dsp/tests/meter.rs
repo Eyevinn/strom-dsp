@@ -848,7 +848,7 @@ fn run_detector(
     let mut last = d.state();
     let mut n = 0;
     while n < frames {
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             let (l, r) = gen(n);
             f[0] = l;
             f[1] = r;
@@ -985,7 +985,7 @@ fn correlation_and_detector_never_allocate() {
     let mut d = MonoDetector::new(FS as f32, &MonoDetectorParams::default());
     let mut noise = Noise(5);
     let sig: Vec<f32> = (0..2 * 4096).map(|_| noise.next()).collect();
-    let (l, r): (Vec<f32>, Vec<f32>) = sig.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+    let (l, r): (Vec<f32>, Vec<f32>) = sig.as_chunks::<2>().0.iter().map(|f| (f[0], f[1])).unzip();
     let before = alloc_count();
     let mut sink = 0.0;
     for i in 0..500 {

@@ -239,7 +239,12 @@ fn reset_and_parameter_changes() {
 fn never_allocates_after_new() {
     let mut noise = Noise(5);
     let stereo: Vec<f32> = (0..20_000).map(|_| noise.next()).collect();
-    let (l, r): (Vec<f32>, Vec<f32>) = stereo.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+    let (l, r): (Vec<f32>, Vec<f32>) = stereo
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|f| (f[0], f[1]))
+        .unzip();
     for rate in [8_000.0f32, 48_000.0, 192_000.0] {
         let mut m = BandCorrelation::new(rate, 300.0);
         let before = alloc_count();

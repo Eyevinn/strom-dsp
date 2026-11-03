@@ -296,7 +296,7 @@ impl<P: Processor> Engine<P> {
         let chunk_bytes = self.scratch.len() * 4;
         for chunk in data[..usable].chunks_mut(chunk_bytes) {
             let samples = &mut self.scratch[..chunk.len() / 4];
-            for (s, b) in samples.iter_mut().zip(chunk.chunks_exact(4)) {
+            for (s, b) in samples.iter_mut().zip(chunk.as_chunks::<4>().0) {
                 *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             }
             if self.fade.is_wet() {
@@ -307,7 +307,7 @@ impl<P: Processor> Engine<P> {
                 self.dsp.process(samples);
                 self.fade.mix(samples, dry, self.channels);
             }
-            for (b, s) in chunk.chunks_exact_mut(4).zip(samples.iter()) {
+            for (b, s) in chunk.as_chunks_mut::<4>().0.iter_mut().zip(samples.iter()) {
                 b.copy_from_slice(&s.to_le_bytes());
             }
         }
@@ -321,7 +321,7 @@ impl<P: Processor> Engine<P> {
         let chunk_bytes = self.scratch.len() * 4;
         for chunk in data[..usable].chunks(chunk_bytes) {
             let samples = &mut self.scratch[..chunk.len() / 4];
-            for (s, b) in samples.iter_mut().zip(chunk.chunks_exact(4)) {
+            for (s, b) in samples.iter_mut().zip(chunk.as_chunks::<4>().0) {
                 *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             }
             self.dsp.process(samples);
@@ -626,7 +626,9 @@ mod tests {
     }
 
     fn from_bytes(b: &[u8]) -> Vec<f32> {
-        b.chunks_exact(4)
+        b.as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }

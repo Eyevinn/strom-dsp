@@ -392,7 +392,7 @@ impl Processor for Stereo {
             return;
         }
         self.fresh = false;
-        let mut frames = samples[..usable].chunks_exact_mut(2);
+        let mut frames = samples[..usable].as_chunks_mut::<2>().0.iter_mut();
         if self.ramp_pos > 0 {
             let n = self.ramp_frames as f64;
             let (s, t) = (self.start, self.target);

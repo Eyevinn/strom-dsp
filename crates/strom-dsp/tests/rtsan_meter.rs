@@ -95,7 +95,12 @@ fn loudness_meter_is_realtime_safe() {
 fn correlation_and_mono_detector_are_realtime_safe() {
     let max = *SIZES.iter().max().unwrap();
     let input = signal(max * 8, 2);
-    let (l, r): (Vec<f32>, Vec<f32>) = input.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+    let (l, r): (Vec<f32>, Vec<f32>) = input
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|f| (f[0], f[1]))
+        .unzip();
     let mut m = CorrelationMeter::new(48_000.0, 300.0);
     let mut d = MonoDetector::new(48_000.0, &MonoDetectorParams::default());
     let mut pos = 0;
@@ -131,7 +136,12 @@ fn correlation_and_mono_detector_are_realtime_safe() {
 fn band_correlation_is_realtime_safe() {
     let max = *SIZES.iter().max().unwrap();
     let input = signal(max * 8, 3);
-    let (l, r): (Vec<f32>, Vec<f32>) = input.chunks_exact(3).map(|f| (f[0], f[1])).unzip();
+    let (l, r): (Vec<f32>, Vec<f32>) = input
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|f| (f[0], f[1]))
+        .unzip();
     let mut m = BandCorrelation::new(48_000.0, 300.0);
     let mut pos = 0;
     let mut sink = 0.0f64;

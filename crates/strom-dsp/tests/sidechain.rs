@@ -466,7 +466,9 @@ fn expander_hysteresis_and_hold() {
             .flat_map(|v| [v, PROBE])
             .collect();
         g.process(&mut buf);
-        buf.chunks_exact(2)
+        buf.as_chunks::<2>()
+            .0
+            .iter()
             .map(|f| lin_to_db(f[1] as f64 / PROBE as f64))
             .collect()
     };
@@ -506,7 +508,7 @@ fn mode_and_ratio_changes_do_not_jump() {
             .flat_map(|v| [v, PROBE])
             .collect();
         g.process(&mut buf);
-        for f in buf.chunks_exact(2) {
+        for f in buf.as_chunks::<2>().0 {
             let gain = f[1] as f64 / PROBE as f64;
             if let Some(q) = prev {
                 let q: f64 = q;

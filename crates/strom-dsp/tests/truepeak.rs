@@ -453,11 +453,11 @@ fn impulse_delay_equals_reported_latency_enabled_and_disabled() {
             buf[100 * 2] = 0.25;
             buf[100 * 2 + 1] = -0.25;
             run(&mut l, &mut buf, 2);
-            for (i, f) in buf.chunks_exact(2).enumerate() {
+            for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
                 if i == 100 + lat {
-                    assert_eq!(f, [0.25, -0.25], "{fs} enabled {enabled}");
+                    assert_eq!(*f, [0.25, -0.25], "{fs} enabled {enabled}");
                 } else {
-                    assert_eq!(f, [0.0, 0.0], "{fs} enabled {enabled}: frame {i}");
+                    assert_eq!(*f, [0.0, 0.0], "{fs} enabled {enabled}: frame {i}");
                 }
             }
         }

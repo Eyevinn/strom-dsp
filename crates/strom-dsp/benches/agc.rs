@@ -45,7 +45,12 @@ fn input() -> Vec<f32> {
 
 fn bench(c: &mut Criterion) {
     let sig = input();
-    let blocks: Vec<&[f32]> = sig.chunks_exact(2 * FRAMES).collect();
+    let blocks: Vec<&[f32]> = sig
+        .as_chunks::<{ 2 * FRAMES }>()
+        .0
+        .iter()
+        .map(|b| b.as_slice())
+        .collect();
 
     let mut g = c.benchmark_group("agc_48k_stereo_480");
     g.throughput(Throughput::Elements(FRAMES as u64));

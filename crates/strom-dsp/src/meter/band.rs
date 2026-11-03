@@ -121,7 +121,9 @@ impl BandCorrelation {
             let frames = block.len() / channels;
             for (d, f) in self
                 .input
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
                 .zip(block.chunks_exact(channels))
             {
                 d[0] = f[0];
@@ -138,7 +140,9 @@ impl BandCorrelation {
             let end = (start + BLOCK_FRAMES).min(n);
             for (d, (&l, &r)) in self
                 .input
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
                 .zip(left[start..end].iter().zip(&right[start..end]))
             {
                 d[0] = l;

@@ -722,7 +722,9 @@ fn parameter_jumps_are_smooth() {
         m.process(&mut x);
         assert!(x.iter().all(|v| v.is_finite()));
         let step_max = x
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|fr| fr[0] as f64)
             .collect::<Vec<_>>()
             .windows(2)
