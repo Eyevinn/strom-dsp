@@ -160,8 +160,20 @@ fn params_with(bands: &[BandParams]) -> EqualizerParams {
     p
 }
 
-fn eq(fs: f32, ch: usize, p: &EqualizerParams) -> Equalizer {
+/// Every equalizer of this suite. `tests/equalizer_fallback.rs` compiles this
+/// file again as a module of another test crate; there the whole suite runs
+/// with the SIMD level forced to the scalar fallback. Here (crate
+/// `equalizer`) the level is the one `configure` detects.
+fn new_equalizer() -> Equalizer {
     let mut e = Equalizer::new();
+    if env!("CARGO_CRATE_NAME") == "equalizer_fallback" {
+        e.set_simd_level(strom_dsp::simd::Level::fallback());
+    }
+    e
+}
+
+fn eq(fs: f32, ch: usize, p: &EqualizerParams) -> Equalizer {
+    let mut e = new_equalizer();
     e.configure(fs, ch);
     e.set_params(p);
     e
@@ -610,7 +622,7 @@ fn extreme_cumulative_gain_stays_finite() {
 
 #[test]
 fn unconfigured_is_noop() {
-    let mut e = Equalizer::new();
+    let mut e = new_equalizer();
     e.set_params(&params_with(&[band(BandType::Peaking, 1000.0, 12.0, 1.0)]));
     let mut x = vec![0.3f32; 64];
     e.process(&mut x);
@@ -762,7 +774,7 @@ fn no_allocation_in_process_and_set_params() {
         band(BandType::HighPass, 30.0, 0.0, 0.707),
         band(BandType::Notch, 50.0, 0.0, 10.0),
     ]);
-    let mut e = Equalizer::new();
+    let mut e = new_equalizer();
     e.configure(48_000.0, 8);
     let mut seed = 5u64;
     let mut buf = noise(1024 * 8, &mut seed, 0.5);
@@ -838,10 +850,10 @@ fn set_params_before_or_after_configure_is_identical() {
         band(BandType::LowShelf, 120.0, 4.0, 0.707),
         band(BandType::Peaking, 2500.0, -6.0, 2.0),
     ]);
-    let mut a = Equalizer::new();
+    let mut a = new_equalizer();
     a.set_params(&p);
     a.configure(44_100.0, 2);
-    let mut b = Equalizer::new();
+    let mut b = new_equalizer();
     b.configure(44_100.0, 2);
     b.set_params(&p);
     let mut seed = 3u64;
