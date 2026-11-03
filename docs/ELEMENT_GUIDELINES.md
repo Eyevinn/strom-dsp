@@ -28,11 +28,19 @@ strom-dsp elements are **real-time** processors. An operator changes them while 
 - An element that doesn't need latency adds none: no internal buffering, and it leaves the `LATENCY` query unchanged.
 - An element that needs latency (lookahead, oversampling filters, STFT) reports all of it in the `LATENCY` query, keeps it constant for a given configuration, and posts a `Latency` message when a property change alters it.
 - Latency is kept to what the processing needs. Where it is a trade-off (e.g. lookahead), it is a property with a documented default.
+- Latency adds up along a live chain (processing, mixing, encoding, network), and two-way use (commentary, talkback, calls) feels every millisecond of it. Treat latency as a cost to minimise, not a budget to fill.
+- Stages in a chain share the work instead of each keeping full margin. A later safety stage gets a shorter lookahead when an earlier stage already handles most of what it catches, e.g. a limiter after a clipper.
+- An element or stage with latency makes it configurable, documents its default and the shortest setting that still keeps its guarantees, and its tests measure what a shorter setting costs (overshoot, distortion, true-peak margin).
+- An element built from several stages states a total latency budget on its page, for its default and its low-latency configuration, and a test fails when a configuration exceeds it.
 - Each element's page under [docs/elements/](elements/README.md) gives its latency, or its formula.
 - An intentional content delay (e.g. `stromdsp-delay`) is not latency: it is not reported, and timestamps are unchanged.
 
 ## Defaults
 - Every property has a default that is sensible on its own for live broadcast use (speech and programme audio). Each default and its reason are documented on the element's page under [docs/elements/](elements/README.md).
+- Defaults and presets are gentle. The target is TV broadcast and streaming: consistent loudness and a clean, natural sound, not maximum loudness. Under-processing is the safer failure; an operator can always push harder.
+
+## Protective stages
+- A stage that protects against events (a peak, a click, clipping on the input) is transparent when there is nothing to protect against: its output is its input, sample for sample, delayed by its reported latency.
 
 ## Tests
 Each rule has a test that fails if the rule is broken:
@@ -41,6 +49,8 @@ Each rule has a test that fails if the rule is broken:
 - **Latency test:** an impulse comes out delayed by exactly the reported latency, with `enabled` true and false, and the `LATENCY` query matches. Zero-latency elements report and add zero.
 - **Real-time safety:** a counting-allocator test, and RealtimeSanitizer where available, over the processing path.
 - **Interface test:** names, types, ranges, defaults and mutability flags of every property.
+- **Latency budget test:** for an element built from several stages, the reported latency of each named configuration stays within the budget on its page.
+- **Transparency test:** a protective stage fed clean programme changes no sample.
 
 A new element is not done until it passes all of these.
 
