@@ -81,10 +81,10 @@ pub const AR_ORDER_MIN: usize = 12;
 pub const AR_ORDER_MAX: usize = 64;
 
 /// Alternations of AR estimate and interpolation per run.
-pub const AR_ROUNDS: usize = 3;
+pub const AR_ROUNDS: usize = 2;
 
 /// Most samples of later runs in the window that join a run's solve.
-pub const JOINT_LATER: usize = 24;
+pub const JOINT_LATER: usize = 8;
 
 /// Hard cap on the longest repairable run (frames), whatever the rate.
 pub const MAX_RUN_FRAMES_CAP: usize = 256;

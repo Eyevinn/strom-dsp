@@ -279,12 +279,19 @@ impl LsarSolver {
             saved[f] = w[i];
             w[i] = 0.0;
         }
-        for k in p..n {
-            let mut s = 0.0;
-            for j in 0..=p {
-                s += self.a[j] * w[k - j];
+        // Only the rows that contain a free unknown are needed: the union of
+        // [max(i, p), min(i + p, n − 1)] over the free unknowns (ascending).
+        let mut next = p;
+        for &i in &self.free {
+            let k1 = (i + p).min(n - 1);
+            for k in next.max(i)..=k1 {
+                let mut s = 0.0;
+                for j in 0..=p {
+                    s += self.a[j] * w[k - j];
+                }
+                self.e0[k] = s;
             }
-            self.e0[k] = s;
+            next = next.max(k1 + 1);
         }
         for (f, &i) in self.free.iter().enumerate() {
             w[i] = saved[f];
