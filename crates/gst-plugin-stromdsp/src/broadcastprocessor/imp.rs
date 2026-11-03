@@ -548,7 +548,8 @@ fn meter_structure(
         .build()
 }
 
-/// The structure returned by `get-preset-values` for `preset` at `num_bands`.
+/// The structure returned by `get-preset-values` and
+/// `get-preset-values-for-bands` for `preset` at `num_bands`.
 fn preset_structure(preset: BroadcastPreset, num_bands: usize) -> gst::Structure {
     let p = BroadcastParams::preset(preset, num_bands);
     let mut s = gst::Structure::new_empty(preset.nick());
@@ -776,6 +777,20 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                             let n = obj.imp().settings.get().params.num_bands;
                             preset_structure(p, n)
                         });
+                        Some(s.to_value())
+                    })
+                    .build(),
+                glib::subclass::Signal::builder("get-preset-values-for-bands")
+                    .action()
+                    .param_types([String::static_type(), u32::static_type()])
+                    .return_type::<gst::Structure>()
+                    .class_handler(|args| {
+                        let nick = args[1].get::<Option<String>>().ok().flatten();
+                        let preset = nick.as_deref().and_then(BroadcastPreset::from_nick);
+                        let n = args[2].get::<u32>().unwrap_or(0) as usize;
+                        let s = preset
+                            .filter(|_| (1..=MAX_BANDS).contains(&n))
+                            .map(|p| preset_structure(p, n));
                         Some(s.to_value())
                     })
                     .build(),

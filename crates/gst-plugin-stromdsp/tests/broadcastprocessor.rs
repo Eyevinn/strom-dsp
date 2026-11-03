@@ -251,6 +251,148 @@ fn get_preset_values_null_for_custom_and_unknown() {
     assert!(changed(&before, &snapshot(&e)).is_empty());
 }
 
+/// The value of property `name` in the library parameters `p`.
+fn library_value(p: &BroadcastParams, name: &str) -> glib::Value {
+    match name {
+        "input-gain" => p.input_gain_db.to_value(),
+        "target-loudness" => p.target_loudness_lufs.to_value(),
+        "true-peak-ceiling" => p.true_peak_ceiling_dbtp.to_value(),
+        "agc-enabled" => p.agc_enabled.to_value(),
+        "agc-max-gain" => p.agc_max_gain_db.to_value(),
+        "agc-max-cut" => p.agc_max_cut_db.to_value(),
+        "agc-rate-up" => p.agc_rate_up_db_s.to_value(),
+        "agc-rate-down" => p.agc_rate_down_db_s.to_value(),
+        "agc-gate" => p.agc_gate_lufs.to_value(),
+        "multiband-enabled" => p.multiband_enabled.to_value(),
+        "multiband-drive" => p.multiband_drive_db.to_value(),
+        "limiter-enabled" => p.limiter_enabled.to_value(),
+        "limiter-release" => p.limiter_release_ms.to_value(),
+        _ => {
+            if let Some(k) = name
+                .strip_prefix("crossover")
+                .and_then(|r| r.strip_suffix("-frequency"))
+            {
+                return p.crossover_hz[k.parse::<usize>().unwrap()].to_value();
+            }
+            let (k, field) = name
+                .strip_prefix("band")
+                .and_then(|r| r.split_once('-'))
+                .unwrap_or_else(|| panic!("unknown {name}"));
+            let b = &p.bands[k.parse::<usize>().unwrap()];
+            match field {
+                "threshold" => b.threshold_db.to_value(),
+                "ratio" => b.ratio.to_value(),
+                "attack" => b.attack_ms.to_value(),
+                "release" => b.release_ms.to_value(),
+                "makeup" => b.makeup_db.to_value(),
+                _ => panic!("unknown {name}"),
+            }
+        }
+    }
+}
+
+/// For every preset and band count 1 … 5, `get-preset-values-for-bands`
+/// returns the same fields as `get-preset-values`, with the values of
+/// `BroadcastParams::preset` (and the documented tables) for that band
+/// count, whatever the element's own `num-bands` and settings are, and it
+/// changes nothing on the element.
+#[test]
+fn get_preset_values_for_bands_matches_library() {
+    let mut expected: Vec<String> = all_props(&make())
+        .into_iter()
+        .filter(|p| !NOT_SET_BY_PRESET.contains(&p.as_str()))
+        .collect();
+    expected.sort();
+
+    for own_bands in [2u32, 4] {
+        let e = make();
+        e.set_property("num-bands", own_bands);
+        e.set_property_from_str("preset", "speech");
+        e.set_property("input-gain", 3.0f32);
+        let before = snapshot(&e);
+
+        for preset in BroadcastPreset::ALL {
+            let nick = preset.nick();
+            for n in 1..=5u32 {
+                let ctx = format!("{nick} @ {n} bands (element at {own_bands})");
+                let s = e
+                    .emit_by_name::<Option<gst::Structure>>(
+                        "get-preset-values-for-bands",
+                        &[&nick, &n],
+                    )
+                    .unwrap_or_else(|| panic!("{ctx}: structure"));
+                assert_eq!(s.name(), nick, "{ctx}");
+
+                let mut fields: Vec<String> = s.fields().map(|f| f.to_string()).collect();
+                fields.sort();
+                assert_eq!(fields, expected, "{ctx}: fields");
+
+                let lib = BroadcastParams::preset(preset, n as usize);
+                for name in &expected {
+                    let field = s.value(name.as_str()).unwrap();
+                    assert_eq!(
+                        field.type_(),
+                        e.property_value(name).type_(),
+                        "{ctx}: {name} type"
+                    );
+                    let want = library_value(&lib, name);
+                    assert!(
+                        values_equal(field, &want),
+                        "{ctx}: {name}: {field:?} vs library {want:?}"
+                    );
+                    let doc = documented(nick, n, name);
+                    assert!(
+                        values_equal(field, &doc),
+                        "{ctx}: {name}: {field:?} vs docs/elements/broadcastprocessor.md {doc:?}"
+                    );
+                }
+
+                // Same as `get-preset-values` on an element at `n` bands.
+                let other = make();
+                other.set_property("num-bands", n);
+                let t = other
+                    .emit_by_name::<Option<gst::Structure>>("get-preset-values", &[&nick])
+                    .unwrap();
+                assert_eq!(s, t, "{ctx}: vs get-preset-values");
+            }
+        }
+
+        assert!(
+            changed(&before, &snapshot(&e)).is_empty(),
+            "element at {own_bands} bands changed"
+        );
+        assert_eq!(e.property::<u32>("num-bands"), own_bands);
+        assert_eq!(preset_nick(&e), "custom");
+    }
+}
+
+#[test]
+fn get_preset_values_for_bands_null_cases() {
+    let e = make();
+    for nick in ["custom", "loud", "", "EBU-R128"] {
+        for n in 1..=5u32 {
+            assert!(
+                e.emit_by_name::<Option<gst::Structure>>(
+                    "get-preset-values-for-bands",
+                    &[&nick, &n]
+                )
+                .is_none(),
+                "{nick} @ {n}"
+            );
+        }
+    }
+    for n in [0u32, 6, 100, u32::MAX] {
+        assert!(
+            e.emit_by_name::<Option<gst::Structure>>(
+                "get-preset-values-for-bands",
+                &[&"ebu-r128", &n]
+            )
+            .is_none(),
+            "{n}"
+        );
+    }
+}
+
 /// Presets never touch `enabled`, `meter-interval`, `num-bands` or
 /// `limiter-lookahead`.
 #[test]

@@ -267,6 +267,14 @@ fn action_signals() {
     let params: Vec<glib::Type> = q.param_types().iter().map(|t| t.type_()).collect();
     assert_eq!(params, [glib::Type::STRING]);
 
+    let id =
+        glib::subclass::SignalId::lookup("get-preset-values-for-bands", class).expect("signal");
+    let q = id.query();
+    assert!(q.flags().contains(glib::SignalFlags::ACTION));
+    assert_eq!(q.return_type().type_(), gst::Structure::static_type());
+    let params: Vec<glib::Type> = q.param_types().iter().map(|t| t.type_()).collect();
+    assert_eq!(params, [glib::Type::STRING, glib::Type::U32]);
+
     let id = glib::subclass::SignalId::lookup("reset", class).expect("signal");
     let q = id.query();
     assert!(q.flags().contains(glib::SignalFlags::ACTION));
@@ -278,6 +286,12 @@ fn action_signals() {
     assert_eq!(s.unwrap().name(), "ebu-r128");
     assert!(e
         .emit_by_name::<Option<gst::Structure>>("get-preset-values", &[&"custom"])
+        .is_none());
+    let s = e
+        .emit_by_name::<Option<gst::Structure>>("get-preset-values-for-bands", &[&"speech", &2u32]);
+    assert_eq!(s.unwrap().name(), "speech");
+    assert!(e
+        .emit_by_name::<Option<gst::Structure>>("get-preset-values-for-bands", &[&"custom", &2u32])
         .is_none());
     e.emit_by_name::<()>("reset", &[]);
 }

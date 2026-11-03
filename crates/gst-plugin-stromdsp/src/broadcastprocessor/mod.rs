@@ -96,6 +96,12 @@
 //!   (same names and types as the properties: `gfloat` and `gboolean`;
 //!   `crossover-frequencies`, which only mirrors the individual crossovers,
 //!   is not included). Returns `NULL` for `custom` or an unknown nick.
+//! - `get-preset-values-for-bands(nick: gchararray, num_bands: guint) ->
+//!   GstStructure`: the same structure, but for `num_bands` bands instead of
+//!   the current `num-bands` (band settings and crossovers depend on the
+//!   band count), so a host can preview a preset at another band count. It
+//!   changes nothing on the element. Returns `NULL` for `custom`, an unknown
+//!   nick, or `num_bands` outside 1 … 5.
 //! - `reset()`: restarts the output integrated loudness
 //!   (`output-integrated` in the meter message).
 //!

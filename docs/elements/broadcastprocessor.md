@@ -153,6 +153,12 @@ still holds.
   structure named after the preset, with one field per property the preset
   sets, for the current `num-bands`. It returns NULL for `custom` or an
   unknown nick.
+- **`get-preset-values-for-bands(gchararray nick, guint num_bands) -> GstStructure`:**
+  the same structure, with the same fields, for `num_bands` bands instead of
+  the current `num-bands`: band settings and crossovers follow that band
+  count. Use it to preview a preset at another band count; it changes
+  nothing on the element. It returns NULL for `custom`, an unknown nick, or
+  `num_bands` outside 1–5.
 - **`reset()`:** restarts the output integrated loudness.
 
 ## Meter message
