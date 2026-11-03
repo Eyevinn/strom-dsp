@@ -1,0 +1,52 @@
+//! `strom-dsp`: a small clean-room audio DSP library.
+//!
+//! Four processors, all working in place on interleaved `f32` frames:
+//!
+//! - [`Gate`]: downward noise gate with hysteresis and hold.
+//! - [`Compressor`]: feed-forward downward compressor with soft knee.
+//! - [`Equalizer`]: up to 8 RBJ-cookbook biquad bands in series.
+//! - [`Limiter`]: lookahead sample-peak limiter.
+//!
+//! # Usage contract (shared by every processor)
+//!
+//! 1. Construct with `new()` (cheap, unconfigured: `process` is a no-op passthrough).
+//! 2. Call [`Processor::configure`] with sample rate and channel count. This is the
+//!    only place that allocates.
+//! 3. Call `set_params(&Params)` whenever parameters change. Never allocates;
+//!    safe to call between any two `process` calls. Out-of-range values are clamped.
+//! 4. Call [`Processor::process`] on interleaved buffers whose length is a multiple
+//!    of the channel count. Real-time safe: no allocation, locking, logging or I/O.
+//! 5. Call [`Processor::reset`] on flush/discontinuity.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod compressor;
+pub mod equalizer;
+pub mod gate;
+pub mod limiter;
+pub mod util;
+
+pub use compressor::{Compressor, CompressorParams};
+pub use equalizer::{BandParams, BandType, Equalizer, EqualizerParams, MAX_BANDS};
+pub use gate::{Gate, GateParams};
+pub use limiter::{Limiter, LimiterParams, MAX_LOOKAHEAD_MS};
+
+/// Common interface of all processors.
+pub trait Processor {
+    /// Set sample rate (Hz, 8 000 … 192 000 supported) and channel count (≥ 1).
+    /// Allocates all internal buffers and resets state.
+    fn configure(&mut self, sample_rate: f32, channels: usize);
+
+    /// Process interleaved frames in place. `samples.len()` must be a multiple
+    /// of the configured channel count. A no-op if not configured.
+    fn process(&mut self, samples: &mut [f32]);
+
+    /// Clear all signal-dependent state (filters, envelopes, delay lines).
+    fn reset(&mut self);
+
+    /// Processing latency in frames (non-zero only for the limiter).
+    fn latency_frames(&self) -> usize {
+        0
+    }
+}

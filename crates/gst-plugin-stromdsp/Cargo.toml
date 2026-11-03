@@ -1,0 +1,26 @@
+[package]
+name = "gst-plugin-stromdsp"
+description = "GStreamer elements (gate, compressor, equalizer, limiter) built on strom-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gststromdsp"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+strom-dsp.workspace = true
+gst = { package = "gstreamer", version = "0.25", features = ["v1_22"] }
+gst-base = { package = "gstreamer-base", version = "0.25", features = ["v1_22"] }
+gst-audio = { package = "gstreamer-audio", version = "0.25", features = ["v1_22"] }
+
+[dev-dependencies]
+gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_22"] }
+
+[build-dependencies]
+gst-plugin-version-helper = "0.8"

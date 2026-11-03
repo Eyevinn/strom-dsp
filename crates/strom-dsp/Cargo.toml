@@ -1,0 +1,19 @@
+[package]
+name = "strom-dsp"
+description = "Clean-room real-time audio DSP: gate, compressor, parametric EQ, lookahead limiter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "strip"
+harness = false

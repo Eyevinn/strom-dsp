@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/strom-dsp", "crates/gst-plugin-stromdsp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Eyevinn Technology"]
+repository = "https://github.com/Eyevinn/strom-dsp"
+rust-version = "1.83"
+
+[workspace.dependencies]
+strom-dsp = { path = "crates/strom-dsp" }
+
+[profile.release]
+debug = 1
+
+[profile.bench]
+debug = 1
