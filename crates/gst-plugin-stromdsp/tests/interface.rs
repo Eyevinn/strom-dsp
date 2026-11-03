@@ -110,7 +110,7 @@ const GST_FLAGS: [glib::ParamFlags; 4] = [
     gst::PARAM_FLAG_MUTABLE_PLAYING,
 ];
 
-/// Properties added by phase 1b spec §(additive only). These are
+/// Properties added by the phase 1b spec (additive only). These are
 /// the only extra properties allowed on a phase 1 element.
 fn phase1b_additions(factory: &str) -> &'static [&'static str] {
     match factory {
