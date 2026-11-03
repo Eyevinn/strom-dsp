@@ -2,8 +2,8 @@
 //! every property's name, GLib type, range, default and flags (readable,
 //! writable, controllable, mutable in PLAYING), that no other own properties
 //! exist, read-back of in-range values, the `range-mode` enum, the element
-//! metadata and the pad templates. This is the contract documented in the
-//! README; the test fails if anything drifts from it.
+//! metadata and the pad templates. This is the contract documented in
+//! `docs/elements/ducker.md`; the test fails if anything drifts from it.
 
 mod util;
 

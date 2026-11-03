@@ -50,7 +50,8 @@ fn all_props(e: &gst::Element) -> Vec<String> {
         .collect()
 }
 
-/// The documented preset tables (README / `strom_dsp::presets`), written out
+/// The documented preset tables (`docs/elements/broadcastprocessor.md` /
+/// `strom_dsp::presets`), written out
 /// independently of the code: (target, ceiling, agc-gate, band threshold,
 /// band ratio, limiter-release).
 fn table(nick: &str) -> (f32, f32, f32, f32, f32, f32) {
@@ -92,7 +93,7 @@ fn table_times(n: u32) -> [(f32, f32); 5] {
     std::array::from_fn(|k| active.get(k).copied().unwrap_or(five[k]))
 }
 
-/// The value the README says `nick` sets for property `name` at `n` bands.
+/// The value `docs/elements/broadcastprocessor.md` says `nick` sets for property `name` at `n` bands.
 fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
     let (target, ceiling, gate, threshold, ratio, lim_release) = table(nick);
     let f = |v: f32| v.to_value();
@@ -218,7 +219,7 @@ fn presets_set_exactly_the_documented_values() {
                 let doc = documented(nick, n, name);
                 assert!(
                     values_equal(&doc, &prop),
-                    "{ctx}: README {doc:?} vs {prop:?}"
+                    "{ctx}: docs/elements/broadcastprocessor.md {doc:?} vs {prop:?}"
                 );
             }
         }
