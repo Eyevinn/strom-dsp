@@ -383,6 +383,41 @@ ripple), within the +0.1 dB requirement.
 
 No commercial-processor material and no patent-driven method was used.
 
+### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`, phase 2)
+
+**The chain** is our own composition of existing parts, not a new algorithm.
+The order follows the phase 2 spec §0/§2.6: input gain → wideband AGC
+(`agc.rs`) → multiband compressor (`multiband.rs`) → true-peak limiter
+(`truepeak.rs`).
+
+Own choices:
+- **Input gain:** glides in dB through two cascaded 5 ms one-poles.
+- **Bypass:** each stage's bypass, and the whole-chain `enabled`, is a 10 ms
+  raised-cosine crossfade between the stage output and its input delayed by
+  exactly the stage's latency. Latency therefore never depends on bypass
+  state, and a settled bypass is bit-exact.
+- **Bypassed stages keep running.**
+- **Meters:**
+  - momentary and short-term loudness from the BS.1770 `LoudnessDetector`;
+  - integrated loudness from the `ebur128`-based `LoudnessMeter` in histogram
+    mode;
+  - true peaks from the 4× `Oversampler`.
+
+**Presets** are our own.
+- **Targets and ceilings** come from EBU R 128 (−23 LUFS / −1 dBTP), ATSC A/85
+  (−24 LKFS / −2 dBTP), the AES TD1004/TD1008 streaming range (−16 LUFS) and
+  the spec's speech values.
+- **Dynamics settings** are textbook: low ratios, band thresholds relative to
+  the target, and attack/release of at least one or ten periods of the
+  band's lowest frequency (Giannoulis et al. 2012; Zölzer, *DAFX*).
+- **Crossover choices:** a 200 Hz bass split, and 3 kHz at the ear's most
+  sensitive region (ISO 226).
+
+The values were checked with the spec's acceptance test (±1 LU of target,
+true peak ≤ ceiling + 0.1 dB, measured with `ebur128`).
+
+No commercial broadcast-processor manuals, presets or tuning were used.
+
 ### Multiband compressor (`src/multiband.rs`, phase 2)
 
 This is our own composition of existing parts, not a new algorithm. The
