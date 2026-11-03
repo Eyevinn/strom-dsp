@@ -25,9 +25,13 @@ pub mod biquad;
 pub mod compressor;
 pub mod dynamics;
 pub mod equalizer;
+pub mod filter;
 pub mod gate;
 pub mod limiter;
+pub mod meter;
+pub mod oversample;
 pub mod simd;
+pub mod stft;
 pub mod util;
 
 mod lanes;
