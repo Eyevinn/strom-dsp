@@ -27,6 +27,7 @@ pub mod dynamics;
 pub mod equalizer;
 pub mod gate;
 pub mod limiter;
+pub mod simd;
 pub mod util;
 
 mod lanes;
