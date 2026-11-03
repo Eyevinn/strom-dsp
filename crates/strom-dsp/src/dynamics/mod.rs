@@ -32,6 +32,7 @@ mod gate_state;
 mod ramp;
 mod ring;
 mod smoother;
+pub(crate) mod vmath;
 
 pub use gain_computer::{GainComputer, MIN_KNEE};
 pub use gate_state::GateStateMachine;
