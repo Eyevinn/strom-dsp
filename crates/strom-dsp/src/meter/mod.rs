@@ -31,6 +31,7 @@ pub use kweighting::{
     AnalogBiquad, LoudnessDetector, BS1770_PRE_FILTER_48K, BS1770_RLB_48K, DETECTOR_RATE_RANGE,
     LOUDNESS_OFFSET_DB, MOMENTARY_SUB_BLOCKS, SHORT_TERM_SUB_BLOCKS, SILENCE_LUFS, SUB_BLOCK_MS,
 };
+pub(crate) use kweighting::{History, WindowSum};
 
 pub use band::{BandCorrelation, CORRELATION_BANDS, DEFAULT_BAND_SPLITS_HZ};
 pub use correlation::{CorrelationMeter, DEFAULT_CORRELATION_MS};

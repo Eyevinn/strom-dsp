@@ -306,6 +306,10 @@ impl History {
         self.next = 0;
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.values.len()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.values.fill(0.0);
         self.next = 0;
@@ -362,6 +366,12 @@ impl WindowSum {
 
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Change the window length and recompute the sum (O(len)).
+    pub(crate) fn set_len(&mut self, len: usize, h: &History) {
+        self.len = len.min(h.capacity().saturating_sub(1));
+        self.resum(h);
     }
 
     pub(crate) fn resum(&mut self, h: &History) {
