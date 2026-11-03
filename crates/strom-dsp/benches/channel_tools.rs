@@ -7,7 +7,7 @@
 //! - `delay_8ch_offsets`: 8 channels, 20 ms plus a different offset per channel;
 //! - `delay_stereo_xfade`: a delay change every buffer, so it always crossfades.
 //!
-//! Stereo tools (`bench_stereo`):
+//! Stereo processor (`bench_stereo`):
 //! - `stereo_default`: defaults (identity, buffer untouched);
 //! - `stereo_swap_invert`: swap + invert-left (bit-exact routing path);
 //! - `stereo_width_balance`: width 1.4, balance 0.3 (general matrix path);
@@ -17,7 +17,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use strom_dsp::delay::{Delay, DelayParams};
-use strom_dsp::stereo::{StereoMode, StereoParams, StereoTools};
+use strom_dsp::stereo::{Stereo, StereoMode, StereoParams};
 use strom_dsp::Processor;
 
 const FS: f32 = 48_000.0;
@@ -79,7 +79,7 @@ fn bench_delay(c: &mut Criterion) {
 }
 
 fn bench_stereo(c: &mut Criterion) {
-    let mut g = c.benchmark_group("stereotools");
+    let mut g = c.benchmark_group("stereo");
     g.throughput(Throughput::Elements(FRAMES as u64));
     let cases: [(&str, StereoParams, bool); 4] = [
         ("stereo_default", StereoParams::default(), false),
@@ -112,7 +112,7 @@ fn bench_stereo(c: &mut Criterion) {
     ];
     for (name, mut p, moving) in cases {
         let input = noise(FRAMES * 100, 2);
-        let mut s = StereoTools::new();
+        let mut s = Stereo::new();
         s.set_params(&p);
         s.configure(FS, 2);
         let mut buf = vec![0.0f32; FRAMES * 2];

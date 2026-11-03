@@ -1,6 +1,6 @@
-//! Stereo tools: mode matrix, polarity, constant-power balance, M/S width.
+//! Stereo processor: mode matrix, polarity, constant-power balance, M/S width.
 //!
-//! [`StereoTools`] processes two interleaved channels (L, R). Every setting is
+//! [`Stereo`] processes two interleaved channels (L, R). Every setting is
 //! linear, so the whole processor is one 2×2 matrix `out = T · in`, built in
 //! this order (see [`matrix_for`]):
 //!
@@ -117,7 +117,7 @@ impl MonoLaw {
     }
 }
 
-/// Parameters of [`StereoTools`]. The defaults are an exact passthrough.
+/// Parameters of [`Stereo`]. The defaults are an exact passthrough.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StereoParams {
     /// `false`: ramp to the identity (then bit-exact passthrough).
@@ -283,7 +283,7 @@ fn apply_general(frame: &mut [f32], m: &Matrix) {
 
 /// Stereo matrix processor (see the module documentation).
 #[derive(Debug, Clone)]
-pub struct StereoTools {
+pub struct Stereo {
     params: StereoParams,
     sample_rate: f32,
     channels: usize,
@@ -299,7 +299,7 @@ pub struct StereoTools {
     fresh: bool,
 }
 
-impl Default for StereoTools {
+impl Default for Stereo {
     fn default() -> Self {
         Self {
             params: StereoParams::default(),
@@ -316,7 +316,7 @@ impl Default for StereoTools {
     }
 }
 
-impl StereoTools {
+impl Stereo {
     /// Unconfigured processor (process is a no-op until [`Processor::configure`]).
     pub fn new() -> Self {
         Self::default()
@@ -369,7 +369,7 @@ impl StereoTools {
     }
 }
 
-impl Processor for StereoTools {
+impl Processor for Stereo {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
         self.sample_rate = sample_rate;
         self.channels = channels;

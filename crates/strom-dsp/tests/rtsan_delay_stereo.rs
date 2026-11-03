@@ -1,4 +1,4 @@
-//! RealtimeSanitizer (RTSan) checks of the delay and stereo tools, modelled
+//! RealtimeSanitizer (RTSan) checks of the delay and stereo processors, modelled
 //! on `tests/rtsan.rs`.
 //!
 //! Both processors run through many buffers of varying size while their
@@ -17,7 +17,7 @@
 
 use rtsan_standalone::ScopedSanitizeRealtime;
 use strom_dsp::delay::{Delay, DelayParams, MAX_OFFSET_CHANNELS};
-use strom_dsp::stereo::{MonoLaw, StereoMode, StereoParams, StereoTools};
+use strom_dsp::stereo::{MonoLaw, Stereo, StereoMode, StereoParams};
 use strom_dsp::Processor;
 
 const BUFFERS: usize = 600;
@@ -99,7 +99,7 @@ fn delay_is_realtime_safe() {
 }
 
 #[test]
-fn stereo_tools_are_realtime_safe() {
+fn stereo_is_realtime_safe() {
     let modes = [
         StereoMode::Stereo,
         StereoMode::Mono,
@@ -110,7 +110,7 @@ fn stereo_tools_are_realtime_safe() {
         StereoMode::MsDecode,
     ];
     for rate in [48_000.0f32, 44_100.0, 192_000.0] {
-        let mut s = StereoTools::new();
+        let mut s = Stereo::new();
         drive(rate, 2, &mut s, |s, rng, i| {
             let p = StereoParams {
                 enabled: i % 13 != 0,

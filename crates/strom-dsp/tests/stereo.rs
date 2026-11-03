@@ -1,4 +1,4 @@
-//! Stereo tools (`strom_dsp::stereo`): every mode's matrix exactly, bit-exact
+//! Stereo processor (`strom_dsp::stereo`): every mode's matrix exactly, bit-exact
 //! routing where it is a pure copy/swap/invert, constant-power balance, width
 //! 1 = passthrough, the M/S round trip, the smoothing bound for parameter
 //! changes and mode switches, and no allocation after setup.
@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::f64::consts::{FRAC_1_SQRT_2, SQRT_2};
 
 use strom_dsp::stereo::{
-    balance_gains, matrix_for, ramp_frames, Matrix, MonoLaw, StereoMode, StereoParams, StereoTools,
+    balance_gains, matrix_for, ramp_frames, Matrix, MonoLaw, Stereo, StereoMode, StereoParams,
 };
 use strom_dsp::Processor;
 
@@ -84,7 +84,7 @@ fn special_signal() -> Vec<f32> {
 }
 
 fn processed(p: &StereoParams, input: &[f32]) -> Vec<f32> {
-    let mut s = StereoTools::new();
+    let mut s = Stereo::new();
     s.set_params(p);
     s.configure(FS, 2);
     let mut out = input.to_vec();
@@ -418,7 +418,7 @@ fn changes_are_smoothed_within_bound() {
     let a_in = 0.8f64;
     for from in &settings {
         for to in &settings {
-            let mut s = StereoTools::new();
+            let mut s = Stereo::new();
             s.set_params(from);
             s.configure(FS, 2);
             // Settle on `from` with the first half buffer.
@@ -458,7 +458,7 @@ fn changes_are_smoothed_within_bound() {
 
 #[test]
 fn change_during_ramp_restarts_from_reached_matrix() {
-    let mut s = StereoTools::new();
+    let mut s = Stereo::new();
     s.configure(FS, 2);
     let mut buf = noise(100, 1);
     s.process(&mut buf);
@@ -486,7 +486,7 @@ fn change_during_ramp_restarts_from_reached_matrix() {
 
 #[test]
 fn robust_inputs_parameters_and_channel_counts() {
-    let mut s = StereoTools::new();
+    let mut s = Stereo::new();
     s.configure(FS, 2);
     let mut x = noise(10_000, 77);
     for v in x.iter_mut() {
@@ -517,7 +517,7 @@ fn robust_inputs_parameters_and_channel_counts() {
     }
     // Other channel counts: no-op.
     for ch in [1usize, 3, 8] {
-        let mut t = StereoTools::new();
+        let mut t = Stereo::new();
         t.set_params(&with_mode(StereoMode::Swap));
         t.configure(FS, ch);
         let mut b = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -526,7 +526,7 @@ fn robust_inputs_parameters_and_channel_counts() {
         assert_eq!(b, orig);
     }
     // Odd trailing sample left alone.
-    let mut t = StereoTools::new();
+    let mut t = Stereo::new();
     t.set_params(&with_mode(StereoMode::Swap));
     t.configure(FS, 2);
     let mut b = [1.0f32, 2.0, 3.0];
@@ -536,7 +536,7 @@ fn robust_inputs_parameters_and_channel_counts() {
 
 #[test]
 fn no_allocation_after_configure() {
-    let mut s = StereoTools::new();
+    let mut s = Stereo::new();
     s.configure(FS, 2);
     let mut buf = noise(1024, 4);
     let before = alloc_count();
