@@ -52,3 +52,19 @@ required-features = ["gungraun"]
 [[test]]
 name = "rtsan"
 required-features = ["rtsan"]
+
+[[bench]]
+name = "filters"
+harness = false
+
+[[bench]]
+name = "sampling"
+harness = false
+
+[[bench]]
+name = "meter"
+harness = false
+
+[[bench]]
+name = "sidechain"
+harness = false
