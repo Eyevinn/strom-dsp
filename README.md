@@ -100,6 +100,27 @@ expansion:
 - Ratio 1 means unity (apart from makeup).
 - `knee` reads back exactly as written.
 
+**Additional properties (phase 1b).** All three are controllable and mutable
+in PLAYING.
+
+| Property | Type | Unit | Range | Default |
+|---|---|---|---|---|
+| `detector` | enum `StromDspCompressorDetector` | `peak` (0), `rms` (1) | | `peak` |
+| `rms-window` | float | ms | 1 … 100 | 10 |
+| `auto-makeup` | bool | | | `false` |
+
+- **`detector`:** `peak` follows the linked sample peak. `rms` averages power
+  over `rms-window`, the classic choice for programme and speech. Both read a
+  steady sine at its peak level, so `threshold` means the same in both modes;
+  in `rms` mode, noise reads its RMS + 3 dB.
+- **`auto-makeup`:** adds the static gain reduction at −18 dBFS (sine peak,
+  the EBU R68 alignment level) as makeup. The output level then stays roughly
+  constant while threshold, ratio or knee change. `makeup-gain` applies on
+  top, and changes glide without clicks.
+- **Detector hold:** the detector holds its level for min(20 ms, release)
+  after the level falls, so bass is not distorted at fast attack and release
+  times. The release starts after that hold.
+
 ### `stromdsp-equalizer`: parametric EQ, up to 8 biquad bands
 
 | Property | Type | Unit | Range | Default |

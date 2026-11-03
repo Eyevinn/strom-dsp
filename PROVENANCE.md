@@ -83,6 +83,36 @@ Analysis", JAES 60(6), 2012.
   with a 10 ms one-pole; values snap on the first block after
   `configure`/`reset`. States are f64 and denormal-flushed.
 
+**Changes after listening tests (phase 1b):**
+
+- **Detector peak hold (bass distortion fix).** At fast attack/release (1 ms /
+  50 ms, 10:1) the per-frame peak detector followed every half-cycle. The gain
+  rippled with the waveform: 3.0 % THD at 50 Hz, 0.77 % at 200 Hz.
+  - The detector level is now the sliding maximum of the linked peak over
+    H = min(20 ms, release) frames. It uses the van Herk / Gil–Werman segment
+    algorithm (`SegmentedMin` on −p; references as for the limiter).
+  - Reason: Giannoulis et al. 2012 on fast-time-constant artefacts. The
+    detector must not follow individual cycles, so its release must be long
+    compared with the period of the lowest frequency of interest.
+  - Own choices: a window, not a slower exponential release, so attack stays
+    instant. H is tied to the release.
+  - Result: THD below 0.00001 % from 50 to 200 Hz. The release starts up to
+    20 ms later.
+  - Guard test: `tests/compressor_thd.rs`, which computes THD by DFT over an
+    integer number of cycles.
+- **Detector mode `peak` | `rms`.** The `rms` mode is a one-pole mean square
+  over `rms-window` (Zölzer, *DAFX*, RMS level measurement), the gate's
+  `MeanSquareEnvelope`.
+  - Own choices: sine calibration ×2 (+3.01 dB) in both modes, so a threshold
+    means the same in each, and the same as the gate; the peak hold comes after
+    the mean square; switching modes seeds the new detector from the held level.
+- **Auto-makeup.** Makeup equals the static gain reduction at a reference level
+  (Giannoulis et al. 2012, automatic make-up gain from the gain computer).
+  - Own choice: the reference is −18 dB sine-calibrated (the EBU R68 alignment
+    level) instead of 0 dBFS. It glides with the existing 10 ms makeup smoother.
+  - Test: integrated loudness stays within ±1.5 LU over thresholds −30 … −10 dB
+    and ratios 2 … 10, measured with `meter::LoudnessMeter`.
+
 
 ### Equalizer (`crates/strom-dsp/src/equalizer.rs`)
 
