@@ -65,6 +65,49 @@ impl DelayLine {
         let i = (self.pos.wrapping_sub(delay) & self.mask) * self.channels;
         &self.buf[i..i + self.channels]
     }
+
+    /// Append several interleaved frames (`frames.len()` a multiple of the
+    /// channel count), equivalent to calling [`write`](Self::write) per frame
+    /// but with bulk copies.
+    #[inline]
+    pub fn write_frames(&mut self, frames: &[f32]) {
+        let ch = self.channels;
+        if ch == 0 {
+            return;
+        }
+        let cap = self.mask + 1;
+        let mut src = &frames[..frames.len() / ch * ch];
+        while !src.is_empty() {
+            let start = (self.pos + 1) & self.mask;
+            let n = (src.len() / ch).min(cap - start);
+            let (head, tail) = src.split_at(n * ch);
+            self.buf[start * ch..(start + n) * ch].copy_from_slice(head);
+            self.pos = (self.pos + n) & self.mask;
+            src = tail;
+        }
+    }
+
+    /// Copy `out.len() / channels` consecutive frames into `out`, oldest
+    /// first, ending with the frame [`read`](Self::read)`(delay)` returns.
+    /// `delay + frames − 1` must not exceed [`max_delay`](Self::max_delay).
+    #[inline]
+    pub fn read_frames(&self, delay: usize, out: &mut [f32]) {
+        let ch = self.channels;
+        if ch == 0 {
+            return;
+        }
+        let cap = self.mask + 1;
+        let frames = out.len() / ch;
+        let mut dst = &mut out[..frames * ch];
+        let mut idx = self.pos.wrapping_sub(delay + frames).wrapping_add(1) & self.mask;
+        while !dst.is_empty() {
+            let n = (dst.len() / ch).min(cap - idx);
+            let (head, tail) = dst.split_at_mut(n * ch);
+            head.copy_from_slice(&self.buf[idx * ch..(idx + n) * ch]);
+            idx = (idx + n) & self.mask;
+            dst = tail;
+        }
+    }
 }
 
 /// Sliding-window minimum over time-stamped values, O(1) amortised per push.
@@ -112,7 +155,7 @@ impl SlidingMin {
     }
 
     /// Add value `v` at time `t` (`t` not older than earlier pushes).
-    #[inline]
+    #[inline(always)]
     pub fn push(&mut self, t: u64, v: f64) {
         if self.ring.is_empty() {
             return;
@@ -130,7 +173,7 @@ impl SlidingMin {
     }
 
     /// Drop entries with time stamp `< oldest`.
-    #[inline]
+    #[inline(always)]
     pub fn expire(&mut self, oldest: u64) {
         while self.len > 0 && self.ring[self.head].0 < oldest {
             self.head = (self.head + 1) & self.mask;
@@ -139,7 +182,7 @@ impl SlidingMin {
     }
 
     /// Minimum of the live entries, or `None` if empty.
-    #[inline]
+    #[inline(always)]
     pub fn min(&self) -> Option<f64> {
         if self.len > 0 {
             Some(self.ring[self.head].1)
@@ -167,6 +210,41 @@ mod tests {
         }
         d.clear();
         assert_eq!(d.read(0), &[0.0, 0.0][..]);
+    }
+
+    #[test]
+    fn delay_line_block_access_matches_per_frame() {
+        for ch in [1usize, 2, 3] {
+            let mut a = DelayLine::default();
+            let mut b = DelayLine::default();
+            a.allocate(20, ch);
+            b.allocate(20, ch);
+            let cap = a.max_delay() + 1;
+            let mut t = 0.0f32;
+            for (k, n) in [1usize, 5, 7, 31, 32, 3, 40, 2, 64].into_iter().enumerate() {
+                let frames: Vec<f32> = (0..n * ch)
+                    .map(|_| {
+                        t += 1.0;
+                        t
+                    })
+                    .collect();
+                a.write_frames(&frames);
+                for f in frames.chunks_exact(ch) {
+                    b.write(f);
+                }
+                for d in 0..cap {
+                    assert_eq!(a.read(d), b.read(d), "ch={ch} k={k} d={d}");
+                }
+                let m = n.min(cap);
+                for delay in 0..=cap - m {
+                    let mut out = vec![0.0; m * ch];
+                    a.read_frames(delay, &mut out);
+                    for (i, f) in out.chunks_exact(ch).enumerate() {
+                        assert_eq!(f, b.read(delay + m - 1 - i), "ch={ch} delay={delay}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

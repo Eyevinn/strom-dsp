@@ -203,6 +203,15 @@ fn bench_processors(c: &mut Criterion) {
         let mut p = make(Limiter::new(), 2, |g| g.set_params(&limiter_params()));
         Box::new(move |buf| p.process(buf))
     });
+    run(c, "limiter_stereo_hot", 2, || {
+        let mut p = make(Limiter::new(), 2, |g| g.set_params(&limiter_params()));
+        Box::new(move |buf| {
+            for x in buf.iter_mut() {
+                *x *= 10.0;
+            }
+            p.process(buf)
+        })
+    });
 }
 
 fn bench_eq(c: &mut Criterion) {
