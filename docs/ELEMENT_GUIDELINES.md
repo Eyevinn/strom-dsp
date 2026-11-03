@@ -6,11 +6,11 @@ These are rules, not a description of the code. The code is the source of truth 
 
 strom-dsp elements are **real-time** processors. An operator changes them while audio is live on air. Every rule below follows from that.
 
-## Bypass
+## Bypass (true bypass)
 - Every processing element has an `enabled` property, mutable in PLAYING.
 - Toggling `enabled` **fades** between the processed and the dry signal over a few milliseconds (a raised-cosine or equal-gain crossfade). It never switches hard.
-- The disabled steady state is bit-exact passthrough, once the fade has finished.
-- Bypass does not change latency. An element with latency (lookahead, oversampling, STFT) delays the dry path by the same amount, so toggling never shifts the audio in time.
+- Once the fade has finished, the output is the input sample for sample, delayed by exactly the element's reported latency. For an element without latency that means bit-exact with no delay.
+- Toggling `enabled` never changes the reported latency and never shifts the audio in time: an element with latency (lookahead, oversampling, STFT) delays the dry path by the same amount.
 
 ## Live parameter changes
 - Every property that is mutable in PLAYING changes **without an audible click**, from any value to any other value, including extremes, while signal flows.
@@ -21,9 +21,15 @@ strom-dsp elements are **real-time** processors. An operator changes them while 
 - The processing path does not allocate, lock, log, do I/O or format strings. Everything is allocated when the caps or structural properties are set.
 - No NaN, Inf or denormal slow paths at any property value within its range, at any supported sample rate.
 
-## Formats and latency
+## Formats
 - Elements accept any sample rate and channel count their processing supports, and say in the pad template and docs what they don't.
-- Latency is reported in the `LATENCY` query and stays constant for a given configuration. When a property changes the latency, the element posts a `Latency` message.
+
+## Latency
+- An element that doesn't need latency adds none: no internal buffering, and it leaves the `LATENCY` query unchanged.
+- An element that needs latency (lookahead, oversampling filters, STFT) reports all of it in the `LATENCY` query, keeps it constant for a given configuration, and posts a `Latency` message when a property change alters it.
+- Latency is kept to what the processing needs. Where it is a trade-off (e.g. lookahead), it is a property with a documented default.
+- The README lists each element's latency, or its formula.
+- An intentional content delay (e.g. `stromdsp-delay`) is not latency: it is not reported, and timestamps are unchanged.
 
 ## Defaults
 - Every property has a default that is sensible on its own for live broadcast use (speech and programme audio). Each default and its reason are documented in the README.
@@ -31,7 +37,8 @@ strom-dsp elements are **real-time** processors. An operator changes them while 
 ## Tests
 Each rule has a test that fails if the rule is broken:
 - **Knob test:** every PLAYING-mutable property of every element jumps between extremes and typical values while the processor is active, checked against a documented click bound.
-- **Bypass test:** toggling `enabled` fades, is click-free, ends bit-exact, and doesn't change latency.
+- **Bypass test:** toggling `enabled` fades and is click-free; after the fade, the output equals the input delayed by exactly the reported latency, sample for sample.
+- **Latency test:** an impulse comes out delayed by exactly the reported latency, with `enabled` true and false, and the `LATENCY` query matches. Zero-latency elements report and add zero.
 - **Real-time safety:** a counting-allocator test, and RealtimeSanitizer where available, over the processing path.
 - **Interface test:** names, types, ranges, defaults and mutability flags of every property.
 
