@@ -7,8 +7,10 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
+use strom_dsp::gate::{GateMode, DEFAULT_EXPANDER_RATIO, EXPANDER_RATIO_RANGE};
 use strom_dsp::{Gate, GateParams};
 
+use super::StromDspGateMode;
 use crate::common::{self, EngineSlot, SharedSettings};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -23,6 +25,10 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 struct Settings {
     enabled: bool,
     params: GateParams,
+    /// Phase 1b: gate or expander.
+    mode: StromDspGateMode,
+    /// Phase 1b: expander ratio (1 … 20).
+    ratio: f32,
 }
 
 impl Default for Settings {
@@ -30,6 +36,8 @@ impl Default for Settings {
         Self {
             enabled: true,
             params: GateParams::default(),
+            mode: StromDspGateMode::Gate,
+            ratio: DEFAULT_EXPANDER_RATIO,
         }
     }
 }
@@ -42,6 +50,11 @@ pub struct StromDspGate {
 
 fn apply(dsp: &mut Gate, s: &Settings) {
     dsp.set_params(&s.params);
+    dsp.set_mode(match s.mode {
+        StromDspGateMode::Gate => GateMode::Gate,
+        StromDspGateMode::Expander => GateMode::Expander,
+    });
+    dsp.set_expander_ratio(s.ratio);
 }
 
 #[glib::object_subclass]
@@ -110,6 +123,27 @@ impl ObjectImpl for StromDspGate {
                     0.0,
                     d.reduction_db,
                 ),
+                // Phase 1b additions (STROM_DSP_PHASE1B_SPEC.md 3.3).
+                glib::ParamSpecEnum::builder_with_default("mode", StromDspGateMode::Gate)
+                    .nick("Mode")
+                    .blurb(
+                        "gate: fixed attenuation 'reduction' when closed; expander: \
+                         downward expansion below open-threshold with slope 'ratio', \
+                         floored at 'reduction'",
+                    )
+                    .readwrite()
+                    .controllable()
+                    .mutable_playing()
+                    .build(),
+                common::float_prop(
+                    "ratio",
+                    "Ratio",
+                    "Expansion ratio below open-threshold in expander mode (2 = 1:2); \
+                     ignored in gate mode",
+                    EXPANDER_RATIO_RANGE.0,
+                    EXPANDER_RATIO_RANGE.1,
+                    DEFAULT_EXPANDER_RATIO,
+                ),
             ]
         });
         PROPS.as_ref()
@@ -134,6 +168,12 @@ impl ObjectImpl for StromDspGate {
             gst::debug!(CAT, imp = self, "enabled: {was} -> {enabled}");
             return;
         }
+        if name == "mode" {
+            let mode: StromDspGateMode = value.get().expect("type checked upstream");
+            self.settings.update(|s| s.mode = mode);
+            gst::debug!(CAT, imp = self, "mode set to {mode:?}");
+            return;
+        }
         let v: f32 = value.get().expect("type checked upstream");
         self.settings.update(|s| {
             let p = &mut s.params;
@@ -144,6 +184,7 @@ impl ObjectImpl for StromDspGate {
                 "hold" => p.hold_ms = v,
                 "release" => p.release_ms = v,
                 "reduction" => p.reduction_db = v,
+                "ratio" => s.ratio = v,
                 _ => unreachable!("unknown property {name}"),
             }
         });
@@ -161,6 +202,8 @@ impl ObjectImpl for StromDspGate {
             "hold" => p.hold_ms.to_value(),
             "release" => p.release_ms.to_value(),
             "reduction" => p.reduction_db.to_value(),
+            "mode" => s.mode.to_value(),
+            "ratio" => s.ratio.to_value(),
             name => unreachable!("unknown property {name}"),
         }
     }
@@ -174,7 +217,8 @@ impl ElementImpl for StromDspGate {
             gst::subclass::ElementMetadata::new(
                 "strom-dsp noise gate",
                 "Filter/Effect/Audio",
-                "Downward noise gate with hysteresis, hold and linked channels. \
+                "Downward noise gate with hysteresis, hold and linked channels, \
+                 with an optional downward-expander mode (mode, ratio). \
                  enabled=false is a bit-exact passthrough.",
                 "Eyevinn Technology",
             )

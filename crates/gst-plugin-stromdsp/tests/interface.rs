@@ -110,6 +110,15 @@ const GST_FLAGS: [glib::ParamFlags; 4] = [
     gst::PARAM_FLAG_MUTABLE_PLAYING,
 ];
 
+/// Properties added by STROM_DSP_PHASE1B_SPEC.md (additive only). These are
+/// the only extra properties allowed on a phase 1 element.
+fn phase1b_additions(factory: &str) -> &'static [&'static str] {
+    match factory {
+        "stromdsp-gate" => &["mode", "ratio"],
+        _ => &[],
+    }
+}
+
 fn check_element(factory: &str, type_name: &str, spec: &[Prop]) {
     util::init();
     let element = gst::ElementFactory::make(factory).build().unwrap();
@@ -118,12 +127,14 @@ fn check_element(factory: &str, type_name: &str, spec: &[Prop]) {
     assert_eq!(f.metadata("klass"), Some("Filter/Effect/Audio"));
 
     // Exactly the spec's properties, apart from those inherited from
-    // GstObject/GstBaseTransform.
+    // GstObject/GstBaseTransform and the documented phase 1b additions
+    // (checked in full by `tests/interface_gate_1b.rs`).
     let own: Vec<String> = element
         .list_properties()
         .iter()
         .filter(|ps| ps.owner_type() == element.type_())
         .map(|ps| ps.name().to_string())
+        .filter(|name| !phase1b_additions(factory).contains(&name.as_str()))
         .collect();
     let mut own_sorted = own.clone();
     own_sorted.sort();
