@@ -1,6 +1,6 @@
 //! `stromdsp-gate`: noise gate element.
 //!
-//! Phase 1b adds two properties (STROM_DSP_PHASE1B_SPEC.md 3.3); every
+//! Phase 1b adds two properties (phase 1b spec §3.3); every
 //! phase 1 property, default and behaviour is unchanged:
 //!
 //! | Property | Type | Range | Default | Mutable |

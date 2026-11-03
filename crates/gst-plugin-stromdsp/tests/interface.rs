@@ -1,4 +1,4 @@
-//! Interface test: the drop-in contract of STROM_DSP_SPEC.md section 4.
+//! Interface test: the drop-in contract of phase 1 spec §4.
 //!
 //! The tables below are a verbatim transcription of section 4. Every property
 //! of every element is checked for name, GLib value type, range, default,
@@ -110,7 +110,7 @@ const GST_FLAGS: [glib::ParamFlags; 4] = [
     gst::PARAM_FLAG_MUTABLE_PLAYING,
 ];
 
-/// Properties added by STROM_DSP_PHASE1B_SPEC.md (additive only). These are
+/// Properties added by phase 1b spec §(additive only). These are
 /// the only extra properties allowed on a phase 1 element.
 fn phase1b_additions(factory: &str) -> &'static [&'static str] {
     match factory {

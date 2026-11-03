@@ -1,4 +1,4 @@
-//! Interface test of the phase 1b gate additions (STROM_DSP_PHASE1B_SPEC.md
+//! Interface test of the phase 1b gate additions (the phase 1b spec
 //! 3.3): `mode` (GLib enum `StromDspGateMode`, `gate` = 0 default,
 //! `expander` = 1) and `ratio` (Float, 1 … 20, default 2). Both are
 //! readable, writable, controllable and mutable in PLAYING. The phase 1
