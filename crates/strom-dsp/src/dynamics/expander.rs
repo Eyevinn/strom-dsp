@@ -69,11 +69,11 @@ use crate::dynamics::{AttackRelease, OnePole};
 pub const EXPANDER_SMOOTHING_MS: f64 = 10.0;
 
 /// Range of the expander threshold (dB, detector level).
-pub const EXPANDER_THRESHOLD_RANGE_DB: (f32, f32) = (-100.0, 0.0);
+pub const EXPANDER_THRESHOLD_RANGE_DB: (f32, f32) = (-80.0, 0.0);
 /// Range of the expander ratio (1 = off).
 pub const EXPANDER_RATIO_RANGE: (f32, f32) = (1.0, 10.0);
 /// Range of the floor: the largest attenuation (dB, ≥ 0).
-pub const EXPANDER_FLOOR_RANGE_DB: (f32, f32) = (0.0, 60.0);
+pub const EXPANDER_FLOOR_RANGE_DB: (f32, f32) = (0.0, 40.0);
 /// Range of the knee width (dB).
 pub const EXPANDER_KNEE_RANGE_DB: (f32, f32) = (0.0, 24.0);
 /// Range of the open time (ms).
@@ -131,13 +131,13 @@ impl ExpanderCurve {
 /// Parameters of the expander part of a gain computer. Units: dB, ms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExpanderParams {
-    /// Expander threshold (dB, −100 … 0), against the same detector level
+    /// Expander threshold (dB, −80 … 0), against the same detector level
     /// as the compressor threshold.
     pub threshold_db: f32,
     /// Ratio (1 … 10; 1 = off): 1 dB below the threshold gives `ratio` dB
     /// below it at the output.
     pub ratio: f32,
-    /// Largest attenuation (dB, 0 … 60).
+    /// Largest attenuation (dB, 0 … 40).
     pub floor_db: f32,
     /// Soft-knee width (dB, 0 … 24; 0 = hard knee).
     pub knee_db: f32,

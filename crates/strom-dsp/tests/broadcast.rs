@@ -229,18 +229,19 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
-    // Lookahead plus the true-peak detector delay (24 + 8 frames).
+    // The bass clipper's 3 ms lookahead, the limiter lookahead and the
+    // true-peak detector delay (24 + 8 frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        240 + 32
+        144 + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        221 + 32
+        132 + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        480 + 32
+        288 + 480 + 32
     );
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(

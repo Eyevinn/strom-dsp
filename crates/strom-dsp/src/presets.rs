@@ -27,7 +27,7 @@
 //! `docs/elements/<element>.md` ("Why these defaults"), and `PROVENANCE.md`
 //! repeat them.
 
-use crate::broadcast::{BroadcastParams, MAX_CROSSOVERS};
+use crate::broadcast::{BandExpanderParams, BroadcastParams, MAX_CROSSOVERS};
 use crate::compressor::CompressorDetector;
 use crate::gate::GateMode;
 use crate::multiband::{MultibandBandParams, MAX_BANDS};
@@ -152,6 +152,9 @@ impl LimiterParams {
 /// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
 /// | band `makeup_db` | 0 dB | the AGC sets the level; makeup would only move the loudness away from the target |
 /// | band `knee_db` | 6 dB | soft knee, compression sets in gradually (Giannoulis et al. 2012). Not an element property: fixed for every preset |
+/// | `expander_hold_ms` | 100 ms | bridges the gaps inside words (< ~100 ms), so the expander does not chop word endings |
+/// | `bass_clipper_enabled` | true | catches the bass peaks the 30 ms band-0 attack lets through, without harmonics |
+/// | `bass_clip_threshold_db` | target + 9 dB | 4 dB above the band threshold: a steady bass at target + 13 dB comes out of the 2:1 band compressor at target + 9, so only louder peaks are clipped |
 ///
 /// # Values per preset
 ///
@@ -161,6 +164,13 @@ impl LimiterParams {
 /// | `AtscA85` | −24 LKFS | −2 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −19 dB | 2 | 200 |
 /// | `Streaming` | −16 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −11 dB | 2 | 200 |
 /// | `Speech` | −18 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −40 | −11 dB | 1.5 | 150 |
+///
+/// | Preset | expander threshold (every band) | expander ratio | expander floor | bass clip threshold |
+/// |---|---|---|---|---|
+/// | `EbuR128` | −47 dB | 1.5 | 4 dB | −14 dB |
+/// | `AtscA85` | −48 dB | 1.5 | 4 dB | −15 dB |
+/// | `Streaming` | −40 dB | 1.5 | 4 dB | −7 dB |
+/// | `Speech` | −40 dB | 2 | 6 dB | −9 dB |
 ///
 /// - **Target and ceiling** are those of the standard: EBU R 128 (−23 LUFS,
 ///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
@@ -197,6 +207,16 @@ impl LimiterParams {
 ///   presets compress the same relative to their own loudness. **Speech:
 ///   target + 7 dB at 1.5:1** ("gentler multiband"): speech is already
 ///   levelled by the AGC; the bands only tame the loudest syllables.
+/// - **Expander** (per band, against the same band level as the band
+///   threshold): programme presets **target − 24 dB, 1:1.5, at most 4 dB**;
+///   speech **target − 22 dB, 1:2, at most 6 dB**. After the AGC, room tone
+///   and noise between words of a speech studio sit near or below
+///   target − 25 dB (a −50 dBFS floor under speech at −23 LUFS, lifted by
+///   whatever the AGC adds), while even quiet word endings stay above
+///   target − 20 dB. Modest on purpose: the floor limits what a misjudged
+///   threshold can do on quiet music (a fade or a soft passage loses at most
+///   4 dB, slowly), and speech gets a little more.
+/// - **Bass clip threshold = target + 9 dB**: see the common table.
 /// - **Limiter release**: 200 ms for programme, long compared with bass
 ///   periods (no low-frequency distortion) and short enough to recover
 ///   between phrases (the same reasoning as [`LimiterParams::broadcast`]).
@@ -275,6 +295,14 @@ impl BroadcastPreset {
         match self {
             Self::EbuR128 => (24.0, 24.0, 1.0, 3.0),
             Self::AtscA85 | Self::Streaming | Self::Speech => (24.0, 24.0, 3.0, 6.0),
+        }
+    }
+
+    /// (expander threshold re target dB, ratio, floor dB). See the type docs.
+    fn expander(self) -> (f32, f32, f32) {
+        match self {
+            Self::EbuR128 | Self::AtscA85 | Self::Streaming => (-24.0, 1.5, 4.0),
+            Self::Speech => (-22.0, 2.0, 6.0),
         }
     }
 
@@ -368,8 +396,22 @@ impl BroadcastParams {
         });
         self.limiter_enabled = true;
         self.limiter_release_ms = limiter_release;
+        let (e_offset, e_ratio, e_floor) = preset.expander();
+        self.band_expanders = [BandExpanderParams {
+            threshold_db: target + e_offset,
+            ratio: e_ratio,
+            floor_db: e_floor,
+        }; MAX_BANDS];
+        self.expander_hold_ms = BROADCAST_EXPANDER_HOLD_MS;
+        self.bass_clipper_enabled = true;
+        self.bass_clip_threshold_db = target + BROADCAST_BASS_CLIP_OFFSET_DB;
     }
 }
+
+/// Expander hold of every broadcast preset (ms).
+pub const BROADCAST_EXPANDER_HOLD_MS: f32 = 100.0;
+/// Bass clip threshold of every broadcast preset, relative to the target (dB).
+pub const BROADCAST_BASS_CLIP_OFFSET_DB: f32 = 9.0;
 
 #[cfg(test)]
 mod tests {
@@ -459,6 +501,17 @@ mod tests {
                     assert!(b.ratio <= 2.0, "{ctx}: gentle ratio");
                     assert_eq!(b.makeup_db, 0.0, "{ctx}");
                 }
+                for (e, b) in p.band_expanders.iter().zip(&p.bands) {
+                    assert_eq!(e.clamped(), *e, "{ctx}: expander in range");
+                    assert!(
+                        e.ratio <= 2.0 && e.floor_db <= 6.0,
+                        "{ctx}: modest expander"
+                    );
+                    assert!(e.threshold_db < b.threshold_db - 20.0, "{ctx}");
+                }
+                assert!(p.bass_clipper_enabled, "{ctx}");
+                assert!(p.bass_clip_threshold_db > p.bands[0].threshold_db, "{ctx}");
+                assert!(r(p.bass_clip_threshold_db, -40.0, 0.0), "{ctx}");
             }
         }
         // Speech is gentler than programme.

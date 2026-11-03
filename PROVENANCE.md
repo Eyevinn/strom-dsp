@@ -432,6 +432,14 @@ Own choices:
   band's lowest frequency (Giannoulis et al. 2012; Zölzer, *DAFX*).
 - **Crossover choices:** a 200 Hz bass split, and 3 kHz at the ear's most
   sensitive region (ISO 226).
+- **Expander and bass clipper in the chain** (own values): every band's
+  expander threshold at target − 24 dB (speech − 22 dB), ratio 1.5 (speech
+  2), floor 4 dB (speech 6 dB), hold 100 ms, knee 6 dB, open 3 ms, close
+  150 ms; the bass clip threshold at target + 9 dB, with a 3 ms lookahead
+  that adds 144 frames at 48 kHz to the chain latency. Reasoning: studio
+  noise levels relative to R 68 / R 128 alignment and speech timing, the
+  same textbook sources as the gate's defaults; the floor is kept small so
+  a misjudged threshold can do little on quiet music.
 
 The values were checked with the chain acceptance test in
 `tests/broadcast.rs` (60 s programme at −35, −23 and −10 LUFS input:
