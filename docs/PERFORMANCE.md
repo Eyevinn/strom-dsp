@@ -33,6 +33,7 @@ cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 | `dynamics_1b` | de-esser |
 | `channel_tools` | delay and stereo |
 | `cleanup` | input cleanup |
+| `declipper` | declipper: clean, speech+music clipped 6 / 10 dB, tones clipped 10 dB |
 | `agc` | loudness detector and wideband AGC |
 | `multiband` | multiband compressor (4 bands); with per-band expander and bass clipper |
 | `truepeak` | true-peak limiter |
@@ -74,6 +75,7 @@ compare runs only on the same, otherwise idle, machine.
 | `dynamics_1b` | de-esser split / wide | 12.7 / 12.6 µs |
 | `channel_tools` | delay 0 / 20 ms / 8 ch / crossfading; stereo default / width+balance | 0.16 / 0.22 / 3.42 / 3.24; 0.08 / 0.55 µs |
 | `cleanup` | off / DC + HP4 / 10 hum notches / all | 0.10 / 2.28 / 5.20 / 7.19 µs |
+| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB (idle machine; cost scales with the amount of clipping) | 3.9 / 37.7 / 140 / 673 µs |
 
 ## Instruction counts (gungraun, Linux)
 

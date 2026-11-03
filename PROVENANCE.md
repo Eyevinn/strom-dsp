@@ -891,6 +891,51 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - stages that are off are skipped, with 10 ms dry/wet crossfades when
     switching and two-bank crossfades for hum changes.
 
+### Declipper (`src/declipper/`)
+
+Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
+
+- **Reconstruction:** least-squares AR interpolation of missing samples:
+  A. J. E. M. Janssen, R. N. J. Veldhuis, L. B. Vries, "Adaptive
+  interpolation of discrete-time signals that can be modeled as
+  autoregressive processes", IEEE Trans. ASSP 34(2), 1986 (AR estimate and
+  interpolation alternated); S. J. Godsill, P. J. W. Rayner, *Digital Audio
+  Restoration*, Springer 1998, ch. 5 (the LSAR normal equations
+  `(A_Uᵀ A_U)·x_U = −A_Uᵀ e₀`). AR coefficients by the autocorrelation method
+  (Hann window, Levinson–Durbin), as in any linear-prediction textbook
+  (e.g. Rabiner & Schafer, *Digital Processing of Speech Signals*).
+- **Constraint:** J. S. Abel, J. O. Smith III, "Restoring a clipped signal",
+  ICASSP 1991: a clipped sample's true value lies beyond the clip level, on
+  the same side. Also related: US 8,126,578 (expired; status not legally
+  reviewed).
+- **Evaluation:** the SDR / ΔSDR / ΔSDRc protocol of P. Záviška, P. Rajmic,
+  A. Ozerov, L. Rencker, "A survey and an extensive evaluation of popular
+  audio declipping methods", IEEE JSTSP 15(1), 2021 (metrics only; no code
+  from the survey or its companion repository was used).
+- **Detection is on the waveform only:** runs of consecutive samples on a
+  sign-consistent plateau. It never uses the distribution (histogram) of
+  sample values.
+- **Own choices:**
+  - plateau = samples within `tolerance·|level|` of the run's first sample
+    (default 1e-5), level floor −20 dBFS, edge into and out of the run at
+    least `max(10⁻³·|level|, 4·tol)` and 4× steeper than the run's own
+    slope at that end (corner rule);
+  - two-sample runs only with a ceiling confirmed by a ≥ 3-sample run at the
+    same level within 2 s, or a second difference at each edge ≥ 4× the one
+    a sample further out (a clip bends abruptly, a smooth peak evenly);
+  - optional tolerance for a first-order high-pass after the clip (default
+    50 Hz): slope ≤ `ω_c·|level|` and second difference ≤ `ω_c²·|level|`
+    inside the run, from the exponential decay of a high-passed plateau;
+  - constrained least squares by a bounded active-set loop (≤ 4 solves; a
+    bound is never released), then projection into the box; the box upper
+    edge is a cap (default +12 dB over the clipped value);
+  - AR order 48 at 48 kHz (scaled with the rate, 12…64), 5 ms of context
+    on each side, 2 rounds of estimate and interpolation, up to 8 samples
+    of later runs in the window solved jointly; Cholesky in f64 with
+    1e-10 relative diagonal loading, 1e-5 white-noise correction on lag 0;
+  - runs longer than 2 ms (`max-run`) pass through unchanged and are
+    counted.
+
 ### Delay and stereo (`src/delay.rs`, `src/stereo.rs`)
 
 - **Delay:** an integer-frame read tap on the shared `DelayLine` circular
@@ -1122,6 +1167,7 @@ deliberately not set (see "Engineering policies").
 | `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
 | `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
 | `serde_json` 1 | measurement harness only (baseline file; already in the tree through `criterion`) | MIT OR Apache-2.0 |
+| `hound` 3.5 (dev) | WAV I/O in the `declip_render` example | Apache-2.0 |
 | `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
 | RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
 | `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |
