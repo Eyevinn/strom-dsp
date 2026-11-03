@@ -56,9 +56,14 @@ Reusable building blocks are public too:
   oversampled true-peak detector (BS.1770 Annex 2).
 - `strom_dsp::spike_guard`: `SpikeGuard`, removes short, isolated peaks
   (clicks) with a look-ahead gain dip; an exact delay outside its dips.
+- `strom_dsp::clipper`: `FinalClipper`, oversampled soft clipping of
+  shaped clippings, with latency settings and per-block activity
+  (`ClipStats`).
+- `strom_dsp::governor`: `ClipBudgetGovernor`, the clip budget loop.
 - `strom_dsp::broadcast`: `BroadcastProcessor`, the chain behind
-  `stromdsp-broadcastprocessor` (input gain → spike guard → AGC → multiband → true-peak
-  limiter), with its meters.
+  `stromdsp-broadcastprocessor` (input gain → spike guard → AGC →
+  multiband → final clipper → true-peak limiter, clip budget governor),
+  with its meters.
 - `strom_dsp::presets`: the element defaults (`GateParams::broadcast()` and
   friends) and the broadcast presets (`BroadcastPreset`).
 - Processors behind the utility elements: `ducker`, `deesser`, `cleanup`,

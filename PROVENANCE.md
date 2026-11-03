@@ -392,6 +392,84 @@ ripple), within the +0.1 dB requirement.
 
 No commercial-processor material and no patent-driven method was used.
 
+### Final clipper (`src/clipper.rs`)
+
+**References.**
+- Differential clipping, where only the clipped-off part is resampled and
+  filtered and then subtracted from the delayed programme: US 6,337,999
+  (oversampled clipping with filtered clippings) and US 4,208,548 (filtering
+  the clipped-off part so the clipper's distortion stays out of a band).
+  *Expired; status not legally reviewed.*
+- Overshoot compensation after band-limiting the clippings: US 4,460,871.
+  *Expired; status not legally reviewed.*
+- Repeated clip-and-filter to control peak regrowth: J. Armstrong,
+  Electronics Letters 38(5), 2002.
+- First-order antiderivative antialiasing: Bilbao, Esqueda, Parker &
+  Välimäki, IEEE SPL 24(7), 2017.
+- Window-method FIR design (Kaiser window): Oppenheim & Schafer §7.5–7.6.
+- Delay-complementary filter pairs `H = 1 − L`: the complementary-filter
+  literature (e.g. Higgins, IEEE Trans. AES 11(3), 1975), with the bilinear
+  transform pre-warped at the corner.
+
+**Own design choices.**
+- Curve: identity to `T − knee`, then `k + w·tanh(e/w)`; closed-form
+  antiderivative `e²/2 − w²·ln cosh(e/w)` for the antialiasing.
+- Latency settings: standard 8×, one pass, 41-tap shaping FIR (69 frames);
+  low 4×, one pass, 3-tap FIR (48 frames); two passes (138 frames). At 4×
+  a 15 kHz tone 6 dB over the threshold left a −75 … −80 dBFS alias, at 8×
+  −94 dBFS. The shaping FIR is normalised to unit DC gain.
+- The shaping FIR's passband `1 + a·(f/f_b)²`, `a = 1`, found by measuring
+  sample-peak overshoot on our own synthetic signals for a ∈ {0, 0.3, 0.6,
+  1, 1.5}. The FIR is centred half a high-rate sample early to undo the
+  antialiasing's delay.
+- Low cut `H(s) = s²(s + 3)/(s + 1)³` (complement of
+  `L = (1 + 3s)/(1 + s)³`), −3 dB at the bass crossover: 12 dB/octave below
+  it, no latency, near-zero phase error well above it.
+- One pass by default (the limiter after the clipper takes the regrowth),
+  two as an option; early-out on a hard bound of the interpolator's gain
+  (exact, with the interpolator primed from a short input history on
+  return).
+- Activity statistics (clip depth as removed/input energy, share of
+  touched high-rate samples) for the clip budget and for stages before the
+  clipper.
+
+**Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −94.0
+dBFS (standard), −75.8 dBFS (low); worst sample peak over the threshold on
+band-limited signals driven 2 and 4 dB +0.77 dB (standard), +2.17 dB
+(low), +0.27 dB (two passes; +1.6 dB without the compensation); a lower
+NMR and
+equal or higher loudness than the true-peak limiter alone and than a
+base-rate hard clip at drives 0 … 4 dB. The NMR is a test metric only (own
+Bark-band model after Brandenburg 1987 and Zwicker & Fastl); nothing in the
+processing path uses a masking model.
+
+### Clip budget governor (`src/governor.rs`)
+
+**References.**
+- Slow integrating loops with conditional integration (anti-windup),
+  freeze and hysteresis: Åström & Murray, *Feedback Systems*; Åström &
+  Hägglund, *PID Controllers*, ch. 3 (as for the output-referenced trim).
+- Allowing more clipping on some material than on other, as a control
+  input rather than a fixed setting, is in expired US 4,241,266. *Expired;
+  status not legally reviewed.* The governor uses only the general idea of
+  a budget; its measures and law are our own.
+
+**Own design choices.**
+- One operator number, the clip budget in dB (0 … 6), mapped to three
+  allowances: clip depth `−40 + 5·B` dB, limiter mean gain reduction
+  `B/2` dB, touched share `0.2 %·2^(B/2)`. The largest "budget used" of the
+  three, over a gated 3 s window, is compared with `B`.
+- Law: over budget, hold the trim from adding gain, give back density,
+  then cut the AGC target (τ = 8 s, rate-limited); release below a 0.4 dB
+  hysteresis band. Density (band thresholds lowered with compensating
+  makeup) is used only where budget is left and the trim and the AGC are
+  at a bound. Frozen in pauses and below the gate, like the trim.
+- Why density is not the first resort when over budget: measured on our
+  own percussive test programme (documented in the module).
+
+No masking model and no candidate gain curves are used anywhere in the
+governor or the clipper.
+
 ### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
 **The chain** is our own composition of existing parts, not a new algorithm:
@@ -401,6 +479,16 @@ The spike guard sits ahead of the AGC so clicks neither pump it nor count
 toward the loudness it measures. Levelling comes first,
 so the band dynamics work on programme at the target loudness, and the
 true-peak ceiling comes last, so no later stage can push a peak over it.
+
+The chain now also has a final clipper before the limiter and a clip
+budget governor around both (sections above). With the clipper taking the
+peaks, the limiter's default lookahead dropped from 5 ms to 1.5 ms (0.75 ms
+for low latency), justified by measurement: the true-peak ceiling holds
+within +0.008 dB on the nasty-signal set at 44.1, 48 and 96 kHz, and the
+limiter's mean gain reduction on the peaky test programme is lower than
+before (0.69 dB against 1.72 dB with no clipper and 5 ms). A ceiling change
+glides at 1 dB per 512 frames, so the shorter attack ramp does not make
+a large jump audible.
 
 Own choices:
 - **Input gain:** glides in dB through two cascaded 5 ms one-poles.

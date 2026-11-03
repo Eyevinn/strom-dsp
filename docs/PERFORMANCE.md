@@ -57,6 +57,9 @@ compare runs only on the same, otherwise idle, machine.
 | `strip` | gate / compressor / limiter / strip | 2.19 / 7.91 / 5.72 / 18.3 µs |
 | `strip` | EQ 4-band mono / stereo / 8 ch / stereo automated | 2.06 / 2.16 / 8.26 / 5.91 µs |
 | `broadcast` | full chain, 4 bands, with meters | 78.3 µs |
+| `broadcast` (final clipper, governor, 1.5 ms lookahead; see below) | full chain defaults `ebu-r128` / `streaming` | 53.5 / 64.7 µs |
+| `broadcast` | final clipper alone, standard: idle / clipping | 1.27 / 46.7 µs |
+| `broadcast` | final clipper alone, low latency: idle / clipping | 1.27 / 25.4 µs |
 | `truepeak` | 5 ms lookahead | 18.8 µs |
 | `multiband` | 4 bands | 46.7 µs |
 | `spike_guard` | no events / a click every 50 ms (separate run, load average about 4) | 12.1 / 13.9 µs |
@@ -132,3 +135,14 @@ cargo asm -p strom-dsp --lib "<strom_dsp::gate::Gate as strom_dsp::Processor>::p
 - Scalar forms (`fmul d0`, `mulsd`) show that it was not.
 - Small inlined helpers have no symbol of their own; look at the `process`
   function they are inlined into.
+
+**Final clipper and governor.** Measured on the same Apple M5 Pro, not
+idle (load average 3.5 … 5 from other work), criterion with 1 s warm-up
+and 3 s measurement, so treat them as upper bounds. The full chain with
+the `ebu-r128` defaults takes 53.5 µs per 10 ms stereo buffer (0.54 % of
+one core), `streaming` 64.7 µs (0.65 %). The clipper's early-out makes it
+nearly free on programme that does not reach its knee (1.27 µs); driven
+6 dB over its threshold on every buffer it takes 46.7 µs (standard, 8×) or
+25.4 µs (low latency, 4×), so even a chain that clips all the time stays
+near 1 % of one core, under the 2 % budget.
+

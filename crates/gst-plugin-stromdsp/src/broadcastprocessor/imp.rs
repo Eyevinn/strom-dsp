@@ -19,7 +19,10 @@ use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
 use strom_dsp::bassclip::BASS_CLIP_THRESHOLD_RANGE_DB;
-use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, MAX_CROSSOVERS};
+use strom_dsp::broadcast::{
+    BroadcastMeters, BroadcastParams, BroadcastProcessor, CLIPPER_BANDWIDTH_RANGE_HZ,
+    CLIP_BUDGET_RANGE_DB, MAX_CROSSOVERS,
+};
 use strom_dsp::dynamics::expander::{
     EXPANDER_FLOOR_RANGE_DB, EXPANDER_HOLD_RANGE_MS, EXPANDER_RATIO_RANGE,
     EXPANDER_THRESHOLD_RANGE_DB,
@@ -97,6 +100,8 @@ enum FloatField {
     BandExpanderFloor(usize),
     ExpanderHold,
     BassClipThreshold,
+    ClipperBandwidth,
+    ClipBudget,
     LimiterRelease,
     Lookahead,
 }
@@ -125,6 +130,8 @@ impl FloatField {
             Self::BandExpanderFloor(k) => &mut p.band_expanders[k].floor_db,
             Self::ExpanderHold => &mut p.expander_hold_ms,
             Self::BassClipThreshold => &mut p.bass_clip_threshold_db,
+            Self::ClipperBandwidth => &mut p.clipper_bandwidth_hz,
+            Self::ClipBudget => &mut p.clip_budget_db,
             Self::LimiterRelease => &mut p.limiter_release_ms,
             Self::Lookahead => &mut p.limiter_lookahead_ms,
         }
@@ -144,6 +151,8 @@ enum BoolField {
     Agc,
     Multiband,
     BassClipper,
+    Clipper,
+    Governor,
     Limiter,
 }
 
@@ -155,6 +164,8 @@ impl BoolField {
             Self::Agc => &mut p.agc_enabled,
             Self::Multiband => &mut p.multiband_enabled,
             Self::BassClipper => &mut p.bass_clipper_enabled,
+            Self::Clipper => &mut p.clipper_enabled,
+            Self::Governor => &mut p.governor_enabled,
             Self::Limiter => &mut p.limiter_enabled,
         }
     }
@@ -361,6 +372,21 @@ fn float_specs() -> &'static [FloatSpec] {
             FloatField::BassClipThreshold,
         ));
         v.push(s(
+            "clipper-bandwidth",
+            "Clipper bandwidth",
+            "Band limit of what the final clipper removes (Hz); the clipper adds nothing above it",
+            CLIPPER_BANDWIDTH_RANGE_HZ,
+            FloatField::ClipperBandwidth,
+        ));
+        v.push(s(
+            "clip-budget",
+            "Clip budget",
+            "How much clipping and limiting the governor allows (dB, 0 = cleanest); over it, the \
+             governor gives up loudness instead (reported as loudness-deficit)",
+            CLIP_BUDGET_RANGE_DB,
+            FloatField::ClipBudget,
+        ));
+        v.push(s(
             "limiter-release",
             "Limiter release",
             "Release time of the true-peak limiter (ms)",
@@ -373,11 +399,13 @@ fn float_specs() -> &'static [FloatSpec] {
 }
 
 /// Names of the boolean properties a preset sets.
-const PRESET_BOOLS: [(&str, BoolField); 5] = [
+const PRESET_BOOLS: [(&str, BoolField); 7] = [
     ("spike-guard-enabled", BoolField::SpikeGuard),
     ("agc-enabled", BoolField::Agc),
     ("multiband-enabled", BoolField::Multiband),
     ("bass-clipper-enabled", BoolField::BassClipper),
+    ("clipper-enabled", BoolField::Clipper),
+    ("governor-enabled", BoolField::Governor),
     ("limiter-enabled", BoolField::Limiter),
 ];
 
@@ -448,6 +476,17 @@ fn preset_props() -> &'static [(String, Prop)] {
             .iter()
             .filter(|f| f.field == FloatField::BassClipThreshold)
         {
+            push_float(&mut v, f);
+        }
+        v.push(("clipper-enabled".into(), Prop::Bool(BoolField::Clipper)));
+        for f in floats
+            .iter()
+            .filter(|f| f.field == FloatField::ClipperBandwidth)
+        {
+            push_float(&mut v, f);
+        }
+        v.push(("governor-enabled".into(), Prop::Bool(BoolField::Governor)));
+        for f in floats.iter().filter(|f| f.field == FloatField::ClipBudget) {
             push_float(&mut v, f);
         }
         v.push(("limiter-enabled".into(), Prop::Bool(BoolField::Limiter)));
@@ -652,6 +691,9 @@ fn meter_structure(
             gst::Array::new(expanders.iter().map(|&v| reduction(v))),
         )
         .field("bass-clip-gr", reduction(m.bass_clip_gain_reduction_db))
+        .field("clip-depth", level(m.clip_depth_db))
+        .field("loudness-deficit", reduction(m.loudness_deficit_lu))
+        .field("governor-state", m.governor_state.nick())
         .build()
 }
 
@@ -855,6 +897,20 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                 d.bass_clipper_enabled,
             ));
             v.push(float("bass-clip-threshold"));
+            v.push(common::bool_prop(
+                "clipper-enabled",
+                "Clipper enabled",
+                "Run the final clipper before the limiter (bypassed: unity gain, same delay)",
+                d.clipper_enabled,
+            ));
+            v.push(float("clipper-bandwidth"));
+            v.push(common::bool_prop(
+                "governor-enabled",
+                "Governor enabled",
+                "Keep the clipper and the limiter within clip-budget, trading loudness when needed",
+                d.governor_enabled,
+            ));
+            v.push(float("clip-budget"));
             v.push(common::bool_prop(
                 "limiter-enabled",
                 "Limiter enabled",
@@ -1113,10 +1169,11 @@ impl ElementImpl for StromDspBroadcastProcessor {
                 "Filter/Effect/Audio",
                 "Broadcast/streaming final processor: input gain, spike guard, \
                  loudness-targeting AGC, multiband compressor (1-5 bands, LR4) with a \
-                 downward expander per band and a bass clipper on band 0, and true-peak \
-                 limiter, with presets for EBU R 128, ATSC A/85, streaming and speech. \
-                 Reports its latency (spike guard + bass lookahead + limiter lookahead + \
-                 oversampling filter); enabled=false keeps the delay. Posts \
+                 downward expander per band and a bass clipper on band 0, final clipper \
+                 and true-peak limiter under a clip budget governor, with presets for \
+                 EBU R 128, ATSC A/85, streaming and speech. Reports its latency (spike \
+                 guard + bass lookahead + clipper + limiter lookahead + oversampling \
+                 filter); enabled=false keeps the delay. Posts \
                  'stromdsp-broadcastprocessor' meter messages every meter-interval ms.",
                 "Eyevinn Technology",
             )
@@ -1351,8 +1408,9 @@ mod tests {
     fn preset_props_cover_every_preset_field() {
         let names: Vec<&str> = preset_props().iter().map(|(n, _)| n.as_str()).collect();
         // 10 scalars + 4 crossovers + 40 band values (5 x 8) + expander-hold +
-        // bass-clip-threshold + limiter-release + 5 booleans.
-        assert_eq!(names.len(), 10 + 4 + 40 + 1 + 1 + 1 + 5);
+        // bass-clip-threshold + clipper-bandwidth + clip-budget +
+        // limiter-release + 7 booleans.
+        assert_eq!(names.len(), 10 + 4 + 40 + 1 + 1 + 1 + 1 + 1 + 7);
         for excluded in [
             "enabled",
             "preset",

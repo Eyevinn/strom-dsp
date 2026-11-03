@@ -1,6 +1,7 @@
 //! Broadcast final processor chain:
 //! input gain → spike guard → wideband AGC → multiband compressor (per-band
-//! downward expander, bass clipper on band 0) → true-peak limiter.
+//! downward expander, bass clipper on band 0) → final clipper → true-peak
+//! limiter, with a clip budget governor around the clipper and the limiter.
 //!
 //! Units follow the element interface (`stromdsp-broadcastprocessor`): dB,
 //! LUFS, dBTP, dB/s, ms, Hz. Meter conventions follow the element's public
@@ -13,7 +14,7 @@
 //! ```text
 //!         ┌──────────────── dry: delay (total latency) ─────────────────┐
 //! input ──┤                                                             ├─ fade ─→ output
-//!         └→ gain → [spike guard] → [AGC] → [multiband] → [limiter] ────┘
+//!         └→ gain → [spike guard] → [AGC] → [multiband] → [clipper] → [limiter] ┘
 //!                     each [stage] = fade(stage(x), delay_stage(x))
 //! ```
 //!
@@ -36,9 +37,15 @@
 //!   clipper off). Its IM-feedback input
 //!   ([`crate::multiband::MultibandCompressor::set_upper_clip_activity`])
 //!   stays at "no activity" until a clipper after the multiband feeds it.
+//! - **Final clipper**: [`crate::clipper::FinalClipper`] (oversampled
+//!   soft clipping of shaped clippings; `clipper_latency` sets 69 or 48
+//!   frames), threshold [`CLIPPER_MARGIN_DB`] under the ceiling, low cut at
+//!   the lowest crossover, band limit `clipper_bandwidth_hz`.
 //! - **Limiter**: [`crate::truepeak::TruePeakLimiter`] with ceiling
-//!   `true_peak_ceiling_dbtp` (dBTP, BS.1770 Annex 2 detector); its latency
-//!   (lookahead + 32 frames of detector delay) is the whole chain latency.
+//!   `true_peak_ceiling_dbtp` (dBTP, BS.1770 Annex 2 detector; lookahead +
+//!   32 frames of detector delay). It stays the guaranteed ceiling.
+//! - **Clip budget governor**: [`crate::governor::ClipBudgetGovernor`],
+//!   below.
 //!
 //! # Bypass and latency
 //!
@@ -62,14 +69,15 @@
 //! Between `configure`/`reset` and the first processed frame, `set_params`
 //! applies bypass states and the input gain instantly (no fade).
 //!
-//! The latency is `spike guard + agc (0) + multiband + limiter`, i.e.
-//! `24 + round(spike lookahead · fs / 1000) + round(3 ms · fs / 1000) +
-//! round(limiter lookahead · fs / 1000) + 32` frames (48 + 144 + 240 + 32 =
-//! 464 at 48 kHz with the default 0.5 ms and 5 ms), and depends only on
-//! the sample rate and the lookaheads
+//! The latency is `spike guard + agc (0) + multiband + clipper + limiter`,
+//! i.e. `24 + round(spike lookahead · fs / 1000) + round(3 ms · fs / 1000)
+//! + C + round(limiter lookahead · fs / 1000) + 32` frames with `C` = 69
+//! (standard clipper latency) or 48 (low): 48 + 144 + 69 + 72 + 32 = 365
+//! frames (7.60 ms) at 48 kHz with the defaults (0.5 ms, standard, 1.5 ms).
+//! It depends only on the sample rate and the structural fields
 //! ([`BroadcastProcessor::latency_frames_for_params`]). `num_bands`,
-//! `spike_guard_lookahead_ms` and `limiter_lookahead_ms` are structural:
-//! they take effect at the next [`Processor::configure`].
+//! `spike_guard_lookahead_ms`, `clipper_latency` and `limiter_lookahead_ms`
+//! are structural: they take effect at the next [`Processor::configure`].
 //!
 //! # Output-referenced trim
 //!
@@ -121,6 +129,25 @@
 //! whole window after it settles. The trim never runs up on silence, so
 //! there is no overshoot when the programme returns.
 //!
+//! # Clip budget governor
+//!
+//! Every output sub-block the chain hands the governor what the clipper and
+//! the limiter did (see [`crate::governor`] for the measures, the budget
+//! mapping and the law). Its outputs act here:
+//!
+//! - **Trim hold:** while the governor holds, the trim takes no positive
+//!   steps.
+//! - **Cut:** the AGC target offset is `trim − cut`.
+//! - **Density:** every band's threshold is lowered by `density` and its
+//!   makeup raised by `density·(1 − 1/ratio)` before the parameters reach
+//!   the multiband (passed on in steps of at least 0.01 dB; the band
+//!   compressors glide thresholds and makeup).
+//!
+//! The governor is frozen while the AGC, the clipper or the chain is
+//! bypassed or fading, and in pauses and below the gate (the trim's rule).
+//! Switching it off drops density and cut at once; the AGC's rates and the
+//! compressors' glides make that smooth.
+//!
 //! # Meters
 //!
 //! | Value | Source | Cost |
@@ -135,6 +162,8 @@
 //! | band expander gain reduction | [`crate::multiband::MultibandCompressor::expander_reduction_db`] at read time | O(1) |
 //! | bass-clip gain reduction | largest since the last read ([`crate::multiband::MultibandCompressor::take_bass_clip_gain_reduction_db`]) | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
+//! | clip depth | the clipper's removed / input energy since the last read | O(1) |
+//! | loudness deficit, governor state | [`crate::governor::ClipBudgetGovernor`] | O(1) |
 //!
 //! The input meters show what actually comes in: they are measured before
 //! the input gain, so `input_gain_db` does not change them.
@@ -146,12 +175,14 @@
 
 use crate::agc::{Agc, AgcParams, HOLD_BLOCK_SUB_BLOCKS, MIN_ACTIVE_MS};
 use crate::bassclip::{BassClipperParams, BASS_CLIP_THRESHOLD_RANGE_DB};
+use crate::clipper::{ClipStats, ClipperLatency, FinalClipper, FinalClipperParams};
 use crate::dynamics::expander::{
     EXPANDER_FLOOR_RANGE_DB, EXPANDER_HOLD_RANGE_MS, EXPANDER_RATIO_RANGE,
     EXPANDER_THRESHOLD_RANGE_DB,
 };
 use crate::dynamics::ExpanderParams;
 use crate::dynamics::OnePole;
+use crate::governor::{ClipBudgetGovernor, GovernorInputs, GovernorState};
 use crate::meter::{
     lufs_from_mean_square, ChannelLayout, History, LoudnessConfig, LoudnessDetector, LoudnessMeter,
     WindowSum, SUB_BLOCK_MS,
@@ -192,6 +223,32 @@ const TRIM_MAX_DB: f64 = 6.0;
 /// Output trim: the AGC counts as settled while its applied gain is within
 /// this distance of its target gain (dB).
 const TRIM_SETTLED_DB: f64 = 1.0;
+
+/// Final clipper: threshold below the true-peak ceiling (dB). The clipper
+/// holds sample peaks within +0.3 dB of its threshold on band-limited
+/// material, so the limiter after it normally catches only inter-sample
+/// residue and bass peaks (the clipper leaves bass to the limiter).
+pub const CLIPPER_MARGIN_DB: f32 = 0.5;
+/// Default limiter lookahead (ms). With the final clipper taking the peaks,
+/// the limiter handles only residue, so 1.5 ms is enough (see
+/// `docs/elements/broadcastprocessor.md`); 0.75 ms for low latency.
+pub const DEFAULT_LOOKAHEAD_MS: f32 = 1.5;
+/// Limiter lookahead (ms) of the low-latency configuration.
+pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.75;
+
+/// Final clipper: knee width (dB) of its curve.
+pub const CLIPPER_KNEE_DB: f32 = 2.0;
+/// Range of `clipper_bandwidth_hz` (Hz).
+pub const CLIPPER_BANDWIDTH_RANGE_HZ: (f32, f32) = crate::clipper::BANDWIDTH_RANGE_HZ;
+/// Range of `clip_budget_db` (dB).
+pub const CLIP_BUDGET_RANGE_DB: (f32, f32) = crate::governor::BUDGET_RANGE_DB;
+/// Largest change of the limiter's ceiling per internal chunk (dB). A
+/// ceiling jump becomes steps of at most this size, each ramped over the
+/// limiter's lookahead, so a short lookahead does not turn a 6 dB jump into
+/// an audible step (6 dB takes about 64 ms at 48 kHz).
+const CEILING_STEP_DB: f32 = 1.0;
+/// Smallest density change (dB) passed on to the multiband thresholds.
+const DENSITY_STEP_DB: f64 = 0.01;
 
 /// Value reported for silence / no measurement yet (never NaN or −∞).
 pub const SILENCE_DB: f64 = -200.0;
@@ -303,6 +360,16 @@ pub struct BroadcastParams {
     pub crossover_hz: [f32; MAX_CROSSOVERS],
     /// Per-band compressor settings; band 0 is the lowest.
     pub bands: [MultibandBandParams; MAX_BANDS],
+    /// Final clipper stage active.
+    pub clipper_enabled: bool,
+    /// Band limit of the clipper's clippings (Hz, 8 000 … 22 000; at most
+    /// 0.46·fs).
+    pub clipper_bandwidth_hz: f32,
+    /// Clip budget (dB, 0 … 6): how much clipping and limiting the governor
+    /// allows (see [`crate::governor`]).
+    pub clip_budget_db: f32,
+    /// Clip budget governor active.
+    pub governor_enabled: bool,
     /// Limiter stage active.
     pub limiter_enabled: bool,
     /// Limiter release (ms, 1 … 2000).
@@ -318,6 +385,9 @@ pub struct BroadcastParams {
     /// Bass clip threshold (dB, −40 … 0), against band 0's analytic envelope
     /// (a steady sine reads its peak).
     pub bass_clip_threshold_db: f32,
+    /// Latency setting of the final clipper. Structural (takes effect at
+    /// the next `configure`).
+    pub clipper_latency: ClipperLatency,
 }
 
 impl Default for BroadcastParams {
@@ -346,13 +416,18 @@ impl Default for BroadcastParams {
             multiband_drive_db: 0.0,
             crossover_hz: [120.0, 800.0, 4000.0, 10_000.0],
             bands: core::array::from_fn(|k| MultibandBandParams::default_for(k, 4)),
+            clipper_enabled: true,
+            clipper_bandwidth_hz: 20_000.0,
+            clip_budget_db: 2.0,
+            governor_enabled: true,
             limiter_enabled: true,
             limiter_release_ms: 100.0,
-            limiter_lookahead_ms: 5.0,
+            limiter_lookahead_ms: DEFAULT_LOOKAHEAD_MS,
             band_expanders: [BandExpanderParams::default(); MAX_BANDS],
             expander_hold_ms: 100.0,
             bass_clipper_enabled: false,
             bass_clip_threshold_db: -12.0,
+            clipper_latency: ClipperLatency::Standard,
         }
     }
 }
@@ -392,6 +467,14 @@ pub struct BroadcastMeters {
     /// Bass-clipper gain reduction (positive dB), largest since the last
     /// [`BroadcastProcessor::take_meters`].
     pub bass_clip_gain_reduction_db: f64,
+    /// Final clipper clip depth since the last read (dB): energy removed
+    /// relative to the clipper's input; [`SILENCE_DB`] when nothing was
+    /// removed.
+    pub clip_depth_db: f64,
+    /// Loudness deficit the governor accepts (LU, ≥ 0).
+    pub loudness_deficit_lu: f64,
+    /// What the governor is doing.
+    pub governor_state: GovernorState,
 }
 
 impl Default for BroadcastMeters {
@@ -410,6 +493,9 @@ impl Default for BroadcastMeters {
             limiter_gain_reduction_db: 0.0,
             band_expander_gain_reduction_db: [0.0; MAX_BANDS],
             bass_clip_gain_reduction_db: 0.0,
+            clip_depth_db: SILENCE_DB,
+            loudness_deficit_lu: 0.0,
+            governor_state: GovernorState::Off,
         }
     }
 }
@@ -471,6 +557,20 @@ impl BroadcastParams {
             multiband_drive_db: clamp_or(self.multiband_drive_db, -12.0, 12.0, 0.0),
             crossover_hz,
             bands: core::array::from_fn(|k| self.bands[k].clamped()),
+            clipper_enabled: self.clipper_enabled,
+            clipper_bandwidth_hz: clamp_or(
+                self.clipper_bandwidth_hz,
+                CLIPPER_BANDWIDTH_RANGE_HZ.0,
+                CLIPPER_BANDWIDTH_RANGE_HZ.1,
+                d.clipper_bandwidth_hz,
+            ),
+            clip_budget_db: clamp_or(
+                self.clip_budget_db,
+                CLIP_BUDGET_RANGE_DB.0,
+                CLIP_BUDGET_RANGE_DB.1,
+                d.clip_budget_db,
+            ),
+            governor_enabled: self.governor_enabled,
             limiter_enabled: self.limiter_enabled,
             limiter_release_ms: clamp_or(
                 self.limiter_release_ms,
@@ -493,16 +593,18 @@ impl BroadcastParams {
                 BASS_CLIP_THRESHOLD_RANGE_DB.1,
                 d.bass_clip_threshold_db,
             ),
+            clipper_latency: self.clipper_latency,
         }
     }
 }
 
-/// The lookahead range of the element (ms, 0.5 … 20; NaN/Inf → 5).
+/// The lookahead range of the element (ms, 0.5 … 20; NaN/Inf → the
+/// default).
 fn clamp_lookahead(ms: f32) -> f32 {
     if ms.is_finite() {
         ms.clamp(0.5, 20.0)
     } else {
-        5.0
+        DEFAULT_LOOKAHEAD_MS
     }
 }
 
@@ -613,6 +715,11 @@ struct OutputTrim {
     window: usize,
     /// The correction (dB), handed to the AGC as its target offset.
     trim_db: f64,
+    /// The newest sub-block passed the gating (not a pause, enough active
+    /// output in the window).
+    gated: bool,
+    /// Gated output loudness over the window (LUFS), once measurable.
+    measured: Option<f64>,
 }
 
 /// Everything [`OutputTrim::on_sub_block`] needs from the chain.
@@ -625,6 +732,10 @@ struct TrimInputs {
     max_cut_db: f64,
     /// Slower of the AGC's up and down rates (dB/s).
     slower_rate_db_s: f64,
+    /// The governor's cut of the AGC target (dB, ≥ 0).
+    cut_db: f64,
+    /// The governor forbids adding gain.
+    hold_up: bool,
 }
 
 impl OutputTrim {
@@ -642,6 +753,8 @@ impl OutputTrim {
         self.count_sum.set_len(self.window, &self.active_flag);
         self.settled = 0;
         self.trim_db = 0.0;
+        self.gated = false;
+        self.measured = None;
     }
 
     /// Record the output sub-block `out` just completed and integrate.
@@ -666,23 +779,68 @@ impl OutputTrim {
         self.settled = if agc_settled { self.settled + 1 } else { 0 };
 
         let min_active = MIN_ACTIVE_MS / SUB_BLOCK_MS;
-        if !present || count < min_active || self.settled < self.window {
+        self.gated = present && count >= min_active;
+        if count >= min_active {
+            self.measured = Some(lufs_from_mean_square(self.energy_sum.sum() / count));
+        }
+        if !self.gated || self.settled < self.window {
             return self.trim_db; // freeze
         }
         let measured = lufs_from_mean_square(self.energy_sum.sum() / count);
         let error = p.target_lufs - measured;
         // Anti-windup: stop integrating into an AGC gain bound.
-        let want = p.target_lufs + self.trim_db - agc.measured_lufs();
+        let want = p.target_lufs + self.trim_db - p.cut_db - agc.measured_lufs();
         if (error > 0.0 && want >= p.max_gain_db) || (error < 0.0 && want <= -p.max_cut_db) {
             return self.trim_db;
         }
         let dt = SUB_BLOCK_MS * 0.001;
         let max_step = TRIM_MAX_RATE_DB_S.min(TRIM_RATE_FRACTION * p.slower_rate_db_s) * dt;
-        let step = (error * dt / TRIM_TIME_CONSTANT_S).clamp(-max_step, max_step);
+        let mut step = (error * dt / TRIM_TIME_CONSTANT_S).clamp(-max_step, max_step);
+        if p.hold_up {
+            step = step.min(0.0);
+        }
         if step.is_finite() {
             self.trim_db = (self.trim_db + step).clamp(-TRIM_MAX_DB, TRIM_MAX_DB);
         }
         self.trim_db
+    }
+}
+
+/// Final clipper stage: [`FinalClipper`] with the configured
+/// [`ClipperLatency`], threshold [`CLIPPER_MARGIN_DB`] under the true-peak
+/// ceiling, low cut at the lowest crossover. Latency 69 frames (standard)
+/// or 48 (low) at every rate.
+#[derive(Debug, Default)]
+struct ClipperStage {
+    inner: FinalClipper,
+}
+
+impl ClipperStage {
+    fn latency_frames(latency: ClipperLatency) -> usize {
+        latency.latency_frames()
+    }
+
+    fn configure(&mut self, sample_rate: f32, channels: usize, latency: ClipperLatency) {
+        self.inner.set_latency(latency);
+        self.inner.configure(sample_rate, channels);
+    }
+
+    fn set_params(&mut self, p: &BroadcastParams) {
+        self.inner.set_params(&FinalClipperParams {
+            threshold_db: p.true_peak_ceiling_dbtp - CLIPPER_MARGIN_DB,
+            knee_db: CLIPPER_KNEE_DB,
+            bandwidth_hz: p.clipper_bandwidth_hz,
+            low_cut_hz: p.crossover_hz[0],
+            ..FinalClipperParams::default()
+        });
+    }
+
+    fn process(&mut self, x: &mut [f32]) {
+        self.inner.process(x);
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
     }
 }
 
@@ -705,10 +863,10 @@ impl LimiterStage {
         self.inner.configure(sample_rate, channels);
     }
 
-    fn set_params(&mut self, p: &BroadcastParams, lookahead_ms: f32) {
+    fn set_params(&mut self, p: &BroadcastParams, ceiling_dbtp: f32, lookahead_ms: f32) {
         self.inner.set_params(&TruePeakLimiterParams {
             enabled: true,
-            ceiling_dbtp: p.true_peak_ceiling_dbtp,
+            ceiling_dbtp,
             release_ms: p.limiter_release_ms,
             lookahead_ms,
         });
@@ -930,6 +1088,9 @@ pub struct BroadcastProcessor {
     /// Structural values in force since the last `configure`.
     active_lookahead_ms: f32,
     active_spike_lookahead_ms: f32,
+    active_clipper_latency: ClipperLatency,
+    /// Limiter ceiling in force (dBTP), gliding toward the parameter.
+    ceiling_db: f32,
     active_bands: usize,
     /// True from configure/reset until the first processed frame.
     fresh: bool,
@@ -939,16 +1100,28 @@ pub struct BroadcastProcessor {
     agc: AgcStage,
     trim: OutputTrim,
     multiband: MultibandCompressor,
+    clipper: ClipperStage,
+    governor: ClipBudgetGovernor,
     limiter: LimiterStage,
+    /// Density applied to the multiband thresholds (dB).
+    applied_density_db: f64,
+    /// Clipper stats and limiter gain reduction (dB · frames) since the
+    /// last output sub-block, and since the last `take_meters`.
+    sub_clip: ClipStats,
+    sub_gr: f64,
+    sub_frames: usize,
+    meter_clip: ClipStats,
 
     spike_fade: Fade,
     agc_fade: Fade,
     multiband_fade: Fade,
+    clipper_fade: Fade,
     limiter_fade: Fade,
     chain_fade: Fade,
     spike_delay: FixedDelay,
     agc_delay: FixedDelay,
     multiband_delay: FixedDelay,
+    clipper_delay: FixedDelay,
     limiter_delay: FixedDelay,
     chain_delay: FixedDelay,
     /// Dry signal of the current stage (`CHUNK × channels`).
@@ -987,6 +1160,8 @@ impl BroadcastProcessor {
             channels: 0,
             active_lookahead_ms: params.limiter_lookahead_ms,
             active_spike_lookahead_ms: params.spike_guard_lookahead_ms,
+            active_clipper_latency: params.clipper_latency,
+            ceiling_db: params.true_peak_ceiling_dbtp,
             active_bands: params.num_bands,
             fresh: true,
             input_gain: GainGlide::default(),
@@ -994,15 +1169,24 @@ impl BroadcastProcessor {
             agc: AgcStage::default(),
             trim: OutputTrim::default(),
             multiband: MultibandCompressor::new(),
+            clipper: ClipperStage::default(),
+            governor: ClipBudgetGovernor::default(),
             limiter: LimiterStage::default(),
             spike_fade: Fade::default(),
+            applied_density_db: 0.0,
+            sub_clip: ClipStats::default(),
+            sub_gr: 0.0,
+            sub_frames: 0,
+            meter_clip: ClipStats::default(),
             agc_fade: Fade::default(),
             multiband_fade: Fade::default(),
+            clipper_fade: Fade::default(),
             limiter_fade: Fade::default(),
             chain_fade: Fade::default(),
             spike_delay: FixedDelay::default(),
             agc_delay: FixedDelay::default(),
             multiband_delay: FixedDelay::default(),
+            clipper_delay: FixedDelay::default(),
             limiter_delay: FixedDelay::default(),
             chain_delay: FixedDelay::default(),
             stage_dry: Vec::new(),
@@ -1032,6 +1216,7 @@ impl BroadcastProcessor {
             // Unconfigured: the structural values follow until `configure`.
             self.active_lookahead_ms = p.limiter_lookahead_ms;
             self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
+            self.active_clipper_latency = p.clipper_latency;
             self.active_bands = p.num_bands;
         }
         let snap = self.fresh;
@@ -1041,13 +1226,10 @@ impl BroadcastProcessor {
         }
         self.spike.set_params(&p);
         self.agc.set_params(&p);
-        self.multiband.set_params(&MultibandParams {
-            num_bands: self.active_bands,
-            frequencies_hz: p.crossover_hz,
-            drive_db: p.multiband_drive_db,
-            bands: p.bands,
-            ..MultibandParams::default()
-        });
+        self.governor
+            .set_params(p.governor_enabled, p.clip_budget_db);
+        self.applied_density_db = self.governor.density_db();
+        self.apply_multiband_params();
         self.multiband
             .set_expanders(&core::array::from_fn(|k| ExpanderParams {
                 threshold_db: p.band_expanders[k].threshold_db,
@@ -1062,12 +1244,46 @@ impl BroadcastProcessor {
             enabled: p.bass_clipper_enabled,
             threshold_db: p.bass_clip_threshold_db,
         });
-        self.limiter.set_params(&p, self.active_lookahead_ms);
+        self.clipper.set_params(&p);
+        if snap {
+            self.ceiling_db = p.true_peak_ceiling_dbtp;
+        }
+        self.limiter
+            .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
         self.spike_fade.set(p.spike_guard_enabled, snap);
         self.agc_fade.set(p.agc_enabled, snap);
         self.multiband_fade.set(p.multiband_enabled, snap);
+        self.clipper_fade.set(p.clipper_enabled, snap);
         self.limiter_fade.set(p.limiter_enabled, snap);
         self.chain_fade.set(p.enabled, snap);
+    }
+
+    /// Hand the band settings to the multiband, with the governor's
+    /// density: every threshold lowered by `density` dB and the makeup
+    /// raised by `density·(1 − 1/ratio)`, so passages well above the
+    /// thresholds keep their level (see [`crate::governor`]).
+    fn apply_multiband_params(&mut self) {
+        let p = &self.params;
+        let d = self.applied_density_db as f32;
+        let mut bands = p.bands;
+        if d > 0.0 {
+            for b in &mut bands {
+                b.threshold_db -= d;
+                b.makeup_db += d * (1.0 - 1.0 / b.ratio.max(1.0));
+            }
+        }
+        self.multiband.set_params(&MultibandParams {
+            num_bands: self.active_bands,
+            frequencies_hz: p.crossover_hz,
+            drive_db: p.multiband_drive_db,
+            bands,
+            ..MultibandParams::default()
+        });
+    }
+
+    /// The clip budget governor (for inspection: density, cut, state).
+    pub fn governor(&self) -> &ClipBudgetGovernor {
+        &self.governor
     }
 
     /// Current parameters.
@@ -1122,7 +1338,15 @@ impl BroadcastProcessor {
             },
             band_expander_gain_reduction_db,
             bass_clip_gain_reduction_db,
+            clip_depth_db: if on && self.params.clipper_enabled {
+                or_silence(self.meter_clip.depth_db())
+            } else {
+                SILENCE_DB
+            },
+            loudness_deficit_lu: if on { self.governor.deficit_lu() } else { 0.0 },
+            governor_state: self.governor.state(),
         };
+        self.meter_clip = ClipStats::default();
         self.input_peak = 0.0;
         self.output_peak = 0.0;
         self.limiter_gr_max = self.limiter.gain_reduction_db();
@@ -1138,9 +1362,9 @@ impl BroadcastProcessor {
     }
 
     /// Total latency in frames for a configuration with the standard spike
-    /// guard lookahead and this limiter lookahead (lookaheads + oversampling
-    /// filter delays). Constant for a given rate and lookahead, independent
-    /// of stage bypass. Usable before `configure`.
+    /// guard lookahead, the standard clipper latency and this limiter
+    /// lookahead. Constant for a given rate and lookahead, independent of
+    /// stage bypass. Usable before `configure`.
     pub fn latency_frames_for(sample_rate: f32, lookahead_ms: f32) -> usize {
         Self::latency_frames_for_params(
             sample_rate,
@@ -1151,20 +1375,51 @@ impl BroadcastProcessor {
         )
     }
 
+    /// Total latency in frames for a rate, a limiter lookahead and a
+    /// clipper latency setting (standard spike guard lookahead).
+    pub fn latency_frames_for_config(
+        sample_rate: f32,
+        lookahead_ms: f32,
+        clipper: ClipperLatency,
+    ) -> usize {
+        Self::latency_frames_for_params(
+            sample_rate,
+            &BroadcastParams {
+                limiter_lookahead_ms: lookahead_ms,
+                clipper_latency: clipper,
+                ..BroadcastParams::default()
+            },
+        )
+    }
+
     /// Total latency in frames for the structural fields of `p` (spike
-    /// guard and limiter lookaheads; the bass clipper's lookahead is fixed).
-    /// Usable before `configure`.
+    /// guard lookahead, clipper latency, limiter lookahead; the bass
+    /// clipper's lookahead is fixed). Usable before `configure`.
     pub fn latency_frames_for_params(sample_rate: f32, p: &BroadcastParams) -> usize {
         SpikeStage::latency_frames_for(
             sample_rate,
             spike_guard::clamp_lookahead_ms(p.spike_guard_lookahead_ms),
         ) + AgcStage::latency_frames_for(sample_rate)
             + MultibandCompressor::bass_lookahead_frames(BASS_LOOKAHEAD_MS, sample_rate)
+            + ClipperStage::latency_frames(p.clipper_latency)
             + LimiterStage::latency_frames_for(sample_rate, clamp_lookahead(p.limiter_lookahead_ms))
     }
 
     /// Process one chunk (at most `CHUNK` frames).
     fn process_chunk(&mut self, chunk: &mut [f32]) {
+        // The limiter's ceiling moves at most CEILING_STEP_DB per chunk.
+        let target = self.params.true_peak_ceiling_dbtp;
+        if self.ceiling_db != target {
+            let d = (target - self.ceiling_db).clamp(-CEILING_STEP_DB, CEILING_STEP_DB);
+            self.ceiling_db = if (target - self.ceiling_db).abs() <= CEILING_STEP_DB {
+                target
+            } else {
+                self.ceiling_db + d
+            };
+            let p = self.params;
+            self.limiter
+                .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
+        }
         let ch = self.channels;
         let len = chunk.len();
         let frames = len / ch;
@@ -1213,6 +1468,18 @@ impl BroadcastProcessor {
             ch,
             |x| mb.process(x),
         );
+        let clip = &mut self.clipper;
+        run_stage(
+            &mut self.clipper_fade,
+            &mut self.clipper_delay,
+            dry,
+            chunk,
+            ch,
+            |x| clip.process(x),
+        );
+        let clip_stats = self.clipper.inner.activity();
+        self.sub_clip.accumulate(&clip_stats);
+        self.meter_clip.accumulate(&clip_stats);
         let lim = &mut self.limiter;
         run_stage(
             &mut self.limiter_fade,
@@ -1222,7 +1489,10 @@ impl BroadcastProcessor {
             ch,
             |x| lim.process(x),
         );
-        self.limiter_gr_max = self.limiter_gr_max.max(self.limiter.gain_reduction_db());
+        let gr = self.limiter.gain_reduction_db();
+        self.limiter_gr_max = self.limiter_gr_max.max(gr);
+        self.sub_gr += gr * frames as f64;
+        self.sub_frames += frames;
 
         self.chain_fade.mix(chunk, &self.chain_dry[..len], ch);
 
@@ -1237,6 +1507,8 @@ impl BroadcastProcessor {
                 .params
                 .agc_rate_up_db_s
                 .min(self.params.agc_rate_down_db_s) as f64,
+            cut_db: self.governor.cut_db(),
+            hold_up: self.governor.holds_trim(),
         };
         let mut rest: &[f32] = chunk;
         while !rest.is_empty() {
@@ -1246,7 +1518,10 @@ impl BroadcastProcessor {
                 let trim = self
                     .trim
                     .on_sub_block(&self.output_detector, &self.agc.inner, &trim_in);
-                self.agc.inner.set_target_offset_db(trim);
+                self.on_governor_sub_block(&trim_in);
+                self.agc
+                    .inner
+                    .set_target_offset_db(trim - self.governor.cut_db());
             }
             rest = tail;
         }
@@ -1261,6 +1536,40 @@ impl BroadcastProcessor {
     }
 }
 
+impl BroadcastProcessor {
+    /// One output sub-block for the governor: hand over what the clipper
+    /// and the limiter did since the last one, then pass a changed density
+    /// on to the multiband.
+    fn on_governor_sub_block(&mut self, trim_in: &TrimInputs) {
+        let in_use = trim_in.agc_in_use && self.clipper_fade.is_wet();
+        let inputs = GovernorInputs {
+            active: self.output_detector.momentary_lufs() >= trim_in.gate_lufs,
+            frozen: !in_use || !self.trim.gated,
+            clip: self.sub_clip,
+            limiter_gr_db: if self.sub_frames > 0 && self.limiter_fade.is_wet() {
+                self.sub_gr / self.sub_frames as f64
+            } else {
+                0.0
+            },
+            target_lufs: trim_in.target_lufs,
+            output_lufs: self.trim.measured,
+            density_available: self.multiband_fade.is_wet(),
+            slower_agc_rate_db_s: trim_in.slower_rate_db_s,
+        };
+        self.governor.on_sub_block(&inputs);
+        self.sub_clip = ClipStats::default();
+        self.sub_gr = 0.0;
+        self.sub_frames = 0;
+        let d = self.governor.density_db();
+        if (d - self.applied_density_db).abs() >= DENSITY_STEP_DB
+            || (d == 0.0 && self.applied_density_db != 0.0)
+        {
+            self.applied_density_db = d;
+            self.apply_multiband_params();
+        }
+    }
+}
+
 impl Processor for BroadcastProcessor {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
         self.sample_rate = sample_rate;
@@ -1271,6 +1580,7 @@ impl Processor for BroadcastProcessor {
         let p = self.params;
         self.active_lookahead_ms = p.limiter_lookahead_ms;
         self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
+        self.active_clipper_latency = p.clipper_latency;
         self.active_bands = p.num_bands;
 
         self.spike
@@ -1279,6 +1589,9 @@ impl Processor for BroadcastProcessor {
         self.trim.allocate();
         self.multiband.set_bass_lookahead_ms(BASS_LOOKAHEAD_MS);
         self.multiband.configure(sample_rate, channels);
+        self.clipper
+            .configure(sample_rate, channels, self.active_clipper_latency);
+        self.governor.allocate();
         self.limiter.configure(sample_rate, channels);
         // Apply the parameters (structural values included) before sizing
         // the delays from the limiter's realised latency.
@@ -1286,12 +1599,15 @@ impl Processor for BroadcastProcessor {
         let spike_latency = self.spike.inner.latency_frames();
         let agc_latency = AgcStage::latency_frames_for(sample_rate);
         let multiband_latency = self.multiband.latency_frames();
+        let clipper_latency = self.clipper.inner.latency_frames();
         let limiter_latency = self.limiter.latency_frames();
-        let total = spike_latency + agc_latency + multiband_latency + limiter_latency;
+        let total =
+            spike_latency + agc_latency + multiband_latency + clipper_latency + limiter_latency;
         debug_assert_eq!(total, self.latency_frames());
         self.spike_delay.allocate(spike_latency, channels);
         self.agc_delay.allocate(agc_latency, channels);
         self.multiband_delay.allocate(multiband_latency, channels);
+        self.clipper_delay.allocate(clipper_latency, channels);
         self.limiter_delay.allocate(limiter_latency, channels);
         self.chain_delay.allocate(total, channels);
 
@@ -1324,6 +1640,7 @@ impl Processor for BroadcastProcessor {
             &mut self.spike_fade,
             &mut self.agc_fade,
             &mut self.multiband_fade,
+            &mut self.clipper_fade,
             &mut self.limiter_fade,
             &mut self.chain_fade,
         ] {
@@ -1355,11 +1672,26 @@ impl Processor for BroadcastProcessor {
         self.agc.reset();
         self.multiband.reset();
         self.trim.reset();
+        self.ceiling_db = self.params.true_peak_ceiling_dbtp;
+        let p = self.params;
+        self.limiter
+            .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
+        self.clipper.reset();
+        self.governor.reset();
+        if self.applied_density_db != 0.0 {
+            self.applied_density_db = 0.0;
+            self.apply_multiband_params();
+        }
+        self.sub_clip = ClipStats::default();
+        self.sub_gr = 0.0;
+        self.sub_frames = 0;
+        self.meter_clip = ClipStats::default();
         self.limiter.reset();
         for d in [
             &mut self.spike_delay,
             &mut self.agc_delay,
             &mut self.multiband_delay,
+            &mut self.clipper_delay,
             &mut self.limiter_delay,
             &mut self.chain_delay,
         ] {
@@ -1370,6 +1702,7 @@ impl Processor for BroadcastProcessor {
             &mut self.spike_fade,
             &mut self.agc_fade,
             &mut self.multiband_fade,
+            &mut self.clipper_fade,
             &mut self.limiter_fade,
             &mut self.chain_fade,
         ] {
@@ -1395,6 +1728,7 @@ impl Processor for BroadcastProcessor {
             &BroadcastParams {
                 spike_guard_lookahead_ms: self.active_spike_lookahead_ms,
                 limiter_lookahead_ms: self.active_lookahead_ms,
+                clipper_latency: self.active_clipper_latency,
                 ..self.params
             },
         )

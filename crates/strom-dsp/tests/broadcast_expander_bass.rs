@@ -88,7 +88,7 @@ fn impulse_at_reported_latency() {
         };
         let mut bp = processor(&p, 1);
         let lat = bp.latency_frames();
-        assert_eq!(lat, 48 + 144 + 240 + 32);
+        assert_eq!(lat, 48 + 144 + 69 + 72 + 32);
         let mut x = vec![0.0f32; lat + 4096];
         x[1000] = 0.25;
         for c in x.chunks_mut(333) {

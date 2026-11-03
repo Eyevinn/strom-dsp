@@ -31,7 +31,7 @@ dependency with its licence.
 | [`stromdsp-delay`](docs/elements/delay.md) | Intentional delay for alignment and lip sync |
 | [`stromdsp-stereo`](docs/elements/stereo.md) | Balance, width, mono, swap, M/S and polarity |
 | [`stromdsp-meter`](docs/elements/meter.md) | Loudness (BS.1770), peak, true peak, RMS and correlation meter |
-| [`stromdsp-broadcastprocessor`](docs/elements/broadcastprocessor.md) | Final processor: AGC → multiband (expander per band, bass clipper) → true-peak limiter, with presets |
+| [`stromdsp-broadcastprocessor`](docs/elements/broadcastprocessor.md) | Final processor: spike guard → AGC → multiband (expander per band, bass clipper) → final clipper → true-peak limiter, clip budget governor, with presets |
 
 The first four form the channel strip. Every processing element has an
 `enabled` property that crossfades to a bit-exact bypass, every

@@ -72,6 +72,14 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
             Kind::FloatArray,
             gst::PARAM_FLAG_MUTABLE_PLAYING,
         ),
+        ("clipper-enabled".into(), Kind::Bool(true), LIVE),
+        (
+            "clipper-bandwidth".into(),
+            Kind::Float(8000.0, 22_000.0, 20_000.0),
+            LIVE,
+        ),
+        ("governor-enabled".into(), Kind::Bool(true), LIVE),
+        ("clip-budget".into(), Kind::Float(0.0, 6.0, 2.0), LIVE),
         ("limiter-enabled".into(), Kind::Bool(true), LIVE),
         (
             "limiter-release".into(),
@@ -80,7 +88,7 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
         ),
         (
             "limiter-lookahead".into(),
-            Kind::Float(0.5, 20.0, 5.0),
+            Kind::Float(0.5, 20.0, 1.5),
             READY,
         ),
         ("meter-interval".into(), Kind::UInt(0, 10_000, 100), LIVE),
@@ -157,7 +165,7 @@ fn property_set_is_exact() {
     let mut want: Vec<String> = spec().into_iter().map(|(n, _, _)| n).collect();
     want.sort();
     assert_eq!(own, want);
-    assert_eq!(want.len(), 21 + 3 + 4 + 40);
+    assert_eq!(want.len(), 25 + 3 + 4 + 40);
 }
 
 #[test]

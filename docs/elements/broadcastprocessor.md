@@ -5,9 +5,9 @@ leaves Strom. Its job is consistent, standards-compliant loudness under a
 guaranteed true-peak ceiling. The chain is:
 
 ```
-input gain → spike guard → wideband AGC → multiband compressor (LR4) → true-peak limiter
-                                          (downward expander per band,
-                                           bass clipper on band 0)
+input gain → spike guard → wideband AGC → multiband compressor (LR4) → final clipper → true-peak limiter
+                                          (downward expander per band,  ↑                │
+                                           bass clipper on band 0)      └─ governor ←────┘
 ```
 
 - **Spike guard:** removes clicks and other short, isolated peaks before
@@ -38,8 +38,24 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → t
   `num-bands` 1 it does nothing (the 3 ms delay stays). Its IM feedback
   (lowering the bass threshold by up to 3 dB while bass peaks coincide with
   clipping after the multiband) has no source yet and stays idle.
+- **Final clipper:** soft clipping at 8× in which only the clippings (what
+  the curve removes) are resampled, band-limited and subtracted from the
+  programme, so the programme itself never passes through resampling
+  filters and is untouched where nothing reaches the knee. Its threshold
+  sits 0.5 dB under the true-peak ceiling; it leaves bass (below the lowest
+  crossover) to the limiter. It takes the peaks so the limiter mostly
+  catches residue.
 - **True-peak limiter:** 4× oversampled detector, ceiling in dBTP per BS.1770
-  Annex 2.
+  Annex 2. It stays the guaranteed ceiling. A ceiling change glides at
+  1 dB per 512 frames.
+- **Clip budget governor:** a slow loop (seconds) that keeps the clipper's
+  clip depth, the share of samples it touches and the limiter's mean gain
+  reduction within `clip-budget`. Over budget it stops the
+  output-referenced trim from adding gain and cuts the AGC target,
+  reporting the shortfall as `loudness-deficit` rather than distorting.
+  Where budget is left but the target is out of reach (AGC and trim at a
+  bound) it lowers the band thresholds with matching makeup ("density").
+  It freezes in pauses and below `agc-gate`.
 - **Stage bypass:** each stage has `*-enabled`, and the whole element has
   `enabled`. Toggles crossfade over 10 ms to a dry path delayed by the same
   latency, so latency never changes when stages are toggled.
@@ -49,15 +65,13 @@ The conventions shared by all elements are in the
 
 ## Latency
 
-`24 + round(spike lookahead · fs / 1000) + round(3 · fs / 1000) +
+`24 + round(spike lookahead · fs / 1000) + round(3 · fs / 1000) + 69 +
 round(limiter-lookahead · fs / 1000) + 32` frames: the spike guard's 4×
 interpolator (24) and lookahead (0.5 ms), the bass clipper's fixed 3 ms
 lookahead (there with the bass clipper off or the multiband bypassed
-too), the limiter's lookahead and its true-peak detector delay (32).
-That is 48 + 144 + 240 + 32 = 464 frames (9.67 ms) at 48 kHz with the
-defaults. The spike guard's lookahead is a configuration value of the
-library (0.5 ms standard, 0 for low latency: 24 frames, 0.5 ms); the
-element uses the standard one. It is reported in the LATENCY query, is the same with
+too), the final clipper (69 frames at every rate), the limiter's
+lookahead and its true-peak detector delay (32). That is 48 + 144 + 69 +
+72 + 32 = 365 frames (7.60 ms) at 48 kHz with the defaults. It is reported in the LATENCY query, is the same with
 `enabled=false` and with any stage bypassed, and a `Latency` message is posted
 when it changes (only at caps negotiation). With `enabled=false` the output is
 the input delayed by exactly that latency. The element never uses
@@ -99,9 +113,13 @@ mutable in PLAYING unless noted.
 | `expander-hold` | float, ms | 0…1000 | 100 |
 | `bass-clipper-enabled` | bool | | true |
 | `bass-clip-threshold` | float, dB (band 0 analytic envelope) | −40…0 | −14 |
+| `clipper-enabled` | bool | | true |
+| `clipper-bandwidth` | float, Hz | 8000…22000 | 20000 |
+| `governor-enabled` | bool | | true |
+| `clip-budget` | float, dB | 0…6 | 2 |
 | `limiter-enabled` | bool | | true |
 | `limiter-release` | float, ms | 1…2000 | 200 |
-| `limiter-lookahead` | float, ms (READY only, not controllable) | 0.5…20 | 5 |
+| `limiter-lookahead` | float, ms (READY only, not controllable) | 0.5…20 | 1.5 |
 | `meter-interval` | uint, ms (0 = off) | 0…10000 | 100 |
 
 The defaults are the `ebu-r128` preset at 4 bands. READY-only properties
@@ -121,7 +139,7 @@ entry rejects the whole write.
 Setting `preset` sets every property except `enabled`, `meter-interval`,
 `num-bands` and `limiter-lookahead`, using the current `num-bands`.
 - **`limiter-lookahead`:** it sets the element's latency, so it is READY-only
-  and not part of a preset. All presets assume 5 ms.
+  and not part of a preset. All presets assume 1.5 ms.
 - **Writing another property afterwards:** a write that changes a value
   changes only that property, and `preset` then reads `custom`. Writing
   `custom` changes nothing.
@@ -131,15 +149,16 @@ Setting `preset` sets every property except `enabled`, `meter-interval`,
 Presets are our own, based on the standards' targets and textbook dynamics,
 and deliberately gentle:
 
-| Nick | Target | Ceiling | AGC max gain/cut | AGC rate up/down | `agc-gate` | Band threshold | Band ratio | `limiter-release` |
-|---|---|---|---|---|---|---|---|---|
-| `ebu-r128` (default) | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 LUFS | −18 dB | 2 | 200 ms |
-| `atsc-a85` | −24 LKFS | −2 dBTP | 24 / 24 | 3 / 6 | −50 | −19 | 2 | 200 |
-| `streaming` | −16 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −50 | −11 | 2 | 200 |
-| `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 |
+| Nick | Target | Ceiling | AGC max gain/cut | AGC rate up/down | `agc-gate` | Band threshold | Band ratio | `limiter-release` | `clip-budget` |
+|---|---|---|---|---|---|---|---|---|---|
+| `ebu-r128` (default) | −23 LUFS | −1 dBTP | 24 / 24 dB | 1 / 3 dB/s | −50 LUFS | −18 dB | 2 | 200 ms | 2 dB |
+| `atsc-a85` | −24 LKFS | −2 dBTP | 24 / 24 | 3 / 6 | −50 | −19 | 2 | 200 | 2 |
+| `streaming` | −16 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −50 | −11 | 2 | 200 | 3 |
+| `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 | 2 |
 
-All presets: `input-gain` 0, all stages on, `spike-threshold` 8 dB,
-`multiband-drive` 0, band makeup 0, `expander-hold` 100 ms,
+All presets: `input-gain` 0, all stages on (clipper and governor too),
+`spike-threshold` 8 dB, `multiband-drive` 0, band makeup 0,
+`clipper-bandwidth` 20000 Hz, `expander-hold` 100 ms,
 `bass-clipper-enabled` true, `bass-clip-threshold` = target + 9 dB.
 
 | Nick | `bandN-expander-threshold` (every band) | `bandN-expander-ratio` | `bandN-expander-floor` | `bass-clip-threshold` |
@@ -182,6 +201,16 @@ All presets: `input-gain` 0, all stages on, `spike-threshold` 8 dB,
   steady bass at target + 13 dB comes out of the 2:1 band compressor at
   target + 9 dB, so the clipper catches only louder bass peaks and the ones
   the 30 ms band-0 attack lets through.
+- **Clip budget:** 2 dB allows a clip depth of −30 dB, 1 dB of mean limiter
+  gain reduction and 1 % of samples touched (see the mapping below). At
+  −18 … −24 LUFS programme rarely reaches the clipper, so the budget
+  matters only for hot, peaky material; the peaky test programme stays
+  within ±1 LU at every preset. Speech keeps 2 dB: with 1 dB the governor
+  took 1 … 2 LU off the peaky programme. Streaming gets 3 dB (−25 dB,
+  1.5 dB, 1.4 %): at −16 LUFS peaks reach the clipper more often, and 2 dB
+  cost the peaky programme 0.6 … 1.5 LU.
+- **Clipper bandwidth:** 20 kHz, the top of the audio band: the clipper adds
+  nothing above it.
 
 Crossovers and band time constants depend only on the band count:
 
@@ -203,8 +232,15 @@ presets:
 - `num-bands` 4 (crossovers 120, 800 and 4000 Hz): bass, body, presence and
   top are controlled separately, without the extra phase shift and cost of a
   fifth band.
-- `limiter-lookahead` 5 ms: the limiter's attack equals the lookahead, and
-  5 ms catches a peak with a smooth ramp; it matches `stromdsp-limiter`.
+- `limiter-lookahead` 1.5 ms: the final clipper takes the peaks, so the
+  limiter handles residue only. Measured on the peaky programme
+  (streaming, −23 LUFS input): limiter mean gain reduction 1.72 dB with no
+  clipper and 5 ms, 0.71 dB with the clipper and 5 ms, 0.69 dB with the
+  clipper and 1.5 ms; true peak within the ceiling in all cases, and
+  within +0.008 dB on nasty signals (squares and impulses at +20 dBFS,
+  fs/4 at 45°, tones up to 0.45·fs, white noise, clicks) at 44.1, 48 and
+  96 kHz. A 0.75 ms lookahead with the clipper's low-latency setting
+  holds the same ceiling (0.97 dB mean gain reduction).
 - `meter-interval` 100 ms: ten updates per second, the same as
   `stromdsp-meter`.
 
@@ -252,6 +288,58 @@ is programme to it). With the low-latency lookahead (none), programme that
 jumps more than `spike-threshold` over its own recent peaks, such as a
 drum hit or a word after silence, loses up to 0.4 ms of its onset to the
 threshold; with the standard lookahead programme is never touched.
+Measured case: the peaky programme above with a click every 300 ms instead
+of every 1.1 s, `streaming` preset, integrated output 10 … 60 s (target
+−16 LUFS). Before the final clipper the limiter took about 13 dB off the
+clicks and every input level missed ±1 LU. Now:
+
+| Input | No clipper (before) | Clipper, governor off | Defaults (clipper and governor) |
+|---|---|---|---|
+| −35 LUFS | −17.69 LUFS | −16.52 LUFS | −18.72 LUFS |
+| −23 LUFS | −17.15 LUFS | −16.37 LUFS | −19.13 LUFS |
+| −10 LUFS | −17.11 LUFS | −16.33 LUFS | −19.68 LUFS |
+
+The clipper alone lands within ±1 LU. With the governor on, the clipping
+of the clicks and the limiting of what the clipper leaves of them use more
+than the streaming budget (3 dB), so the governor holds the trim, cuts
+the AGC target, and reports the shortfall in `loudness-deficit`. Clicks
+like these should be removed before the AGC by a stage made for that
+(they are defects, not programme peaks); the budget is meant for
+programme.
+
+**Clip budget mapping.** Each measure, over a gated 3 s window, is turned
+into the budget that would allow it; the largest is compared with
+`clip-budget` `B`:
+
+| Measure | Allowed at budget `B` |
+|---|---|
+| clip depth (removed / input energy of the clipper) | `−40 + 5·B` dB |
+| limiter mean gain reduction | `B/2` dB |
+| share of samples the clipper touches | `0.5 % · 2^(B/2)` |
+
+Holding a budget has a loudness cost that depends on the programme. On
+the sport-like peaky programme (transients the band compressors cannot
+catch) with `clip-budget` 1.5 at `streaming`, the governor holds the
+clip depth under −32.5 dB (−31.2 dB with it off) and the output lands
+1.4 … 2.0 LU under the target, reported as `loudness-deficit`.
+
+## Final clipper latency
+
+The clipper's structure is a library setting (`clipper_latency`, chosen
+by the element's coming latency mode; the element uses `standard` today):
+
+| Setting | Structure | Latency (48 kHz) | 15 kHz alias | Worst overshoot | Limiter lookahead | Element latency |
+|---|---|---|---|---|---|---|
+| `standard` | 8×, one pass, 41-tap shaping | 69 frames, 1.44 ms | −94.0 dBFS | +0.77 dB | 1.5 ms | 173 frames, 3.60 ms |
+| `low` | 4×, one pass, 3-tap shaping | 48 frames, 1.00 ms | −75.8 dBFS | +2.17 dB | 0.75 ms | 116 frames, 2.42 ms |
+| `two-pass` | 8×, two passes | 138 frames, 2.88 ms | −94.0 dBFS | +0.27 dB | | |
+
+Alias: largest spur of a 15 kHz tone 6 dB over the threshold. Overshoot:
+worst sample peak over the threshold on band-limited signals (tones,
+19 + 20 kHz, pink and speech-like noise) driven 2 and 4 dB into the
+clipper; the true-peak limiter after the clipper takes it. Every setting
+beats both the limiter alone and a plain hard clip on loudness against
+noise-to-mask ratio at drives 0 … 4 dB (`tests/clipper.rs`).
 
 ## Signals
 
@@ -286,6 +374,9 @@ reads −200.0, never NaN.
 | `limiter-gain-reduction` | gdouble | positive dB of reduction; max of values sampled every 512 frames |
 | `band-expander-gain-reduction` | GstValueArray of gdouble | positive dB of expander attenuation, one per active band |
 | `bass-clip-gr` | gdouble | positive dB of bass-clipper reduction, largest since the last message |
+| `clip-depth` | gdouble, dB | energy the final clipper removed relative to its input since the last message; −200.0 when nothing |
+| `loudness-deficit` | gdouble, LU | how far the governor lets the output fall short of the target (≥ 0) |
+| `governor-state` | gchararray | `off`, `frozen` (pause, below the gate, a stage bypassed), `free`, `hold`, `density`, `cut` or `release` |
 
 ## Example
 

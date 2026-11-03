@@ -28,6 +28,7 @@ use std::f64::consts::PI;
 
 use agc_support::{pink, scale_to_lufs, Looper, Rng};
 use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, SILENCE_DB};
+use strom_dsp::clipper::ClipperLatency;
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};
 use strom_dsp::multiband::MAX_BANDS;
 use strom_dsp::Processor;
@@ -127,17 +128,19 @@ enum Bypass {
     SpikeGuard,
     Agc,
     Multiband,
+    Clipper,
     Limiter,
     AllStages,
     Chain,
 }
 
 impl Bypass {
-    const ALL: [Bypass; 7] = [
+    const ALL: [Bypass; 8] = [
         Bypass::None,
         Bypass::SpikeGuard,
         Bypass::Agc,
         Bypass::Multiband,
+        Bypass::Clipper,
         Bypass::Limiter,
         Bypass::AllStages,
         Bypass::Chain,
@@ -149,11 +152,13 @@ impl Bypass {
             Bypass::SpikeGuard => p.spike_guard_enabled = on,
             Bypass::Agc => p.agc_enabled = on,
             Bypass::Multiband => p.multiband_enabled = on,
+            Bypass::Clipper => p.clipper_enabled = on,
             Bypass::Limiter => p.limiter_enabled = on,
             Bypass::AllStages => {
                 p.spike_guard_enabled = on;
                 p.agc_enabled = on;
                 p.multiband_enabled = on;
+                p.clipper_enabled = on;
                 p.limiter_enabled = on;
             }
             Bypass::Chain => p.enabled = on,
@@ -181,6 +186,7 @@ fn impulse_latency_is_reported_latency() {
                 q.spike_guard_enabled = true;
                 q.agc_enabled = true;
                 q.multiband_enabled = true;
+                q.clipper_enabled = true;
                 q.limiter_enabled = true;
                 bp.set_params(&q);
                 assert_eq!(bp.latency_frames(), lat);
@@ -238,19 +244,35 @@ fn latency_formula() {
         );
     }
     // Spike guard (4× interpolator 24 + its 0.5 ms standard lookahead), the
-    // bass clipper's 3 ms lookahead, then the limiter lookahead plus the
-    // true-peak detector delay (24 + 8 frames).
+    // bass clipper's 3 ms lookahead, the final clipper (69 frames, standard
+    // setting), then the limiter lookahead plus the true-peak detector delay
+    // (24 + 8 frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        (24 + 24) + 144 + 240 + 32
+        (24 + 24) + 144 + 69 + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        (24 + 22) + 132 + 221 + 32
+        (24 + 22) + 132 + 69 + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        (24 + 48) + 288 + 480 + 32
+        (24 + 48) + 288 + 69 + 480 + 32
+    );
+    // Defaults: 1.5 ms lookahead, standard clipper; the low clipper setting
+    // with 0.75 ms.
+    let d = BroadcastParams::default();
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for_config(
+            48_000.0,
+            d.limiter_lookahead_ms,
+            d.clipper_latency
+        ),
+        (24 + 24) + 144 + 69 + 72 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for_config(48_000.0, 0.75, ClipperLatency::Low),
+        (24 + 24) + 144 + 48 + 36 + 32
     );
     // The spike guard lookahead is structural too (0 = low latency).
     let low = BroadcastParams {
@@ -259,13 +281,13 @@ fn latency_formula() {
     };
     assert_eq!(
         BroadcastProcessor::latency_frames_for_params(48_000.0, &low),
-        24 + 144 + 240 + 32
+        24 + 144 + 69 + 72 + 32
     );
     let mut bp = processor(48_000.0, 2, &BroadcastParams::default());
     bp.set_params(&low);
-    assert_eq!(bp.latency_frames(), 48 + 144 + 240 + 32);
+    assert_eq!(bp.latency_frames(), 48 + 144 + 69 + 72 + 32);
     bp.configure(48_000.0, 2);
-    assert_eq!(bp.latency_frames(), 24 + 144 + 240 + 32);
+    assert_eq!(bp.latency_frames(), 24 + 144 + 69 + 72 + 32);
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),
@@ -277,7 +299,7 @@ fn latency_formula() {
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, f32::NAN),
-        BroadcastProcessor::latency_frames_for(48_000.0, 5.0)
+        BroadcastProcessor::latency_frames_for(48_000.0, 1.5)
     );
 }
 
@@ -306,10 +328,14 @@ fn abs_peak(y: &[f32], ch: usize, range: std::ops::Range<usize>) -> f64 {
 }
 
 /// An active configuration: default 4 bands compressing a −12 dBFS tone,
-/// the limiter limiting (ceiling −18 dBTP), the AGC riding.
+/// the limiter limiting (ceiling −18 dBTP), the AGC riding. The final
+/// clipper is off: it would clip the tone, and the annihilator would read
+/// the clipping's harmonics as clicks. Its toggle is tested on a tone
+/// under its knee ([`clipper_toggle_is_click_free`]).
 fn active_params() -> BroadcastParams {
     BroadcastParams {
         true_peak_ceiling_dbtp: -18.0,
+        clipper_enabled: false,
         ..BroadcastParams::default()
     }
 }
@@ -325,7 +351,12 @@ fn bypass_toggles_are_click_free() {
     let toggles = [96_000usize, 120_000]; // off at 2.0 s, on at 2.5 s
     let total = 150_000;
     let x = sine(total, ch, FS as f64, freq, 0.25);
-    for by in Bypass::ALL.into_iter().skip(1) {
+    // The clipper is off in `active_params`; its toggle has its own test.
+    for by in Bypass::ALL
+        .into_iter()
+        .skip(1)
+        .filter(|b| !matches!(b, Bypass::Clipper))
+    {
         let base = active_params();
         let mut bp = processor(FS, ch, &base);
         let mut y = x.clone();
@@ -334,8 +365,11 @@ fn bypass_toggles_are_click_free() {
             for c in y[start * ch..t * ch].chunks_mut(BLOCK * ch) {
                 bp.process(c);
             }
+            // Off at the first toggle, back to the base at the second.
             let mut p = base;
-            by.apply(&mut p, i == 1);
+            if i == 0 {
+                by.apply(&mut p, false);
+            }
             bp.set_params(&p);
             start = t;
         }
@@ -352,6 +386,32 @@ fn bypass_toggles_are_click_free() {
                 "{by:?} toggle at {t}: residual {rel:.1} dB (settled amplitude {settled})"
             );
         }
+    }
+}
+
+/// Toggling the final clipper is click-free and keeps the timing: on a
+/// tone under its knee the processed and the bypassed signal are the same,
+/// so any step in the delay would show in the annihilator.
+#[test]
+fn clipper_toggle_is_click_free() {
+    let ch = 2;
+    let freq = 1000.0;
+    let w = 2.0 * PI * freq / FS as f64;
+    let mut p = flat_params();
+    p.agc_enabled = false;
+    let x = sine(72_000, ch, FS as f64, freq, 0.25);
+    let mut bp = processor(FS, ch, &p);
+    let mut y = x.clone();
+    for (i, c) in y.chunks_mut(BLOCK * ch).enumerate() {
+        if i == 50 || i == 100 {
+            p.clipper_enabled = i == 100;
+            bp.set_params(&p);
+        }
+        bp.process(c);
+    }
+    for t in [50 * BLOCK, 100 * BLOCK] {
+        let r = annihilator_peak(&y, ch, w, t - 960..t + 9600);
+        assert!(db(r / 0.25) < -50.0, "residual {:.1} dB", db(r / 0.25));
     }
 }
 
@@ -420,6 +480,8 @@ fn input_gain_change_is_click_free() {
     let mut p = flat_params();
     p.agc_enabled = false;
     p.limiter_enabled = false;
+    // +24 dB takes the tone into the final clipper's knee.
+    p.clipper_enabled = false;
     let x = sine(48_000, ch, FS as f64, freq, 0.05);
     let mut bp = processor(FS, ch, &p);
     let mut y = x.clone();
@@ -513,6 +575,9 @@ fn meter_sign_conventions() {
             agc_rate_up_db_s: 10.0,
             agc_rate_down_db_s: 10.0,
             true_peak_ceiling_dbtp: -20.0,
+            // The limiter is what this checks; the clipper would take the
+            // peaks first.
+            clipper_enabled: false,
             ..BroadcastParams::default()
         };
         for b in &mut p.bands {
@@ -572,6 +637,7 @@ fn limiter_gain_reduction_is_positive_when_limiting() {
     let ch = 2;
     let mut p = flat_params();
     p.agc_enabled = false;
+    p.clipper_enabled = false;
     p.true_peak_ceiling_dbtp = -6.0;
     let mut bp = processor(FS, ch, &p);
     let x = sine(48_000, ch, FS as f64, 200.0, 1.0);

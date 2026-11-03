@@ -1,8 +1,9 @@
 //! `stromdsp-broadcastprocessor`: broadcast/streaming final processor.
 //!
 //! ```text
-//! input gain → spike guard → wideband AGC → multiband compressor → true-peak limiter
-//!                                           (expander per band, bass clipper on band 0)
+//! input gain → spike guard → wideband AGC → multiband compressor → final clipper → true-peak limiter
+//!                                           (expander per band,   ↑                        │
+//!                                            bass clipper band 0) └─ clip budget governor ←┘
 //! ```
 //!
 //! An in-place `BaseTransform` on interleaved F32LE, any rate and channel
@@ -44,9 +45,13 @@
 //! | `expander-hold` | Float | ms | 0 … 1000 | 100 | PLAYING |
 //! | `bass-clipper-enabled` | Boolean | | | `true` | PLAYING |
 //! | `bass-clip-threshold` | Float | dB | −40 … 0 | −14 | PLAYING |
+//! | `clipper-enabled` | Boolean | | | `true` | PLAYING |
+//! | `clipper-bandwidth` | Float | Hz | 8000 … 22000 | 20000 | PLAYING |
+//! | `governor-enabled` | Boolean | | | `true` | PLAYING |
+//! | `clip-budget` | Float | dB | 0 … 6 | 2 | PLAYING |
 //! | `limiter-enabled` | Boolean | | | `true` | PLAYING |
 //! | `limiter-release` | Float | ms | 1 … 2000 | 200 | PLAYING |
-//! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 5 | READY (not controllable) |
+//! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 1.5 | READY (not controllable) |
 //! | `meter-interval` | UInt | ms | 0 … 10000 (0 = off) | 100 | PLAYING |
 //!
 //! The defaults are the `ebu-r128` preset at 4 bands
@@ -137,6 +142,9 @@
 //! | `limiter-gain-reduction` | `gdouble` | dB | positive dB of reduction |
 //! | `band-expander-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of expander attenuation, one per active band, lowest first |
 //! | `bass-clip-gr` | `gdouble` | dB | positive dB of bass-clipper reduction, largest since the last message |
+//! | `clip-depth` | `gdouble` | dB | energy the final clipper removed relative to its input, since the last message (−200 when nothing) |
+//! | `loudness-deficit` | `gdouble` | LU | how far the governor lets the output fall short of the target (≥ 0) |
+//! | `governor-state` | `gchararray` | | `off`, `frozen`, `free`, `hold`, `density`, `cut` or `release` |
 //!
 //! Silence (and anything not yet measured) reads [`SILENCE_DB`] (−200),
 //! never NaN or −∞.
@@ -146,8 +154,8 @@
 //! The `LATENCY` query adds
 //! `BroadcastProcessor::latency_frames_for(rate, limiter-lookahead)` frames
 //! (the spike guard's 4× interpolator and 0.5 ms lookahead, the bass
-//! clipper's 3 ms lookahead, the limiter lookahead and its oversampling
-//! filter delay), as time rounded up to
+//! clipper's 3 ms lookahead, the final clipper's 69 frames, the limiter
+//! lookahead and its oversampling filter delay), as time rounded up to
 //! whole nanoseconds. Before caps are negotiated it assumes 48 kHz. It does
 //! not depend on `enabled` or on stage bypass. A `Latency` message is posted
 //! when it changes, which only happens at a caps negotiation (both
