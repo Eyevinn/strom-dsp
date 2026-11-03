@@ -15,6 +15,9 @@
 //!   [`acceptance`], using the presets of `strom_dsp::presets`: integrated
 //!   loudness (from 10 s) within ±1 LU of the target, true peak ≤ ceiling +
 //!   0.1 dB, both measured with `ebur128`.
+//! - Hot, peaky acceptance (sport-like programme with hits, clicks and
+//!   inter-sample peaks, plus a 10 s pause): see [`peaky_acceptance`]: the
+//!   same bounds, and no short-term overshoot after the pause.
 
 mod agc_support;
 
@@ -909,8 +912,7 @@ fn no_allocation() {
 ///
 /// With these gentle presets this programme's output true peak stays 2 …
 /// 9 dB below the ceiling, so it does not stress the true-peak limiter (its
-/// own tests in `tests/truepeak.rs` do). TODO: add a hot, peaky programme
-/// through the full chain.
+/// own tests in `tests/truepeak.rs` do); [`peaky_acceptance`] does.
 mod acceptance {
     use super::*;
     use strom_dsp::presets::BroadcastPreset;
@@ -1011,5 +1013,185 @@ mod acceptance {
     #[test]
     fn preset_speech() {
         check("speech", TP_MARGIN_DB);
+    }
+}
+
+/// A hot, peaky, sport-like programme through the full chain, per preset at
+/// −35, −23 and −10 LUFS input:
+///
+/// - integrated loudness (from 10 s to 60 s) within ±1 LU of the target;
+/// - output true peak ≤ ceiling + 0.1 dB over the whole run;
+/// - no overshoot after a 10 s pause: from the end of the pause on, the
+///   output short-term loudness never exceeds the target by more than 1 LU.
+///
+/// The multiband and the limiter take a large share of this programme's
+/// level (dense hits and clicks), so it checks that the chain makes up what
+/// the stages after the AGC remove. Both measured with `ebur128`.
+mod peaky_acceptance {
+    use super::*;
+    use strom_dsp::presets::BroadcastPreset;
+
+    /// Programme before the pause (s); integrated loudness is measured from
+    /// `SKIP_SECONDS` to here.
+    const PROGRAMME_SECONDS: usize = 60;
+    const SKIP_SECONDS: usize = 10;
+    const PAUSE_SECONDS: usize = 10;
+    /// Programme after the pause (s).
+    const RETURN_SECONDS: usize = 20;
+    const TP_MARGIN_DB: f64 = 0.1;
+    const LOUDNESS_TOL_LU: f64 = 1.0;
+    const OVERSHOOT_TOL_LU: f64 = 1.0;
+
+    fn preset(name: &str) -> BroadcastParams {
+        BroadcastParams::preset(BroadcastPreset::from_nick(name).unwrap(), 4)
+    }
+
+    /// A sport-like programme (a ~10.9 s loop, fixed seed): a pink-noise
+    /// crowd bed; percussive hits every ~250 ms (a decaying white-noise
+    /// burst plus a decaying 60 Hz thump); a 5 ms fs/4 sine burst at 45°
+    /// phase (sample peaks 3 dB under its true peak) every ~2.3 s; and a
+    /// single-sample click every ~1.1 s.
+    fn programme(ch: usize, fs: f64) -> Vec<f32> {
+        let frames = 1 << 19;
+        let mut x = pink(frames, ch, fs, 31);
+        x.iter_mut().for_each(|v| *v *= 0.12);
+        let mut rng = Rng::new(17);
+        // Hits: every 250 ms ± 20 ms.
+        let mut at = 0.0f64;
+        while at < frames as f64 / fs - 0.3 {
+            let start = (at * fs) as usize;
+            let amp = 0.42 + 0.18 * rng.uniform();
+            for k in 0..(0.25 * fs) as usize {
+                let n = start + k;
+                if n >= frames {
+                    break;
+                }
+                let t = k as f64 / fs;
+                let thump = (2.0 * PI * 60.0 * t).sin() * (-t / 0.06).exp();
+                let burst = (-t / 0.012).exp();
+                for c in 0..ch {
+                    let v = amp * (thump + burst * rng.bipolar());
+                    x[n * ch + c] += v as f32;
+                }
+            }
+            at += 0.25 + 0.04 * (rng.uniform() - 0.5);
+        }
+        // fs/4 bursts at 45° phase, 5 ms, every 2.3 s.
+        let burst_len = (0.005 * fs) as usize;
+        let mut start = (0.7 * fs) as usize;
+        while start + burst_len < frames {
+            for k in 0..burst_len {
+                let v = (1.2 * (PI / 2.0 * k as f64 + PI / 4.0).sin()) as f32;
+                for c in 0..ch {
+                    x[(start + k) * ch + c] += v;
+                }
+            }
+            start += (2.3 * fs) as usize;
+        }
+        // Single-sample clicks every 1.1 s.
+        let mut n = (0.37 * fs) as usize;
+        let mut sign = 1.0f32;
+        while n < frames {
+            for c in 0..ch {
+                x[n * ch + c] += 4.0 * sign;
+            }
+            sign = -sign;
+            n += (1.1 * fs) as usize;
+        }
+        x
+    }
+
+    /// Run one preset at three input levels and check all three bounds;
+    /// every failed check is reported.
+    fn check(name: &str) {
+        let ch = 2;
+        let fs = FS as f64;
+        let p = preset(name);
+        let target = p.target_loudness_lufs as f64;
+        let ceiling = p.true_peak_ceiling_dbtp as f64;
+        let src = programme(ch, fs);
+        let mut failures = Vec::new();
+        for input_lufs in [-35.0, -23.0, -10.0] {
+            let mut x = src.clone();
+            scale_to_lufs(&mut x, ch, fs, input_lufs);
+            let mut bp = processor(FS, ch, &p);
+            let cfg = LoudnessConfig {
+                sample_rate: FS,
+                channels: ch,
+                layout: ChannelLayout::Unknown,
+                true_peak: true,
+            };
+            // Integrated loudness over 10 … 60 s; short-term and true peak
+            // over the whole run.
+            let mut integrated_meter = LoudnessMeter::new(&cfg).unwrap();
+            let mut meter = LoudnessMeter::new(&cfg).unwrap();
+            let mut looper = Looper::new(&x);
+            let mut buf = vec![0.0f32; BLOCK * ch];
+            let per_s = FS as usize / BLOCK;
+            let skip = SKIP_SECONDS * per_s;
+            let pause_start = PROGRAMME_SECONDS * per_s;
+            let pause_end = pause_start + PAUSE_SECONDS * per_s;
+            let end = pause_end + RETURN_SECONDS * per_s;
+            let mut max_short_term_after_pause = SILENCE_DB;
+            for i in 0..end {
+                if (pause_start..pause_end).contains(&i) {
+                    buf.fill(0.0);
+                } else {
+                    looper.fill(&mut buf);
+                }
+                bp.process(&mut buf);
+                meter.process(&buf);
+                if (skip..pause_start).contains(&i) {
+                    integrated_meter.process(&buf);
+                }
+                if i >= pause_end {
+                    max_short_term_after_pause = max_short_term_after_pause.max(meter.short_term());
+                }
+            }
+            let integrated = integrated_meter.integrated();
+            let tp = db((0..ch).map(|c| meter.true_peak(c)).fold(0.0, f64::max));
+            println!(
+                "peaky {name} at {input_lufs} LUFS: integrated {integrated:.2} LUFS \
+                 (target {target}), true peak {tp:.2} dBTP (ceiling {ceiling}), \
+                 max short-term after pause {max_short_term_after_pause:.2} LUFS"
+            );
+            if (integrated - target).abs() > LOUDNESS_TOL_LU {
+                failures.push(format!(
+                    "{name} at {input_lufs} LUFS: integrated {integrated:.2} LUFS, target {target}"
+                ));
+            }
+            if tp > ceiling + TP_MARGIN_DB {
+                failures.push(format!(
+                    "{name} at {input_lufs} LUFS: true peak {tp:.2} dBTP, ceiling {ceiling}"
+                ));
+            }
+            if max_short_term_after_pause > target + OVERSHOOT_TOL_LU {
+                failures.push(format!(
+                    "{name} at {input_lufs} LUFS: short-term {max_short_term_after_pause:.2} \
+                     LUFS after the pause, target {target}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn preset_ebu_r128() {
+        check("ebu-r128");
+    }
+
+    #[test]
+    fn preset_atsc_a85() {
+        check("atsc-a85");
+    }
+
+    #[test]
+    fn preset_streaming() {
+        check("streaming");
+    }
+
+    #[test]
+    fn preset_speech() {
+        check("speech");
     }
 }

@@ -44,8 +44,10 @@
 //! operator expects.
 //!
 //! **Gain law.** On every sub-block the target gain is
-//! `clamp(target_lufs − measured, −max_cut_db, +max_gain_db)` (while not
-//! holding). The applied gain in dB moves toward it linearly at most at
+//! `clamp(target_lufs + offset − measured, −max_cut_db, +max_gain_db)`
+//! (while not holding), where `offset` is 0 unless set from outside with
+//! [`Agc::set_target_offset_db`] (the broadcast chain uses it for a slow
+//! output-referenced correction). The applied gain in dB moves toward it linearly at most at
 //! `rate_up_db_per_s` (gain rising) or `rate_down_db_per_s` (gain falling),
 //! per sample; inside a ramp the linear gain is advanced by a constant
 //! per-sample factor `10^(±step/20)` and re-anchored to `10^(gain_db/20)` at
@@ -198,6 +200,8 @@ pub struct Agc {
     target_gain_db: f64,
     measured_lufs: f64,
     holding: bool,
+    /// Added to `target_lufs` (dB); see [`Agc::set_target_offset_db`].
+    target_offset_db: f64,
 }
 
 impl Default for Agc {
@@ -227,6 +231,7 @@ impl Agc {
             target_gain_db: 0.0,
             measured_lufs: SILENCE_LUFS,
             holding: true,
+            target_offset_db: 0.0,
         }
     }
 
@@ -305,6 +310,28 @@ impl Agc {
         self.holding
     }
 
+    /// Offset (dB) added to `target_lufs` when the target gain is computed:
+    /// a slow correction from outside the AGC, e.g. for level that later
+    /// stages remove (see `broadcast.rs`). It goes through the same gain
+    /// bounds and rate limits as the target, and changes nothing while the
+    /// gain holds. Non-finite values read as 0. Kept by `reset`; 0 after
+    /// `new`. Allocation-free.
+    pub fn set_target_offset_db(&mut self, offset_db: f64) {
+        self.target_offset_db = if offset_db.is_finite() {
+            offset_db
+        } else {
+            0.0
+        };
+        if self.configured {
+            self.update_target();
+        }
+    }
+
+    /// The offset set by [`Agc::set_target_offset_db`] (dB).
+    pub fn target_offset_db(&self) -> f64 {
+        self.target_offset_db
+    }
+
     fn rate_step(&self, rising: bool) -> f64 {
         let rate = if rising {
             self.params.rate_up_db_per_s
@@ -344,7 +371,7 @@ impl Agc {
         let want = if self.holding {
             self.gain_db
         } else {
-            f64::from(self.params.target_lufs) - self.measured_lufs
+            f64::from(self.params.target_lufs) + self.target_offset_db - self.measured_lufs
         };
         self.target_gain_db = want.clamp(-max_cut, max_gain);
     }

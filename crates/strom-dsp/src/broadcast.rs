@@ -20,7 +20,7 @@
 //!   each (critically damped, starts with zero slope); a settled 0 dB is
 //!   skipped (bit-exact).
 //! - **AGC**: [`crate::agc::Agc`] (gated, rate-limited loudness rider; no
-//!   latency).
+//!   latency), with a slow output-referenced trim on its target (below).
 //! - **Multiband**: [`crate::multiband::MultibandCompressor`] (LR4
 //!   crossover, compressor per band; no latency, an all-pass at ratio 1).
 //! - **Limiter**: [`crate::truepeak::TruePeakLimiter`] with ceiling
@@ -55,6 +55,56 @@
 //! `num_bands` and `limiter_lookahead_ms` are structural: they take effect
 //! at the next [`Processor::configure`].
 //!
+//! # Output-referenced trim
+//!
+//! The AGC measures its *input*. The multiband and the limiter after it
+//! take level away, more so on peaky programme (dense hits, clicks), and
+//! the AGC alone never makes that up. A slow outer loop does: an integral
+//! controller (Åström & Hägglund, *PID Controllers*, ch. 3) on the
+//! loudness at the chain output, whose output `trim` is added to the AGC
+//! target ([`crate::agc::Agc::set_target_offset_db`]).
+//!
+//! - **Measurement:** the output [`LoudnessDetector`]'s 10 ms sub-blocks,
+//!   gated exactly like the AGC's own measurement (400 ms blocks below
+//!   `agc_gate_lufs` are left out) and averaged over 3 s.
+//! - **Law:** every 10 ms, `trim += (target − measured_out) · 10 ms / τ`,
+//!   τ = 8 s, with the step limited to `min(0.5 dB/s, ½ · slower AGC rate)`
+//!   and `|trim| ≤ 6 dB`.
+//! - **Freeze** (the trim keeps its value) when: the newest 100 ms of the
+//!   output is below the gate, or the window holds less than 400 ms of
+//!   gated output (pauses, silence: the same rule as the AGC); the AGC or
+//!   the chain is bypassed or fading; the AGC gain has not stayed within
+//!   1 dB of its target for a whole window (the window would still hold
+//!   output from an AGC ramp); or the AGC target is at a gain bound in the
+//!   direction the error pushes (anti-windup by conditional integration).
+//! - **Bounds and rates:** the trim only moves the AGC target, so the AGC's
+//!   gain bounds and rate limits apply to the total. The trim is reset to
+//!   0 by `configure`/`reset`.
+//!
+//! **Stability.** Let `s ∈ [0, 1]` be the incremental gain of the stages
+//! after the AGC (dB out per dB in: 1 when they are idle, `1/ratio` while
+//! compressing, near 0 when the limiter holds every peak). The AGC follows
+//! the trim without lag, since the trim moves at most half as fast as the
+//! AGC may. The loop is then an integrator `s/(τ·p)` with the measurement
+//! window, a moving average of `W` = 3 s: a linear-phase filter with a
+//! group delay of `T = W/2 = 1.5 s` and a gain ≤ 1. The crossover is at
+//! `ω_c = s/τ ≤ 0.125 rad/s`, so the phase margin is
+//! `90° − ω_c·T ≥ 79°`, and the gain at the −180° frequency
+//! (`π/(2T)` ≈ 1.05 rad/s) is at most `1/(τ·1.05)`, a gain margin of at
+//! least 18 dB. `s·T/τ ≤ 0.19 < 1/e`, the bound below which an integrator
+//! with a pure delay `T` settles without oscillating. The closed-loop time
+//! constant is `τ/s` ≥ 8 s, against detector windows of 0.1, 0.4 and 3 s.
+//! The rate and range limits only slow the loop. When the later stages
+//! cannot deliver more loudness (`s` near 0) the trim stops at its range
+//! or at the AGC bound; it does not oscillate.
+//!
+//! **Pauses.** During a pause the trim is frozen (a holding AGC counts as
+//! settled: its gain does not move). After it, the gated output window
+//! leaves the pause out, the trim waits for 400 ms of returning
+//! programme, and if the AGC gain has to move by more than 1 dB, for a
+//! whole window after it settles. The trim never runs up on silence, so
+//! there is no overshoot when the programme returns.
+//!
 //! # Meters
 //!
 //! | Value | Source | Cost |
@@ -63,7 +113,7 @@
 //! | output momentary / short-term | a second [`LoudnessDetector`] on the final output | ≈ 1.3 µs per 480 stereo frames, O(1) read |
 //! | output integrated | [`LoudnessMeter`] (histogram mode, no true peak) on the final output | ≈ 7 µs per 480 stereo frames, < 1 µs read |
 //! | input / output true peak | 4× [`Oversampler`] peaks (max over sub-samples and channels) of the raw input (before the input gain) / of the final output, held until [`BroadcastProcessor::take_meters`] | upsampling per block |
-//! | AGC gain | [`crate::agc::Agc::gain_db`] | O(1) |
+//! | AGC gain | [`crate::agc::Agc::gain_db`] (the trim included: it is the applied gain) | O(1) |
 //! | band gain reduction | [`crate::multiband::MultibandCompressor::gain_reduction_db`] at read time | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
 //!
@@ -75,9 +125,12 @@
 //! [`BroadcastProcessor::take_meters`] is O(1) and allocation-free: call it
 //! once per buffer if needed.
 
-use crate::agc::{Agc, AgcParams};
+use crate::agc::{Agc, AgcParams, HOLD_BLOCK_SUB_BLOCKS, MIN_ACTIVE_MS};
 use crate::dynamics::OnePole;
-use crate::meter::{ChannelLayout, LoudnessConfig, LoudnessDetector, LoudnessMeter};
+use crate::meter::{
+    lufs_from_mean_square, ChannelLayout, History, LoudnessConfig, LoudnessDetector, LoudnessMeter,
+    WindowSum, SUB_BLOCK_MS,
+};
 use crate::multiband::{MultibandBandParams, MultibandCompressor, MultibandParams, MAX_BANDS};
 use crate::oversample::{OversampleFactor, Oversampler};
 use crate::truepeak::{self, TruePeakLimiter, TruePeakLimiterParams};
@@ -96,6 +149,23 @@ const GAIN_SNAP_DB: f64 = 1e-6;
 const AGC_WINDOW_MS: f32 = 3000.0;
 /// Frames per internal chunk (sizes the scratch buffers).
 const CHUNK: usize = 512;
+
+/// Output trim: window of the gated output loudness (ms), the same 3 s as
+/// the AGC detector.
+const TRIM_WINDOW_MS: f64 = 3000.0;
+/// Output trim: integral time constant (s). The correction moves by
+/// `error / TRIM_TIME_CONSTANT_S` dB per second. See "Output-referenced
+/// trim" in the module docs for the stability bound.
+const TRIM_TIME_CONSTANT_S: f64 = 8.0;
+/// Output trim: largest slew (dB/s), and at most this fraction of the
+/// slower AGC rate, so the AGC always keeps up with the trim.
+const TRIM_MAX_RATE_DB_S: f64 = 0.5;
+const TRIM_RATE_FRACTION: f64 = 0.5;
+/// Output trim: range (dB, ±). The AGC's own gain bounds apply on top.
+const TRIM_MAX_DB: f64 = 6.0;
+/// Output trim: the AGC counts as settled while its applied gain is within
+/// this distance of its target gain (dB).
+const TRIM_SETTLED_DB: f64 = 1.0;
 
 /// Value reported for silence / no measurement yet (never NaN or −∞).
 pub const SILENCE_DB: f64 = -200.0;
@@ -337,10 +407,101 @@ impl AgcStage {
 
     fn reset(&mut self) {
         self.inner.reset();
+        self.inner.set_target_offset_db(0.0);
     }
 
     fn gain_db(&self) -> f64 {
         self.inner.gain_db()
+    }
+}
+
+/// Output-referenced trim of the AGC target: a slow, gated integral loop on
+/// the loudness at the chain output. See "Output-referenced trim" in the
+/// module docs.
+#[derive(Debug, Default)]
+struct OutputTrim {
+    /// Energy of each output sub-block if it was active, else 0.
+    active_energy: History,
+    /// 1 for each active output sub-block, else 0.
+    active_flag: History,
+    energy_sum: WindowSum,
+    count_sum: WindowSum,
+    /// Consecutive sub-blocks with the AGC settled and in use.
+    settled: usize,
+    /// Window length (sub-blocks).
+    window: usize,
+    /// The correction (dB), handed to the AGC as its target offset.
+    trim_db: f64,
+}
+
+/// Everything [`OutputTrim::on_sub_block`] needs from the chain.
+struct TrimInputs {
+    /// The AGC's output reaches the chain output (AGC and chain fully wet).
+    agc_in_use: bool,
+    target_lufs: f64,
+    gate_lufs: f64,
+    max_gain_db: f64,
+    max_cut_db: f64,
+    /// Slower of the AGC's up and down rates (dB/s).
+    slower_rate_db_s: f64,
+}
+
+impl OutputTrim {
+    fn allocate(&mut self) {
+        self.window = (TRIM_WINDOW_MS / SUB_BLOCK_MS).round() as usize;
+        self.active_energy.allocate(self.window + 1);
+        self.active_flag.allocate(self.window + 1);
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.active_energy.clear();
+        self.active_flag.clear();
+        self.energy_sum.set_len(self.window, &self.active_energy);
+        self.count_sum.set_len(self.window, &self.active_flag);
+        self.settled = 0;
+        self.trim_db = 0.0;
+    }
+
+    /// Record the output sub-block `out` just completed and integrate.
+    /// Returns the new trim (dB).
+    fn on_sub_block(&mut self, out: &LoudnessDetector, agc: &Agc, p: &TrimInputs) -> f64 {
+        // Gated output measurement, as in the AGC: 400 ms blocks below the
+        // gate are left out, and the newest 100 ms below it freezes.
+        let active = out.momentary_lufs() >= p.gate_lufs;
+        let present =
+            lufs_from_mean_square(out.recent_mean_square(HOLD_BLOCK_SUB_BLOCKS)) >= p.gate_lufs;
+        let e = out.last_sub_block_mean_square();
+        self.active_energy.push(if active { e } else { 0.0 });
+        self.active_flag.push(if active { 1.0 } else { 0.0 });
+        self.energy_sum.pushed(&self.active_energy);
+        self.count_sum.pushed(&self.active_flag);
+        let count = self.count_sum.sum().round();
+
+        // The window must hold only output made with a settled AGC gain (a
+        // holding AGC is settled: its gain does not move).
+        let agc_settled =
+            p.agc_in_use && (agc.target_gain_db() - agc.gain_db()).abs() <= TRIM_SETTLED_DB;
+        self.settled = if agc_settled { self.settled + 1 } else { 0 };
+
+        let min_active = MIN_ACTIVE_MS / SUB_BLOCK_MS;
+        if !present || count < min_active || self.settled < self.window {
+            return self.trim_db; // freeze
+        }
+        let measured = lufs_from_mean_square(self.energy_sum.sum() / count);
+        let error = p.target_lufs - measured;
+        // Anti-windup: stop integrating into an AGC gain bound.
+        let want = p.target_lufs + self.trim_db - agc.measured_lufs();
+        if (error > 0.0 && want >= p.max_gain_db) || (error < 0.0 && want <= -p.max_cut_db) {
+            return self.trim_db;
+        }
+        let dt = SUB_BLOCK_MS * 0.001;
+        let max_step = TRIM_MAX_RATE_DB_S.min(TRIM_RATE_FRACTION * p.slower_rate_db_s) * dt;
+        let step = (error * dt / TRIM_TIME_CONSTANT_S).clamp(-max_step, max_step);
+        if step.is_finite() {
+            self.trim_db = (self.trim_db + step).clamp(-TRIM_MAX_DB, TRIM_MAX_DB);
+        }
+        self.trim_db
     }
 }
 
@@ -593,6 +754,7 @@ pub struct BroadcastProcessor {
 
     input_gain: GainGlide,
     agc: AgcStage,
+    trim: OutputTrim,
     multiband: MultibandCompressor,
     limiter: LimiterStage,
 
@@ -641,6 +803,7 @@ impl BroadcastProcessor {
             fresh: true,
             input_gain: GainGlide::default(),
             agc: AgcStage::default(),
+            trim: OutputTrim::default(),
             multiband: MultibandCompressor::new(),
             limiter: LimiterStage::default(),
             agc_fade: Fade::default(),
@@ -813,7 +976,30 @@ impl BroadcastProcessor {
 
         self.chain_fade.mix(chunk, &self.chain_dry[..len], ch);
 
-        self.output_detector.process(chunk);
+        // Output loudness, sub-block by sub-block, feeding the trim.
+        let trim_in = TrimInputs {
+            agc_in_use: self.agc_fade.is_wet() && self.chain_fade.is_wet(),
+            target_lufs: self.params.target_loudness_lufs as f64,
+            gate_lufs: self.params.agc_gate_lufs as f64,
+            max_gain_db: self.params.agc_max_gain_db as f64,
+            max_cut_db: self.params.agc_max_cut_db as f64,
+            slower_rate_db_s: self
+                .params
+                .agc_rate_up_db_s
+                .min(self.params.agc_rate_down_db_s) as f64,
+        };
+        let mut rest: &[f32] = chunk;
+        while !rest.is_empty() {
+            let n = (rest.len() / ch).min(self.output_detector.frames_to_sub_block_end());
+            let (seg, tail) = rest.split_at(n * ch);
+            if self.output_detector.process(seg) > 0 {
+                let trim = self
+                    .trim
+                    .on_sub_block(&self.output_detector, &self.agc.inner, &trim_in);
+                self.agc.inner.set_target_offset_db(trim);
+            }
+            rest = tail;
+        }
         if let Some(m) = &mut self.integrated {
             m.process(chunk);
         }
@@ -837,6 +1023,7 @@ impl Processor for BroadcastProcessor {
         self.active_bands = p.num_bands;
 
         self.agc.configure(sample_rate, channels);
+        self.trim.allocate();
         self.multiband.configure(sample_rate, channels);
         self.limiter.configure(sample_rate, channels);
         // Apply the parameters (structural values included) before sizing
@@ -911,6 +1098,7 @@ impl Processor for BroadcastProcessor {
         }
         self.agc.reset();
         self.multiband.reset();
+        self.trim.reset();
         self.limiter.reset();
         for d in [
             &mut self.agc_delay,

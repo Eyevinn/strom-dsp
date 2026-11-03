@@ -142,10 +142,23 @@ presets:
 lands within ±1 LU of each preset's target (integrated, after the first
 10 s), and true peak stays ≤ ceiling + 0.1 dB (both measured with `ebur128`).
 
-**Known limitation:** very peaky material, such as frequent clicks or hard
-percussive hits, can land 1–3 LU below target. The multiband stage and the
-limiter come after the AGC, so the level they remove is not made up. True peak
-still holds.
+A hot, peaky, sport-like programme (dense percussive hits, clicks and
+inter-sample peaks) meets the same bounds, and its short-term loudness stays
+within 1 LU of target after a 10 s pause.
+
+**Output-referenced trim:** the multiband stage and the limiter come after the
+AGC and take level away, most on peaky material. A slow loop measures the
+gated loudness at the output and trims the AGC target to make that up
+(time constant 8 s, at most 0.5 dB/s, within ±6 dB). It freezes in pauses and
+below `agc-gate`, while the AGC is ramping or bypassed, and when the AGC is at
+`agc-max-gain` or `agc-max-cut`. Those bounds and the AGC rates still apply.
+
+**Limitation:** the trim cannot exceed the AGC range. Programme that needs
+the whole of `agc-max-gain` just to reach the target (for example −35 LUFS
+input with the `ebu-r128` preset's 12 dB) gets no make-up, and can land
+below target by what the multiband and limiter remove. Material the limiter
+already holds at the ceiling cannot get louder either; the trim then stops
+at its 6 dB range.
 
 ## Signals
 

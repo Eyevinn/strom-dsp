@@ -407,6 +407,16 @@ Own choices:
   exactly the stage's latency. Latency therefore never depends on bypass
   state, and a settled bypass is bit-exact.
 - **Bypassed stages keep running.**
+- **Output-referenced trim:** the multiband and the limiter after the AGC
+  take level away (most on peaky programme), so a slow integral loop on the
+  gated output loudness (the AGC's own gating and freeze rules, on the
+  output detector) adds a trim to the AGC target. Textbook integral control
+  with conditional-integration anti-windup (Åström & Hägglund, *PID
+  Controllers*): τ = 8 s, slew ≤ 0.5 dB/s and ≤ half the slower AGC rate,
+  range ±6 dB, frozen in pauses, while the AGC ramps or is bypassed, and at
+  the AGC's gain bounds, which still apply to the total. Stability margins
+  (phase ≥ 79°, gain ≥ 18 dB, against the 3 s window as a 1.5 s delay) are
+  derived in `broadcast.rs`.
 - **Meters:**
   - momentary and short-term loudness from the BS.1770 `LoudnessDetector`;
   - integrated loudness from the `ebur128`-based `LoudnessMeter` in histogram
@@ -426,7 +436,9 @@ Own choices:
 The values were checked with the chain acceptance test in
 `tests/broadcast.rs` (60 s programme at −35, −23 and −10 LUFS input:
 integrated loudness within ±1 LU of target after the first 10 s, true peak
-≤ ceiling + 0.1 dB, measured with `ebur128`).
+≤ ceiling + 0.1 dB, measured with `ebur128`), and with a hot, peaky,
+sport-like programme (hits, clicks, inter-sample peaks) under the same
+bounds plus no short-term overshoot after a 10 s pause.
 
 No commercial broadcast-processor manuals, presets or tuning were used.
 
