@@ -59,6 +59,10 @@ textbook description of a gate (Zölzer, *DAFX*, dynamics chapter).
 - Parameter changes only move the fade target, so they are always smoothed.
   The envelope is denormal-flushed, the gain snaps to its target within 1e-12,
   and the gate starts closed after `configure`/`reset`.
+- **Superseded after listening tests (phase 1b):** two parts of this section
+  were replaced, see "Sidechain, expander mode and gate detector" below:
+  - the peak detector, now an RMS detector with a 1 dB minimum hysteresis;
+  - the one-pole release, now a full-range dB ramp (`GateFade`).
 
 ### Compressor (`crates/strom-dsp/src/compressor.rs`)
 
@@ -324,11 +328,143 @@ basics from J. O. Smith III. No code listing was used.
   - These replace the instant-attack peak follower, which let single noise
     peaks open the gate when open == close. The guard test is
     `tests/gate_chatter.rs`.
+- **Gate release (second fix after listening tests):** `dynamics::GateFade`.
+  - Attack stays a one-pole on the linear gain.
+  - Release is the **time to close**: a straight line in dB from 0 dB to
+    `reduction` in exactly `release` ms, i.e. a constant per-sample gain
+    factor `10^(−range/(20·N))` with range at least 1 dB.
+  - This follows the common operator definition of gate release, a full-range
+    traversal time.
+  - Why: with the phase 1 one-pole release, the gate needed ≈ 6.9 τ to reach
+    −60 dB and never closed in short pauses.
+  - Closing time after the key stops is `t_detector + hold + release`.
+  - Guard test: `tests/gate_chatter.rs::gate_closes_within_hold_plus_release_after_burst`
+    (the old code took 1462 ms against a 140 ms budget).
+  - The phase 1 test `release_time_constant` was replaced by
+    `release_closes_over_full_range_in_release_time`, because it measured the
+    old definition.
 - **Expander mode:** a downward expander after Zölzer, *DAFX*. Below
   T = open threshold, the static gain is `max(D, (R−1)(x−T))` dB. Own choice:
   hysteresis and hold act as in the gate, and only the closed target changes.
+  The element exposes it as `mode`/`ratio`.
+- **Interface-test deviation:** phase 1 `tests/interface.rs` asserts the exact
+  set of gate properties, so the additive `mode`/`ratio` would fail it by
+  construction.
+  - Minimal change: every phase 1 assertion is kept, and only these two names
+    are allowed as extra gate properties.
+  - Full checks of the two new properties are in `tests/interface_gate_1b.rs`.
 - **Test signals:** pink noise is generated with the Voss method (M. Gardner,
   *Scientific American*, 1978).
+
+### `BandCorrelation` (`src/meter/band.rs`, phase 1b)
+
+- **Structure:** our own composition of existing parts. The LR4 `Crossover`
+  (Linkwitz 1976) is configured once for L and R, so both get identical
+  filters, and feeds one `CorrelationMeter` per band. Because L and R are
+  filtered identically, the filter phase cancels in the correlation.
+- **Own choice:** default splits at 250 Hz and 4 kHz.
+
+### Ducker (`src/ducker.rs`, `src/resample.rs`, element `stromdsp-ducker`, phase 1b)
+
+- **Detector:** the existing sidechain blocks (`KeyDetector` with an RBJ HPF;
+  `MeanSquareEnvelope`, a J. O. Smith III one-pole averager and the RMS level
+  measurement of Zölzer, *DAFX*), run at the key's own rate.
+- **Rate conversion (own design):** the detector envelope is converted to the
+  programme rate, not the key audio. It is linearly interpolated across
+  64-frame programme blocks (J. O. Smith III, linear interpolation).
+  - Why: a 10 ms RMS envelope has about 16 Hz of bandwidth. A band-limited
+    resampler would add cost, group delay and chunking constraints for no
+    gain.
+  - `rubato` was therefore dropped as a dependency.
+- **Static curve** (Zölzer, *DAFX*: ducking as a keyed downward gain). Own
+  definitions:
+  - `fixed`: depth applied while the key is above the threshold.
+  - `proportional`: 1 dB of reduction per dB above the threshold, capped at
+    the depth.
+- **Hold (own design):** a peak hold with a timer, as in peak-programme meters.
+- **Fades (own choice):** linear in dB at constant rates `max(depth, 1 dB)/attack`
+  and `/release`, so attack and release are fade durations.
+- **Element:** written from the gstreamer-rs `gstreamer-base` Aggregator
+  bindings (MIT/Apache-2.0) and the GstAggregator API documentation
+  (`next_time`, `ignore-inactive-pads`, `update_segment`,
+  `AggregatorPad::is_inactive`).
+  - Own design: the key FIFO (2 s), its running-time alignment (1 ms jitter
+    tolerance) and the live deadline logic.
+  - No GStreamer C source was read.
+
+### De-esser (`src/deesser.rs`, phase 1b)
+
+- **Composition:** built only from existing blocks: `KeyDetector`,
+  `GainComputer` and `AttackRelease` (Giannoulis, Massberg & Reiss, JAES 2012),
+  and the LR4 `Crossover` (Linkwitz, JAES 1976).
+- **Structure:** a sibilance-band detector with split-band or wideband gain,
+  after the textbook description in Zölzer, *DAFX*, dynamics chapter.
+- **Own choices:**
+  - slope 1 (∞:1) with a fixed 6 dB knee, capped at `max-reduction`;
+  - a 12 dB/octave detector high-pass at the split frequency;
+  - both modes share the all-pass split, so mode changes glide (10 ms mix
+    factor), at the cost of wideband output being the crossover's all-pass of
+    the input;
+  - 10 ms glides for threshold and max-reduction.
+
+### Input cleanup (`src/cleanup.rs`, phase 1b)
+
+- **DC blocker:** the order-1 Butterworth high-pass at 5 Hz. It equals the
+  one-zero/one-pole DC blocker (J. O. Smith III, *Introduction to Digital
+  Filters*, "DC blocker"; Oppenheim & Schafer, bilinear transform).
+- **High-pass:** `filter::Butterworth`.
+- **Hum notches:** R. Bristow-Johnson, "Audio EQ Cookbook" (W3C Note), notch
+  filter. The relation between α and the −3 dB bandwidth, `tan(Δω/2) = α`, is
+  the standard second-order notch written as `(1 + A(z))/2` with a
+  second-order all-pass (P. A. Regalia & S. K. Mitra, IEEE Trans. ASSP 35(1),
+  1987).
+- **Own choices:**
+  - constant bandwidth f0/`hum-q` for every harmonic, instead of constant Q;
+  - a `hum-q` lower limit of 6, from an analytic flatness computation (worst
+    case 0.40 dB at hum-q 6; 0.57 dB at hum-q 5 fails the 0.5 dB target);
+  - harmonics at or above 0.49·fs are skipped;
+  - stages that are off are skipped, with 10 ms dry/wet crossfades when
+    switching and two-bank crossfades for hum changes.
+
+### Delay and stereo (`src/delay.rs`, `src/stereo.rs`, phase 1b)
+
+- **Delay:** an integer-frame read tap on the shared `DelayLine` circular
+  buffer (J. O. Smith III, *Physical Audio Signal Processing*, delay lines).
+  - Tap changes use an equal-gain raised-cosine crossfade between two taps
+    (Zölzer, *DAFX*, delay-based effects; Oppenheim & Schafer, window
+    functions).
+  - The step bound `D + Δg·2A` with `Δg ≤ π/(2(N+1))` is our own derivation.
+  - The delay is intentional and never reported as latency.
+  - Own choices: 20 ms crossfade; the latest target is queued behind a running
+    crossfade; negative offsets are allowed; at most 64 offsets;
+    `enabled=false` crossfades to delay 0.
+- **Stereo:** textbook 2×2 linear matrixing.
+  - M/S as `M = (L+R)/2`, `S = (L−R)/2`, with inverse `L = M+S`, `R = M−S`
+    (sum/difference stereo, Blumlein; e.g. Rumsey, *Spatial Audio*).
+  - Width as side scaling.
+  - A sine/cosine constant-power pan law (Rumsey; Pulkki's amplitude-panning
+    literature), normalised to unity at the centre.
+  - Mono sum at −3 or −6 dB.
+  - Own choices: polarity applied to the inputs; the order B·W·M·P; a linear
+    10 ms matrix ramp, which equals a crossfade because the processor is
+    linear; signed-permutation matrices applied as copies/negations for
+    bit-exactness.
+  - The element was scaffolded as `stromdsp-stereotools` and renamed to
+    `stromdsp-stereo`, because the old name was too close to a commercial
+    broadcast product.
+
+### Meter element (`stromdsp-meter`, phase 1b)
+
+- **Sources:** written from the gstreamer-rs documentation and the GStreamer
+  API docs (BaseTransform passthrough, element messages,
+  `GstAudioChannelPosition`).
+- **Message format:** our own design. GStreamer's `ebur128level` was not read.
+- **Channel weights:** the BS.1770 role mapping of channel positions follows
+  the azimuth zones of ITU-R BS.1770 and EBU Tech 3341 §2.10.
+- **RMS:** a plain mean square over the interval.
+- **Silence:** −200.0 (never NaN or −∞).
+- **Cost control:** loudness readings, which are expensive (short-term about
+  150 µs), happen only when a message is due.
 
 ### GStreamer elements (`crates/gst-plugin-stromdsp`)
 
@@ -382,6 +518,14 @@ deliberately not set (see `docs/PERFORMANCE.md`).
 | `fearless_simd` 1.2 | `strom-dsp` (SIMD with runtime dispatch) | Apache-2.0 OR MIT |
 | `ebur128` 0.1 | `strom-dsp` meter (BS.1770 loudness, gating, LRA, sample and true peak) | MIT |
 | `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT) | MIT / MIT OR Apache-2.0 |
+| `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
+| `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
+| `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
+| `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
+| `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
+| `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
+| RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
+| `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |
 
 **Why these are reused (phase 1b rule: hard to get right):**
 - **`ebur128`:** the standard has many edge cases: K-weighting at any rate,
@@ -394,14 +538,13 @@ deliberately not set (see `docs/PERFORMANCE.md`).
 
 Both are wrapped behind our own types and verified real-time safe on our path
 with the counting allocator and RTSan.
-| `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
-| `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
-| `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
-| `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
-| `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
-| `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
-| RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
-| `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |
+
+**Considered and dropped:** `rubato` 5 (MIT OR Apache-2.0). It was declared
+for resampling the ducker key, but it was removed unused, because the ducker
+converts its detector envelope instead (see "Ducker"). If a later element needs
+key audio, not just its level, at another rate, `rubato`'s documented
+allocation-free `process_into_buffer` should be wrapped behind our own type and
+verified with the counting allocator and RTSan.
 
 External developer/CI tools, not linked or distributed: `gungraun-runner`
 (MIT OR Apache-2.0), Valgrind (GPL-2.0, run as a separate program by the

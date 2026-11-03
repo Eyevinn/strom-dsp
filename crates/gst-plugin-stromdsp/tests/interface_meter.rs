@@ -1,4 +1,4 @@
-//! Interface test of `stromdsp-meter` (STROM_DSP_PHASE1B_SPEC.md 3.7): names,
+//! Interface test of `stromdsp-meter` (phase 1b spec §3.7): names,
 //! GLib types, ranges, defaults and flags of every property, the `reset`
 //! action signal, the pad templates, metadata and the passthrough mode.
 

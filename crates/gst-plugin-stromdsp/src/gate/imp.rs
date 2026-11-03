@@ -123,7 +123,7 @@ impl ObjectImpl for StromDspGate {
                     0.0,
                     d.reduction_db,
                 ),
-                // Phase 1b additions (STROM_DSP_PHASE1B_SPEC.md 3.3).
+                // Phase 1b additions (phase 1b spec §3.3).
                 glib::ParamSpecEnum::builder_with_default("mode", StromDspGateMode::Gate)
                     .nick("Mode")
                     .blurb(
