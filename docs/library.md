@@ -114,7 +114,8 @@ let stats = d.take_stats(); // runs repaired, too long, max overshoot
   or saturation, clipping followed by a lossy codec (the plateau turns into
   ripple), and runs longer than `max_run_ms` (default 2 ms; passed through
   and counted). A naive (not band-limited) square wave is indistinguishable
-  from clipping and is "repaired".
+  from clipping and is detected; on a 1 kHz square the constrained fit stays
+  on the plateau (0 dB overshoot measured), so it comes out unchanged.
 - **Parameters:** `enabled` (crossfade to the delayed dry signal),
   `min_level_db` (−20), `tolerance` (1e-5 relative), `max_run_ms` (2),
   `max_overshoot_db` (12), `tilt_hz` (50).
