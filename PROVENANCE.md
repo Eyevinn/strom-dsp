@@ -108,6 +108,36 @@ notch, APF, peakingEQ, lowShelf and highShelf (cookbook Q form, not S).
   Biquad outputs are denormal-flushed below 1e-15, and output is clamped to the
   finite f32 range.
 
+### Limiter (`crates/strom-dsp/src/limiter.rs`)
+
+Linked lookahead sample-peak limiter, derived from first principles from the
+requirement "the gain applied to output frame n is ≤ the gain required by input
+frame n − L". General lookahead/gain-smoothing ideas from Zölzer (*DAFX*,
+dynamics chapter) and Giannoulis et al. 2012; moving-average and one-pole
+basics from J. O. Smith III. No code listing was used.
+
+- **Required gain:** `r[j] = min(1, c / max_ch |x_ch[j]|)`, where `c` is the
+  largest f32 not above `10^(threshold/20)`. Audio is delayed by L frames.
+- **Gain shape (own design):** (1) a sliding minimum of r over
+  `[m−L, m−L+A]` (A = attack frames ≤ L), using a monotonic deque in a
+  preallocated ring (O(1) amortised); (2) two cascaded moving averages of
+  lengths ⌈A/2⌉+1 and ⌊A/2⌋+1, giving an S-shaped ramp of A frames that ends at
+  the peak; (3) release: the gain follows the ramp down immediately and rises
+  toward it with a one-pole in linear gain (63 % after `release` ms).
+- **Guarantee:** every term averaged in (2) has a window containing n − L, so
+  the gain is ≤ r[n−L]. Lookahead 0 is the case A = 0 (instant drop). The
+  averages run in 44-bit fixed point with floor rounding, so every rounding
+  lowers the gain, and the ceiling is itself representable in f32.
+- **Parameter changes:** threshold and `enabled` are stored per input frame
+  (take effect with the audio's latency). An attack change rebuilds the
+  pipeline from stored history (no allocation). A lookahead change cross-fades
+  the delay tap over 5 ms, with the min window widened to cover both taps.
+  `enabled = false` ramps the gain back to exactly 1 and leaves a bit-exact
+  delay of the same latency.
+- **Safety clip:** a guard at the ceiling that counts each intervention
+  (`safety_clip_count()`); tests show it stays at 0. Release state is snapped
+  to its target below 1e-15 (denormal-safe).
+
 ## Dependencies
 
 | Crate | Used by | Licence |
