@@ -40,6 +40,46 @@ of permissively licensed dependencies.
 
 <!-- Per-processor sections follow. -->
 
+### Gate (`crates/strom-dsp/src/gate.rs`)
+
+Linked downward noise gate with hysteresis and hold (spec 3.2), from the
+textbook description of a gate (Zölzer, *DAFX*, dynamics chapter).
+
+- **Detector (own choice):** key = max |x| over the channels of a frame, into a
+  peak envelope follower with instant attack and a fixed 20 ms exponential
+  release (`e = p` if `p > e`, else `e = a·e + (1−a)·p`). Thresholds compare
+  against this peak level in dBFS.
+- **State machine:** closed → open when `e > open`. While open, a hold counter
+  of `round(hold·fs/1000)` frames is re-armed on every frame with `e ≥ close`;
+  below close it counts down, and the gate closes when it reaches zero.
+  `close > open` is treated as `close = open`.
+- **Gain fades:** a linear-gain one-pole toward 1 (open) or `10^(reduction/20)`
+  (closed), with the attack coefficient when rising and the release
+  coefficient when falling. Time constant = 63.2 % of a step after τ.
+- Parameter changes only move the fade target, so they are always smoothed.
+  The envelope is denormal-flushed, the gain snaps to its target within 1e-12,
+  and the gate starts closed after `configure`/`reset`.
+
+### Compressor (`crates/strom-dsp/src/compressor.rs`)
+
+Feed-forward downward compressor following D. Giannoulis, M. Massberg,
+J. D. Reiss, "Digital Dynamic Range Compressor Design — A Tutorial and
+Analysis", JAES 60(6), 2012.
+
+- **Detector:** `x = 20·log10(max |x| over channels)` (peak, −200 dB floor).
+- **Gain computer** (knee per spec 3.3): `T = 20·log10(threshold)`,
+  `k ∈ [0.001, 1]`, `W = −40·log10(k)`, `S = 1 − 1/ratio`. The gain reduction
+  is 0 below `T − W/2`, `S·(x − T + W/2)²/(2W)` inside the knee (the paper's
+  quadratic interpolation), and `S·(x − T)` above it. `W = 0` is a hard knee.
+- **Smoothing:** a branching one-pole on the gain reduction in dB (paper's
+  "smooth branching" variant): the attack coefficient while the reduction
+  rises, release otherwise. Time constant = 63.2 % of a dB step after τ.
+- **Output:** `10^(−y/20) · makeup`. Ratio 1 gives S = 0, so it is bit-exact unity.
+- **Parameter smoothing (own choice):** threshold (dB), S, W and makeup glide
+  with a 10 ms one-pole; values snap on the first block after
+  `configure`/`reset`. States are f64 and denormal-flushed.
+
+
 ## Dependencies
 
 | Crate | Used by | Licence |
