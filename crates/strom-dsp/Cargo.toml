@@ -107,3 +107,7 @@ harness = false
 [[bench]]
 name = "spike_guard"
 harness = false
+
+[[bench]]
+name = "declipper"
+harness = false
