@@ -11,11 +11,13 @@ use gst::glib;
 
 mod common;
 pub mod compressor;
+pub mod equalizer;
 pub mod gate;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gate::register(plugin)?;
     compressor::register(plugin)?;
+    equalizer::register(plugin)?;
     Ok(())
 }
 
