@@ -40,6 +40,11 @@
 //!   in `f64` between bands. The steady state (no band changing) is a plain
 //!   loop with fixed coefficients; per-sample coefficient interpolation and
 //!   crossfading only run in segments where a band is actually changing.
+//! - **SIMD**: [`Processor::configure`] detects the SIMD level and `process`
+//!   dispatches on it once per call (explicit `fearless_simd` kernels, see
+//!   [`crate::biquad`]); [`Equalizer::set_simd_level`] overrides it. All levels
+//!   with the same FMA policy ([`crate::biquad::uses_fma`]) give bit-identical
+//!   output.
 //! - **Denormals**: filter states are flushed to zero below 1e-15 (every 32
 //!   frames in the steady state, every sample while changing; see
 //!   [`crate::biquad`]). Inputs are `f32` samples promoted to `f64`, which can
@@ -53,8 +58,10 @@ use crate::biquad::{
     run_chain, run_changing, sanitize_bank, ChangingStage, FadeOut, SteadyStage, MAX_STAGES,
     STATE_PER_CHANNEL,
 };
+use crate::simd::Level;
 use crate::util::one_pole_coef;
 use crate::Processor;
+use fearless_simd::Simd;
 
 /// Maximum number of bands.
 pub const MAX_BANDS: usize = 8;
@@ -292,12 +299,51 @@ pub struct Equalizer {
     fade_len: usize,
     /// Apply targets without smoothing/crossfade at the next `process`.
     snap_pending: bool,
+    simd: SimdChoice,
+}
+
+/// SIMD level of an [`Equalizer`]: detected in `configure` unless set
+/// explicitly with [`Equalizer::set_simd_level`].
+#[derive(Debug, Clone, Copy)]
+struct SimdChoice {
+    level: Level,
+    forced: bool,
+}
+
+impl Default for SimdChoice {
+    fn default() -> Self {
+        Self {
+            level: Level::baseline(),
+            forced: false,
+        }
+    }
 }
 
 impl Equalizer {
     /// Create an unconfigured equalizer with default parameters.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the SIMD level that [`Processor::configure`] detects
+    /// ([`crate::simd::detect`]), for hosts (e.g. to force a lower instruction
+    /// set) and tests (e.g. to compare a vector path with `Level::fallback()`
+    /// when `fearless_simd`'s `force_support_fallback` feature is enabled).
+    /// The choice persists across later `configure` calls. Any `Level` value is
+    /// a proof that the CPU supports it, so this is always safe; it may be
+    /// called between any two `process` calls (the state layout does not depend
+    /// on the level). Levels with the same [`crate::biquad::uses_fma`] produce
+    /// bit-identical output.
+    pub fn set_simd_level(&mut self, level: Level) {
+        self.simd = SimdChoice {
+            level,
+            forced: true,
+        };
+    }
+
+    /// The SIMD level the equalizer runs at.
+    pub fn simd_level(&self) -> Level {
+        self.simd.level
     }
 
     /// Update parameters. Never allocates. Out-of-range values are clamped;
@@ -426,7 +472,7 @@ impl Equalizer {
     /// Process one segment of `n` frames starting at frame `pos`, during which
     /// no band starts or ends a crossfade and ramping bands advance by at most
     /// one ramp block. Returns false if every band was idle.
-    fn process_segment(&mut self, data: &mut [f32], n: usize) -> bool {
+    fn process_segment<S: Simd>(&mut self, simd: S, data: &mut [f32], n: usize) -> bool {
         let mut steady = [SteadyStage {
             coefs: BiquadCoefficients::IDENTITY,
             state: 0,
@@ -482,11 +528,11 @@ impl Equalizer {
         }
         let (ch, states) = (self.channels, &mut self.states);
         if any_fade {
-            run_changing(data, ch, &changing[..count], states);
+            run_changing(simd, data, ch, &changing[..count], states);
         } else if any_ramp {
-            run_chain(data, ch, &steady[..count], &ramps[..count], states);
+            run_chain(simd, data, ch, &steady[..count], &ramps[..count], states);
         } else {
-            run_chain(data, ch, &steady[..count], &[], states);
+            run_chain(simd, data, ch, &steady[..count], &[], states);
         }
         true
     }
@@ -512,12 +558,28 @@ impl Processor for Equalizer {
         self.slots = [BandSlot::default(); MAX_BANDS];
         self.update_targets();
         self.snap_pending = true;
+        if !self.simd.forced {
+            self.simd.level = crate::simd::detect();
+        }
     }
 
     fn process(&mut self, samples: &mut [f32]) {
         if self.channels == 0 || self.sample_rate <= 0.0 {
             return;
         }
+        // One dispatch per call; everything below runs with the level's token.
+        let level = self.simd.level;
+        fearless_simd::dispatch!(level, simd => self.process_with(simd, samples));
+    }
+
+    fn reset(&mut self) {
+        self.states.iter_mut().for_each(|v| *v = 0.0);
+        self.snap_pending = true;
+    }
+}
+
+impl Equalizer {
+    fn process_with<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
         if self.snap_pending {
             self.snap_all();
             self.snap_pending = false;
@@ -548,7 +610,7 @@ impl Processor for Equalizer {
                     n = n.min(s.fade_left);
                 }
             }
-            touched |= self.process_segment(&mut samples[pos * ch..(pos + n) * ch], n);
+            touched |= self.process_segment(simd, &mut samples[pos * ch..(pos + n) * ch], n);
             for s in self.slots.iter_mut().filter(|s| s.fade_left > 0) {
                 s.fade_left -= n;
                 if s.fade_left == 0 {
@@ -560,10 +622,5 @@ impl Processor for Equalizer {
         if touched {
             self.sanitize_states();
         }
-    }
-
-    fn reset(&mut self) {
-        self.states.iter_mut().for_each(|v| *v = 0.0);
-        self.snap_pending = true;
     }
 }

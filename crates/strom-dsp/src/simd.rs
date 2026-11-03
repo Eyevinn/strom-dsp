@@ -2,8 +2,9 @@
 //!
 //! Processors detect the best instruction set once, in `configure`, and
 //! dispatch their hot loops on it (via `fearless_simd`). Hosts and tests can
-//! override the choice, e.g. force [`Level::fallback`] to compare a vector
-//! path against the portable scalar path.
+//! override the choice, e.g. force `Level::fallback()` (available with
+//! `fearless_simd`'s `force_support_fallback` feature, which the tests enable)
+//! to compare a vector path against the portable scalar path.
 
 pub use fearless_simd::Level;
 
