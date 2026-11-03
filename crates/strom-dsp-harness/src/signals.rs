@@ -24,6 +24,9 @@ pub struct Signal {
     pub data: Vec<f32>,
     /// Frames of short events (clicks), ascending.
     pub marks: Vec<usize>,
+    /// For signals with clicks: the same signal without them (the
+    /// programme a click remover should leave).
+    pub clean: Option<Vec<f32>>,
 }
 
 impl Signal {
@@ -31,6 +34,7 @@ impl Signal {
         Self {
             data,
             marks: Vec::new(),
+            clean: None,
         }
     }
 
@@ -109,9 +113,11 @@ impl SignalKind {
                     marks.extend(one.iter().map(|&m| m + base).filter(|&m| m < frames));
                     base += programme_support::PROGRAMME_FRAMES;
                 }
+                let bed = programme_support::peaky_bed(CH, fs);
                 Signal {
                     data: looped(&src, frames),
                     marks,
+                    clean: Some(looped(&bed, frames)),
                 }
             }
         }
@@ -234,7 +240,8 @@ fn speech_noise(frames: usize, fs: f64, hi: f64, seed: u64) -> Vec<f32> {
 /// Single-sample clicks (alternating sign, 20 dB above the RMS of the
 /// words) every `spacing` seconds over full-band [`speech_noise`].
 fn speech_clicks(frames: usize, fs: f64, spacing: f64) -> Signal {
-    let mut data = speech_noise(frames, fs, 7_000.0, 43);
+    let clean = speech_noise(frames, fs, 7_000.0, 43);
+    let mut data = clean.clone();
     let step = ((spacing * fs) as usize).max(1);
     let marks: Vec<usize> = ((0.2 * fs) as usize..frames).step_by(step).collect();
     for (i, &m) in marks.iter().enumerate() {
@@ -243,7 +250,11 @@ fn speech_clicks(frames: usize, fs: f64, spacing: f64) -> Signal {
             data[m * CH + c] += a;
         }
     }
-    Signal { data, marks }
+    Signal {
+        data,
+        marks,
+        clean: Some(clean),
+    }
 }
 
 /// Band-limited (≤ 20 kHz) 100 Hz square wave, each harmonic passed through

@@ -146,6 +146,8 @@ impl LimiterParams {
 /// | Field | Value | Why |
 /// |---|---|---|
 /// | `input_gain_db` | 0 dB | the AGC does the levelling; the input is not touched |
+/// | `spike_guard_enabled` | true | clicks and other short, isolated peaks are removed before they pump the AGC or count toward the loudness |
+/// | `spike_threshold_db` | 8 dB | gentle: only peaks more than 8 dB over the programme's own peak envelope, and at most 1 ms long, count as spikes; they are brought down to that level, so a real transient that happens to qualify loses at most what is above it |
 /// | `agc_enabled` | true | the AGC is what makes the output land on the target |
 /// | `multiband_enabled` | true | |
 /// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
@@ -288,6 +290,10 @@ impl BroadcastPreset {
     }
 }
 
+/// Spike guard threshold (dB above the programme envelope) of every
+/// broadcast preset.
+pub const SPIKE_THRESHOLD_DB: f32 = 8.0;
+
 /// Soft-knee width (dB) of every band in every broadcast preset.
 pub const BROADCAST_BAND_KNEE_DB: f32 = 6.0;
 
@@ -340,12 +346,14 @@ impl BroadcastParams {
     }
 
     /// Set every field of `preset` for the current `num_bands`, except
-    /// `enabled`, `num_bands` and `limiter_lookahead_ms`, which a preset
-    /// never changes.
+    /// `enabled`, `num_bands`, `spike_guard_lookahead_ms` and
+    /// `limiter_lookahead_ms`, which a preset never changes.
     pub fn apply_preset(&mut self, preset: BroadcastPreset) {
         let (target, ceiling, gate, offset, ratio, limiter_release) = preset.row();
         let times = broadcast_band_times(self.num_bands);
         self.input_gain_db = 0.0;
+        self.spike_guard_enabled = true;
+        self.spike_threshold_db = SPIKE_THRESHOLD_DB;
         self.target_loudness_lufs = target;
         self.true_peak_ceiling_dbtp = ceiling;
         self.agc_enabled = true;

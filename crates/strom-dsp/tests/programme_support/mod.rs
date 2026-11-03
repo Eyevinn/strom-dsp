@@ -41,6 +41,24 @@ pub fn first_click_frame(fs: f64) -> usize {
 /// peaks 3 dB under its true peak) every ~2.3 s; and a single-sample click
 /// every `click_s` seconds, starting at 0.37 s.
 pub fn peaky_programme(ch: usize, fs: f64, click_s: f64) -> Vec<f32> {
+    let mut x = peaky_bed(ch, fs);
+    // Single-sample clicks every `click_s`.
+    for n in click_frames(fs, click_s) {
+        let sign = if click_index(fs, click_s, n).is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        };
+        for c in 0..ch {
+            x[n * ch + c] += 4.0 * sign;
+        }
+    }
+    x
+}
+
+/// [`peaky_programme`] without its clicks: the bed, the hits and the fs/4
+/// bursts.
+pub fn peaky_bed(ch: usize, fs: f64) -> Vec<f32> {
     let frames = PROGRAMME_FRAMES;
     let mut x = pink(frames, ch, fs, 31);
     x.iter_mut().for_each(|v| *v *= 0.12);
@@ -76,17 +94,6 @@ pub fn peaky_programme(ch: usize, fs: f64, click_s: f64) -> Vec<f32> {
             }
         }
         start += (2.3 * fs) as usize;
-    }
-    // Single-sample clicks every `click_s`.
-    for n in click_frames(fs, click_s) {
-        let sign = if click_index(fs, click_s, n).is_multiple_of(2) {
-            1.0
-        } else {
-            -1.0
-        };
-        for c in 0..ch {
-            x[n * ch + c] += 4.0 * sign;
-        }
     }
     x
 }

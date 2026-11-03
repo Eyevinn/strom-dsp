@@ -72,10 +72,12 @@ const BLOCK: usize = 480;
 /// A configuration whose wet path is exactly a delay for small signals:
 /// one band at ratio 1 (the crossover passes one band bit for bit), drive
 /// and input gain 0 dB; the AGC holds at 0 dB below its gate, and the
-/// limiter does not act below its ceiling.
+/// limiter does not act below its ceiling. The spike guard is off: an
+/// impulse over silence is exactly the spike it removes.
 fn flat_params() -> BroadcastParams {
     let mut p = BroadcastParams {
         num_bands: 1,
+        spike_guard_enabled: false,
         ..BroadcastParams::default()
     };
     for b in &mut p.bands {
@@ -122,6 +124,7 @@ fn db(x: f64) -> f64 {
 #[derive(Debug, Clone, Copy)]
 enum Bypass {
     None,
+    SpikeGuard,
     Agc,
     Multiband,
     Limiter,
@@ -130,8 +133,9 @@ enum Bypass {
 }
 
 impl Bypass {
-    const ALL: [Bypass; 6] = [
+    const ALL: [Bypass; 7] = [
         Bypass::None,
+        Bypass::SpikeGuard,
         Bypass::Agc,
         Bypass::Multiband,
         Bypass::Limiter,
@@ -142,10 +146,12 @@ impl Bypass {
     fn apply(self, p: &mut BroadcastParams, on: bool) {
         match self {
             Bypass::None => {}
+            Bypass::SpikeGuard => p.spike_guard_enabled = on,
             Bypass::Agc => p.agc_enabled = on,
             Bypass::Multiband => p.multiband_enabled = on,
             Bypass::Limiter => p.limiter_enabled = on,
             Bypass::AllStages => {
+                p.spike_guard_enabled = on;
                 p.agc_enabled = on;
                 p.multiband_enabled = on;
                 p.limiter_enabled = on;
@@ -172,6 +178,7 @@ fn impulse_latency_is_reported_latency() {
                 // Same latency as the all-enabled configuration.
                 let mut q = p;
                 q.enabled = true;
+                q.spike_guard_enabled = true;
                 q.agc_enabled = true;
                 q.multiband_enabled = true;
                 q.limiter_enabled = true;
@@ -230,19 +237,35 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
-    // Lookahead plus the true-peak detector delay (24 + 8 frames).
+    // Spike guard (4× interpolator 24 + its 0.5 ms standard lookahead),
+    // then the limiter lookahead plus the true-peak detector delay (24 + 8
+    // frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        240 + 32
+        (24 + 24) + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        221 + 32
+        (24 + 22) + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        480 + 32
+        (24 + 48) + 480 + 32
     );
+    // The spike guard lookahead is structural too (0 = low latency).
+    let low = BroadcastParams {
+        spike_guard_lookahead_ms: 0.0,
+        ..BroadcastParams::default()
+    };
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for_params(48_000.0, &low),
+        24 + 240 + 32
+    );
+    let mut bp = processor(48_000.0, 2, &BroadcastParams::default());
+    bp.set_params(&low);
+    assert_eq!(bp.latency_frames(), 48 + 240 + 32);
+    bp.configure(48_000.0, 2);
+    assert_eq!(bp.latency_frames(), 24 + 240 + 32);
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),
@@ -774,6 +797,8 @@ fn random_params(rng: &mut Rng, base: &BroadcastParams) -> BroadcastParams {
     let mut p = *base;
     p.enabled = r(0.0, 1.0) > 0.2;
     p.input_gain_db = r(-30.0, 30.0);
+    p.spike_guard_enabled = r(0.0, 1.0) > 0.3;
+    p.spike_threshold_db = r(0.0, 40.0);
     p.target_loudness_lufs = r(-45.0, 0.0);
     p.true_peak_ceiling_dbtp = r(-15.0, 3.0);
     p.agc_enabled = r(0.0, 1.0) > 0.3;
@@ -1145,19 +1170,23 @@ mod peaky_acceptance {
 
 /// The [`peaky_acceptance`] programme with a click every 300 ms instead of
 /// every 1.1 s, through the `streaming` preset (4 bands) at −35, −23 and
-/// −10 LUFS input; integrated output loudness from 10 s to 60 s.
+/// −10 LUFS input:
 ///
-/// The clicks carry much of the input's measured loudness, and the limiter
-/// takes about 13 dB off them, so the output-referenced trim runs into its
-/// +6 dB bound at −23 and −10 LUFS input (short-term output settles near
-/// −16.9 LUFS), and at −35 LUFS the AGC also reaches its 24 dB maximum gain
-/// (near −17.4 LUFS). The integrated value also includes the 10 … 25 s
-/// in which the trim is still rising.
+/// - integrated output loudness (10 … 60 s) within ±1 LU of the target;
+/// - limiter gain reduction on the clicks below 3 dB: for each click from
+///   10 s on, the largest reduction from the limiter lookahead (+1 ms)
+///   before it to 2 ms after it (in output time), averaged over the clicks.
+///   The largest single value is printed: a click that lands on a hit
+///   also gets the hit's own reduction.
 ///
-/// This misses the ±1 LU goal of [`peaky_acceptance`], so the test
-/// documents the current result instead: each value must stay within
-/// `BAND_LU` of the value measured when it was written (`MEASURED`), so a
-/// change in either direction shows up.
+/// The clicks carry much of the input's measured loudness. Without the
+/// spike guard the limiter takes about 13 dB off them, the
+/// output-referenced trim runs into its +6 dB bound, and the integrated
+/// output misses the target by 1.1 … 1.7 LU (−17.69, −17.15 and −17.11 LUFS
+/// at the three input levels).
+///
+/// Guard: the same run with the spike guard off must still miss, so the
+/// test fails if the spike guard stops catching the clicks.
 mod dense_clicks {
     use super::*;
     use strom_dsp::presets::BroadcastPreset;
@@ -1165,47 +1194,107 @@ mod dense_clicks {
     const SECONDS: usize = 60;
     const SKIP_SECONDS: usize = 10;
     const CLICK_S: f64 = 0.3;
-    /// (input LUFS, measured integrated output LUFS).
-    const MEASURED: [(f64, f64); 3] = [(-35.0, -17.69), (-23.0, -17.15), (-10.0, -17.11)];
-    const BAND_LU: f64 = 0.5;
+    const LOUDNESS_TOL_LU: f64 = 1.0;
+    const CLICK_GR_DB: f64 = 3.0;
+    /// Buffer length (1 ms), so the limiter meter is read every 1 ms.
+    const MS: usize = 48;
+
+    /// (integrated LUFS from 10 s, mean and max limiter GR on clicks).
+    fn run_case(p: &BroadcastParams, x: &[f32], ch: usize) -> (f64, f64, f64) {
+        let mut bp = processor(FS, ch, p);
+        let lat = bp.latency_frames();
+        let mut meter = LoudnessMeter::new(&LoudnessConfig {
+            sample_rate: FS,
+            channels: ch,
+            layout: ChannelLayout::Unknown,
+            true_peak: false,
+        })
+        .unwrap();
+        let mut looper = Looper::new(x);
+        let mut buf = vec![0.0f32; MS * ch];
+        let blocks = SECONDS * FS as usize / MS;
+        let skip = SKIP_SECONDS * FS as usize / MS;
+        let mut gr = Vec::with_capacity(blocks);
+        for i in 0..blocks {
+            looper.fill(&mut buf);
+            bp.process(&mut buf);
+            gr.push(bp.take_meters().limiter_gain_reduction_db);
+            if i >= skip {
+                meter.process(&buf);
+            }
+        }
+        // Click frames over the whole run (the loop repeats every 2^19).
+        let fs = FS as f64;
+        let one = programme_support::click_frames(fs, CLICK_S);
+        let la = (p.limiter_lookahead_ms as f64 * 0.001 * fs).round() as usize;
+        let mut per_click = Vec::new();
+        let mut base = 0;
+        while base < blocks * MS {
+            for &m in &one {
+                let at = base + m + lat;
+                if at < skip * MS || at + 2 * MS >= blocks * MS {
+                    continue;
+                }
+                let from = (at - la - MS) / MS;
+                let to = (at + 2 * MS) / MS;
+                per_click.push(gr[from..=to].iter().fold(0.0f64, |a, &b| a.max(b)));
+            }
+            base += programme_support::PROGRAMME_FRAMES;
+        }
+        let mean = per_click.iter().sum::<f64>() / per_click.len() as f64;
+        let max = per_click.iter().fold(0.0f64, |a, &b| a.max(b));
+        (meter.integrated(), mean, max)
+    }
 
     #[test]
     fn streaming_with_clicks_every_300_ms() {
         let ch = 2;
         let fs = FS as f64;
-        let p = BroadcastParams::preset(BroadcastPreset::Streaming, 4);
+        let preset = BroadcastParams::preset(BroadcastPreset::Streaming, 4);
+        assert!(preset.spike_guard_enabled);
+        let target = preset.target_loudness_lufs as f64;
         let src = peaky_acceptance::programme_with_clicks(ch, fs, CLICK_S);
         let mut failures = Vec::new();
-        for (input_lufs, expected) in MEASURED {
+        for input_lufs in [-35.0, -23.0, -10.0] {
             let mut x = src.clone();
             scale_to_lufs(&mut x, ch, fs, input_lufs);
-            let mut bp = processor(FS, ch, &p);
-            let mut meter = LoudnessMeter::new(&LoudnessConfig {
-                sample_rate: FS,
-                channels: ch,
-                layout: ChannelLayout::Unknown,
-                true_peak: false,
-            })
-            .unwrap();
-            let mut looper = Looper::new(&x);
-            let mut buf = vec![0.0f32; BLOCK * ch];
-            let per_s = FS as usize / BLOCK;
-            for i in 0..SECONDS * per_s {
-                looper.fill(&mut buf);
-                bp.process(&mut buf);
-                if i >= SKIP_SECONDS * per_s {
-                    meter.process(&buf);
+            // Standard (0.5 ms) and low-latency (no) spike guard lookahead.
+            for (mode, la) in [("standard", 0.5f32), ("low latency", 0.0)] {
+                let p = BroadcastParams {
+                    spike_guard_lookahead_ms: la,
+                    ..preset
+                };
+                let (integrated, gr_mean, gr_max) = run_case(&p, &x, ch);
+                println!(
+                    "clicks every 300 ms, streaming at {input_lufs} LUFS, {mode}: integrated \
+                     {integrated:.2} LUFS (target {target}), limiter GR on clicks mean \
+                     {gr_mean:.2} dB, max {gr_max:.2} dB"
+                );
+                if (integrated - target).abs() > LOUDNESS_TOL_LU {
+                    failures.push(format!(
+                        "at {input_lufs} LUFS, {mode}: integrated {integrated:.2} LUFS, \
+                         target {target}"
+                    ));
+                }
+                if gr_mean >= CLICK_GR_DB {
+                    failures.push(format!(
+                        "at {input_lufs} LUFS, {mode}: limiter GR on clicks {gr_mean:.2} dB"
+                    ));
                 }
             }
-            let integrated = meter.integrated();
+            let off = BroadcastParams {
+                spike_guard_enabled: false,
+                ..preset
+            };
+            let (integrated_off, gr_mean_off, _) = run_case(&off, &x, ch);
             println!(
-                "clicks every 300 ms, streaming at {input_lufs} LUFS: integrated \
-                 {integrated:.2} LUFS (target {}, recorded {expected:.2})",
-                p.target_loudness_lufs
+                "clicks every 300 ms, streaming at {input_lufs} LUFS, spike guard off: \
+                 {integrated_off:.2} LUFS, GR mean {gr_mean_off:.2} dB"
             );
-            if (integrated - expected).abs() > BAND_LU {
+            if (integrated_off - target).abs() <= LOUDNESS_TOL_LU && gr_mean_off < CLICK_GR_DB {
                 failures.push(format!(
-                    "at {input_lufs} LUFS: integrated {integrated:.2} LUFS, recorded {expected:.2}"
+                    "at {input_lufs} LUFS: the case passes without the spike guard \
+                     ({integrated_off:.2} LUFS, {gr_mean_off:.2} dB): not a guard"
                 ));
             }
         }

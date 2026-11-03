@@ -395,8 +395,10 @@ No commercial-processor material and no patent-driven method was used.
 ### Broadcast chain and presets (`src/broadcast.rs`, `src/presets.rs`, element `stromdsp-broadcastprocessor`)
 
 **The chain** is our own composition of existing parts, not a new algorithm:
-input gain → wideband AGC (`agc.rs`) → multiband compressor
-(`multiband.rs`) → true-peak limiter (`truepeak.rs`). Levelling comes first,
+input gain → spike guard (`spike_guard.rs`) → wideband AGC (`agc.rs`) →
+multiband compressor (`multiband.rs`) → true-peak limiter (`truepeak.rs`).
+The spike guard sits ahead of the AGC so clicks neither pump it nor count
+toward the loudness it measures. Levelling comes first,
 so the band dynamics work on programme at the target loudness, and the
 true-peak ceiling comes last, so no later stage can push a peak over it.
 

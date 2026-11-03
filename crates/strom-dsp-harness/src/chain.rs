@@ -8,6 +8,8 @@
 //! - **Programme cases** (AGC on): the signal is scaled to the preset's
 //!   target loudness (pre-levelled, so the AGC need not travel and the run
 //!   can stay short), then the preset runs as it is.
+//! - **Low-latency cases** (`*_low_latency`): the same with the shortest
+//!   lookaheads (spike guard: none).
 //! - **Drive cases** (AGC off): the signal's sample peak is set this many dB
 //!   over the true-peak ceiling, so the multiband and the limiter work hard
 //!   on a steady signal (aliasing and intermodulation).
@@ -19,6 +21,7 @@
 //!
 //! | Key | Meaning |
 //! |---|---|
+//! | `latency_ms` | total latency of the chain (ms) in this configuration |
 //! | `loudness_error_lu` | integrated output − target (programme cases) |
 //! | `lra_lu` | loudness range of the output |
 //! | `max_true_peak_dbtp` | largest output true peak |
@@ -39,20 +42,35 @@
 //! **Linear reference.** The NMR reference is the input through the same
 //! chain with every dynamic stage neutral ([`linear_params`]): the same
 //! delay and the same crossover all-pass phase, no gain change. A new
-//! stage adds its neutral setting there.
+//! stage adds its neutral setting there. For signals with clicks the
+//! reference is the click-free programme ([`crate::signals::Signal::clean`]),
+//! so clicks left in the output count as error and clicks removed do not.
 //!
-//! Stages that only remove peaks (a clipper) report their clip depth with
-//! [`metrics::clip_depth`] under their own keys.
+//! Stages that only remove peaks report their clip depth with
+//! [`metrics::clip_depth`] under their own keys:
+//!
+//! | Key | Meaning |
+//! |---|---|
+//! | `spike_removed_db` | spike guard: removed energy relative to the programme over the measured part (dB; −200 = nothing) |
+//! | `spike_removed_max_db` | spike guard: largest per-10 ms-block depth (dB) |
+//! | `spike_touched_pct` | spike guard: share of samples changed (%) |
+//! | `spike_events` | spike guard: events in the measured part |
+//!
+//! The spike guard is the first stage after the input gain (0 dB in every
+//! case), so these come from a [`SpikeGuard`] with the preset's settings
+//! run on the case input, against that input delayed by its latency.
 
 use std::collections::BTreeMap;
 
 use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
 use strom_dsp::presets::BroadcastPreset;
+use strom_dsp::spike_guard::{self, SpikeGuard, SpikeGuardParams};
 use strom_dsp::Processor;
 
-use crate::agc_support::scale_to_lufs;
+use crate::agc_support::reference_loudness;
 use crate::metrics::{self, FFT_LEN};
 use crate::signals::{sample_peak, SignalKind, CH};
+use strom_dsp::meter::ChannelLayout;
 
 /// Floor of the spectral metrics (dB): below it a signal counts as clean,
 /// and float rounding (which differs between SIMD levels) does not show.
@@ -84,6 +102,9 @@ pub struct Case {
     pub name: &'static str,
     pub signal: SignalKind,
     pub level: Level,
+    /// Run the low-latency configuration (shortest lookaheads) instead of
+    /// the standard one.
+    pub low_latency: bool,
 }
 
 /// Every case of the harness, per preset.
@@ -94,6 +115,13 @@ pub fn cases() -> Vec<Case> {
         name,
         signal,
         level,
+        low_latency: false,
+    };
+    let low = |name, signal, level| Case {
+        name,
+        signal,
+        level,
+        low_latency: true,
     };
     vec![
         c("music", Music, AtTarget),
@@ -113,6 +141,13 @@ pub fn cases() -> Vec<Case> {
         c("smpte_over", SmptePair, OverCeiling(6.0)),
         c("ccif_over", CcifPair, OverCeiling(6.0)),
         c("bass_into_highs_over", BassIntoHighs, OverCeiling(6.0)),
+        low("music_low_latency", Music, AtTarget),
+        low("peaky_clicks_300ms_low_latency", Peaky(0.3), AtTarget),
+        low(
+            "speech_clicks_300ms_low_latency",
+            SpeechClicks(0.3),
+            AtTarget,
+        ),
     ]
 }
 
@@ -136,16 +171,21 @@ pub fn case_params(preset: BroadcastPreset, case: &Case) -> BroadcastParams {
     if let Level::OverCeiling(_) = case.level {
         p.agc_enabled = false;
     }
+    if case.low_latency {
+        p.spike_guard_lookahead_ms = spike_guard::LOW_LATENCY_LOOKAHEAD_MS;
+    }
     p
 }
 
-/// `p` with every dynamic stage neutral: AGC and limiter bypassed (their
+/// `p` with every dynamic stage neutral: spike guard, AGC and limiter
+/// bypassed (their
 /// dry paths are exact delays), the multiband kept at ratio 1 with no
 /// drive or makeup (an all-pass with the same crossovers), input gain 0.
 /// The output is the input with the chain's delay and phase only.
 pub fn linear_params(p: &BroadcastParams) -> BroadcastParams {
     let mut q = *p;
     q.input_gain_db = 0.0;
+    q.spike_guard_enabled = false;
     q.agc_enabled = false;
     q.multiband_enabled = true;
     q.multiband_drive_db = 0.0;
@@ -184,14 +224,26 @@ pub fn run_case(
     let frames = (len.seconds * FS) as usize;
     let sig = case.signal.generate(frames, FS);
     let mut input = sig.data;
-    match case.level {
-        Level::AtTarget => scale_to_lufs(&mut input, CH, FS, p.target_loudness_lufs as f64),
-        Level::OverCeiling(db) => {
-            let g = 10f64.powf((p.true_peak_ceiling_dbtp as f64 + db) / 20.0) / sample_peak(&input);
-            input.iter_mut().for_each(|v| *v = (*v as f64 * g) as f32);
+    let g = match case.level {
+        Level::AtTarget => {
+            let now = reference_loudness(&input, CH, FS, ChannelLayout::Unknown);
+            10f64.powf((p.target_loudness_lufs as f64 - now) / 20.0)
         }
-    }
-    let linear = run_chain(&linear_params(&p), input.clone(), Vec::new()).output;
+        Level::OverCeiling(db) => {
+            10f64.powf((p.true_peak_ceiling_dbtp as f64 + db) / 20.0) / sample_peak(&input)
+        }
+    };
+    let scale = |x: &mut [f32]| x.iter_mut().for_each(|v| *v = (*v as f64 * g) as f32);
+    scale(&mut input);
+    // The NMR reference: the click-free programme where there is one.
+    let reference = match sig.clean {
+        Some(mut clean) => {
+            scale(&mut clean);
+            clean
+        }
+        None => input.clone(),
+    };
+    let linear = run_chain(&linear_params(&p), reference, Vec::new()).output;
     let mut run = run_chain(&p, input, sig.marks);
     run.linear = linear;
     (p, run)
@@ -237,6 +289,7 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
         n.insert(k.to_string(), v);
     };
 
+    put("latency_ms", Some(run.latency as f64 * 1000.0 / FS));
     let l = metrics::loudness(out, CH, FS);
     let programme = matches!(case.level, Level::AtTarget);
     put(
@@ -303,7 +356,52 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
         "sideband_100hz_dbc",
         bih.then(|| metrics::sideband_dbc(o, CH, FS, from, 3_000.0, 100.0)),
     );
+    spike_numbers(p, run, skip, &mut n);
     n
+}
+
+/// The spike guard's numbers (module docs), `None` when it is off.
+fn spike_numbers(p: &BroadcastParams, run: &ChainRun, skip: usize, n: &mut Numbers) {
+    let keys = [
+        "spike_removed_db",
+        "spike_removed_max_db",
+        "spike_touched_pct",
+        "spike_events",
+    ];
+    if !p.spike_guard_enabled {
+        for k in keys {
+            n.insert(k.to_string(), None);
+        }
+        return;
+    }
+    let mut g = SpikeGuard::new();
+    g.set_params(&SpikeGuardParams {
+        enabled: true,
+        threshold_db: p.spike_threshold_db,
+    });
+    g.set_lookahead_ms(p.spike_guard_lookahead_ms);
+    g.configure(FS as f32, CH);
+    let lat = g.latency_frames();
+    let mut out = run.input.clone();
+    let mut events = 0;
+    for (i, c) in out.chunks_mut(BLOCK * CH).enumerate() {
+        g.process(c);
+        let e = g.take_events();
+        if i * BLOCK >= skip + lat {
+            events += e;
+        }
+    }
+    let reference = delayed(&run.input, lat);
+    let d = metrics::clip_depth(&reference[skip * CH..], &out[skip * CH..], CH, FS);
+    let vals = [
+        d.overall_db,
+        d.max_db,
+        100.0 * d.samples_share,
+        events as f64,
+    ];
+    for (k, v) in keys.into_iter().zip(vals) {
+        n.insert(k.to_string(), Some(v));
+    }
 }
 
 /// Run and measure every case of `preset`. Keys are `"<preset>/<case>"`.

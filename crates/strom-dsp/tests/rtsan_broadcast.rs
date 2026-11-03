@@ -2,8 +2,8 @@
 //! `tests/rtsan_multiband.rs`.
 //!
 //! Many buffers of varying size (including more than one internal chunk),
-//! with a parameter change before every buffer (gains, AGC, multiband,
-//! limiter, every bypass and `enabled` toggle), while `set_params`,
+//! with a parameter change before every buffer (gains, spike guard, AGC,
+//! multiband, limiter, every bypass and `enabled` toggle), while `set_params`,
 //! `process`, `take_meters`, `reset_integrated` and (now and then) `reset`
 //! execute inside a real-time scope. Any allocation, lock, sleep, system
 //! call or other non-real-time-safe call in that scope aborts the test.
@@ -58,6 +58,8 @@ fn broadcast_is_realtime_safe() {
             let len = SIZES[i % SIZES.len()] * ch;
             buf[..len].copy_from_slice(&signal[..len]);
             p.enabled = i % 11 != 3;
+            p.spike_guard_enabled = i % 6 != 0;
+            p.spike_threshold_db = rng.range(6.0, 30.0);
             p.agc_enabled = i % 5 != 0;
             p.multiband_enabled = i % 7 != 0;
             p.limiter_enabled = i % 9 != 0;

@@ -1,5 +1,6 @@
 //! Broadcast final processor chain:
-//! input gain → wideband AGC → multiband compressor → true-peak limiter.
+//! input gain → spike guard → wideband AGC → multiband compressor →
+//! true-peak limiter.
 //!
 //! Units follow the element interface (`stromdsp-broadcastprocessor`): dB,
 //! LUFS, dBTP, dB/s, ms, Hz. Meter conventions follow the element's public
@@ -12,13 +13,17 @@
 //! ```text
 //!         ┌──────────────── dry: delay (total latency) ─────────────────┐
 //! input ──┤                                                             ├─ fade ─→ output
-//!         └→ gain → [AGC] → [multiband] → [limiter] ────────────────────┘
+//!         └→ gain → [spike guard] → [AGC] → [multiband] → [limiter] ────┘
 //!                     each [stage] = fade(stage(x), delay_stage(x))
 //! ```
 //!
 //! - **Input gain**: glides in dB through two cascaded one-poles of 5 ms
 //!   each (critically damped, starts with zero slope); a settled 0 dB is
 //!   skipped (bit-exact).
+//! - **Spike guard**: [`crate::spike_guard::SpikeGuard`] removes short,
+//!   isolated peaks (clicks) before the AGC and the multiband, so they
+//!   neither pump nor count toward the measured loudness. Outside events it
+//!   is an exact delay ([`crate::spike_guard`] gives its latency).
 //! - **AGC**: [`crate::agc::Agc`] (gated, rate-limited loudness rider; no
 //!   latency), with a slow output-referenced trim on its target (below).
 //! - **Multiband**: [`crate::multiband::MultibandCompressor`] (LR4
@@ -49,11 +54,13 @@
 //! Between `configure`/`reset` and the first processed frame, `set_params`
 //! applies bypass states and the input gain instantly (no fade).
 //!
-//! The latency is `agc latency (0) + limiter latency`, i.e.
-//! `round(lookahead · fs / 1000) + 32` frames (272 at 48 kHz with the
-//! default 5 ms), and depends only on the sample rate and the lookahead ([`BroadcastProcessor::latency_frames_for`]).
-//! `num_bands` and `limiter_lookahead_ms` are structural: they take effect
-//! at the next [`Processor::configure`].
+//! The latency is `spike guard latency + agc latency (0) + limiter
+//! latency`, i.e. `24 + round(spike lookahead · fs / 1000) + round(limiter
+//! lookahead · fs / 1000) + 32` frames (48 + 272 = 320 at 48 kHz with the
+//! default 0.5 ms and 5 ms), and depends only on the sample rate and the
+//! two lookaheads ([`BroadcastProcessor::latency_frames_for_params`]).
+//! `num_bands`, `spike_guard_lookahead_ms` and `limiter_lookahead_ms` are
+//! structural: they take effect at the next [`Processor::configure`].
 //!
 //! # Output-referenced trim
 //!
@@ -113,6 +120,7 @@
 //! | output momentary / short-term | a second [`LoudnessDetector`] on the final output | ≈ 1.3 µs per 480 stereo frames, O(1) read |
 //! | output integrated | [`LoudnessMeter`] (histogram mode, no true peak) on the final output | ≈ 7 µs per 480 stereo frames, < 1 µs read |
 //! | input / output true peak | 4× [`Oversampler`] peaks (max over sub-samples and channels) of the raw input (before the input gain) / of the final output, held until [`BroadcastProcessor::take_meters`] | upsampling per block |
+//! | spike events | events of the spike guard since the last read | O(1) |
 //! | AGC gain | [`crate::agc::Agc::gain_db`] (the trim included: it is the applied gain) | O(1) |
 //! | band gain reduction | [`crate::multiband::MultibandCompressor::gain_reduction_db`] at read time | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
@@ -133,6 +141,7 @@ use crate::meter::{
 };
 use crate::multiband::{MultibandBandParams, MultibandCompressor, MultibandParams, MAX_BANDS};
 use crate::oversample::{OversampleFactor, Oversampler};
+use crate::spike_guard::{self, SpikeGuard, SpikeGuardParams};
 use crate::truepeak::{self, TruePeakLimiter, TruePeakLimiterParams};
 use crate::util::{db_to_lin, lin_to_db};
 use crate::Processor;
@@ -181,6 +190,13 @@ pub struct BroadcastParams {
     pub enabled: bool,
     /// Input gain (dB, −24 … 24).
     pub input_gain_db: f32,
+    /// Spike guard stage active.
+    pub spike_guard_enabled: bool,
+    /// Spike guard cap above the programme envelope (dB, 6 … 30).
+    pub spike_threshold_db: f32,
+    /// Spike guard lookahead (ms, 0 … 2; standard 0.5, low latency 0).
+    /// Structural: part of the latency, applied at the next configure.
+    pub spike_guard_lookahead_ms: f32,
     /// AGC target (LUFS, −40 … −5).
     pub target_loudness_lufs: f32,
     /// True-peak ceiling (dBTP, −12 … 0).
@@ -226,6 +242,9 @@ impl Default for BroadcastParams {
         Self {
             enabled: true,
             input_gain_db: 0.0,
+            spike_guard_enabled: true,
+            spike_threshold_db: spike_guard::DEFAULT_THRESHOLD_DB,
+            spike_guard_lookahead_ms: spike_guard::STANDARD_LOOKAHEAD_MS,
             target_loudness_lufs: -23.0,
             true_peak_ceiling_dbtp: -1.0,
             agc_enabled: true,
@@ -266,6 +285,9 @@ pub struct BroadcastMeters {
     pub input_true_peak_dbtp: f64,
     /// Output true peak (dBTP), max since the last [`BroadcastProcessor::take_meters`].
     pub output_true_peak_dbtp: f64,
+    /// Spike guard events since the last [`BroadcastProcessor::take_meters`]
+    /// (0 while the stage or the chain is off).
+    pub spike_events: u64,
     /// AGC gain (dB, signed: + = boost).
     pub agc_gain_db: f64,
     /// Gain reduction per band (positive dB); only the first `num_bands` are meaningful.
@@ -284,6 +306,7 @@ impl Default for BroadcastMeters {
             output_integrated_lufs: SILENCE_DB,
             input_true_peak_dbtp: SILENCE_DB,
             output_true_peak_dbtp: SILENCE_DB,
+            spike_events: 0,
             agc_gain_db: 0.0,
             band_gain_reduction_db: [0.0; MAX_BANDS],
             limiter_gain_reduction_db: 0.0,
@@ -315,6 +338,16 @@ impl BroadcastParams {
         Self {
             enabled: self.enabled,
             input_gain_db: clamp_or(self.input_gain_db, -24.0, 24.0, d.input_gain_db),
+            spike_guard_enabled: self.spike_guard_enabled,
+            spike_threshold_db: SpikeGuardParams {
+                enabled: true,
+                threshold_db: self.spike_threshold_db,
+            }
+            .clamped()
+            .threshold_db,
+            spike_guard_lookahead_ms: spike_guard::clamp_lookahead_ms(
+                self.spike_guard_lookahead_ms,
+            ),
             target_loudness_lufs: clamp_or(
                 self.target_loudness_lufs,
                 -40.0,
@@ -371,6 +404,40 @@ fn or_silence(x: f64) -> f64 {
 // ---------------------------------------------------------------------------
 // Stage adapters. Each wraps one stage behind the same small interface, so
 // swapping an implementation touches only its adapter.
+
+/// Spike guard stage: [`SpikeGuard`]. Its own `enabled` stays on: the chain
+/// does the bypass.
+#[derive(Debug, Default)]
+struct SpikeStage {
+    inner: SpikeGuard,
+}
+
+impl SpikeStage {
+    /// Latency of the stage (frames).
+    fn latency_frames_for(sample_rate: f32, lookahead_ms: f32) -> usize {
+        spike_guard::latency_frames_for(sample_rate, lookahead_ms)
+    }
+
+    fn configure(&mut self, sample_rate: f32, channels: usize, lookahead_ms: f32) {
+        self.inner.set_lookahead_ms(lookahead_ms);
+        self.inner.configure(sample_rate, channels);
+    }
+
+    fn set_params(&mut self, p: &BroadcastParams) {
+        self.inner.set_params(&SpikeGuardParams {
+            enabled: true,
+            threshold_db: p.spike_threshold_db,
+        });
+    }
+
+    fn process(&mut self, x: &mut [f32]) {
+        self.inner.process(x);
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
 
 /// AGC stage: [`Agc`] with the chain's parameters. Latency 0.
 #[derive(Debug, Default)]
@@ -748,20 +815,24 @@ pub struct BroadcastProcessor {
     channels: usize,
     /// Structural values in force since the last `configure`.
     active_lookahead_ms: f32,
+    active_spike_lookahead_ms: f32,
     active_bands: usize,
     /// True from configure/reset until the first processed frame.
     fresh: bool,
 
     input_gain: GainGlide,
+    spike: SpikeStage,
     agc: AgcStage,
     trim: OutputTrim,
     multiband: MultibandCompressor,
     limiter: LimiterStage,
 
+    spike_fade: Fade,
     agc_fade: Fade,
     multiband_fade: Fade,
     limiter_fade: Fade,
     chain_fade: Fade,
+    spike_delay: FixedDelay,
     agc_delay: FixedDelay,
     multiband_delay: FixedDelay,
     limiter_delay: FixedDelay,
@@ -782,6 +853,8 @@ pub struct BroadcastProcessor {
     input_peak: f32,
     output_peak: f32,
     limiter_gr_max: f64,
+    /// Spike guard events since the last `take_meters`.
+    spike_events: u64,
 }
 
 impl Default for BroadcastProcessor {
@@ -799,17 +872,21 @@ impl BroadcastProcessor {
             sample_rate: 0.0,
             channels: 0,
             active_lookahead_ms: params.limiter_lookahead_ms,
+            active_spike_lookahead_ms: params.spike_guard_lookahead_ms,
             active_bands: params.num_bands,
             fresh: true,
             input_gain: GainGlide::default(),
+            spike: SpikeStage::default(),
             agc: AgcStage::default(),
             trim: OutputTrim::default(),
             multiband: MultibandCompressor::new(),
             limiter: LimiterStage::default(),
+            spike_fade: Fade::default(),
             agc_fade: Fade::default(),
             multiband_fade: Fade::default(),
             limiter_fade: Fade::default(),
             chain_fade: Fade::default(),
+            spike_delay: FixedDelay::default(),
             agc_delay: FixedDelay::default(),
             multiband_delay: FixedDelay::default(),
             limiter_delay: FixedDelay::default(),
@@ -825,20 +902,22 @@ impl BroadcastProcessor {
             input_peak: 0.0,
             output_peak: 0.0,
             limiter_gr_max: 0.0,
+            spike_events: 0,
         };
         s.set_params(&params);
         s
     }
 
     /// Update parameters (clamped). Never allocates. Structural fields
-    /// (`num_bands`, `limiter_lookahead_ms`) take effect at the next
-    /// `configure`.
+    /// (`num_bands`, `spike_guard_lookahead_ms`, `limiter_lookahead_ms`)
+    /// take effect at the next `configure`.
     pub fn set_params(&mut self, params: &BroadcastParams) {
         let p = params.clamped();
         self.params = p;
         if self.channels == 0 {
             // Unconfigured: the structural values follow until `configure`.
             self.active_lookahead_ms = p.limiter_lookahead_ms;
+            self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
             self.active_bands = p.num_bands;
         }
         let snap = self.fresh;
@@ -846,6 +925,7 @@ impl BroadcastProcessor {
         if snap {
             self.input_gain.snap();
         }
+        self.spike.set_params(&p);
         self.agc.set_params(&p);
         self.multiband.set_params(&MultibandParams {
             num_bands: self.active_bands,
@@ -855,6 +935,7 @@ impl BroadcastProcessor {
             ..MultibandParams::default()
         });
         self.limiter.set_params(&p, self.active_lookahead_ms);
+        self.spike_fade.set(p.spike_guard_enabled, snap);
         self.agc_fade.set(p.agc_enabled, snap);
         self.multiband_fade.set(p.multiband_enabled, snap);
         self.limiter_fade.set(p.limiter_enabled, snap);
@@ -890,6 +971,11 @@ impl BroadcastProcessor {
             ),
             input_true_peak_dbtp: or_silence(lin_to_db(self.input_peak as f64)),
             output_true_peak_dbtp: or_silence(lin_to_db(self.output_peak as f64)),
+            spike_events: if on && self.params.spike_guard_enabled {
+                self.spike_events
+            } else {
+                0
+            },
             agc_gain_db: if on && self.params.agc_enabled {
                 self.agc.gain_db()
             } else {
@@ -905,6 +991,7 @@ impl BroadcastProcessor {
         self.input_peak = 0.0;
         self.output_peak = 0.0;
         self.limiter_gr_max = self.limiter.gain_reduction_db();
+        self.spike_events = 0;
         m
     }
 
@@ -915,12 +1002,28 @@ impl BroadcastProcessor {
         }
     }
 
-    /// Total latency in frames for a configuration (lookahead + oversampling
-    /// filter delay). Constant for a given rate and lookahead, independent of
-    /// stage bypass. Usable before `configure`.
+    /// Total latency in frames for a configuration with the standard spike
+    /// guard lookahead and this limiter lookahead (lookaheads + oversampling
+    /// filter delays). Constant for a given rate and lookahead, independent
+    /// of stage bypass. Usable before `configure`.
     pub fn latency_frames_for(sample_rate: f32, lookahead_ms: f32) -> usize {
-        AgcStage::latency_frames_for(sample_rate)
-            + LimiterStage::latency_frames_for(sample_rate, clamp_lookahead(lookahead_ms))
+        Self::latency_frames_for_params(
+            sample_rate,
+            &BroadcastParams {
+                limiter_lookahead_ms: lookahead_ms,
+                ..BroadcastParams::default()
+            },
+        )
+    }
+
+    /// Total latency in frames for the structural fields of `p` (spike
+    /// guard and limiter lookaheads). Usable before `configure`.
+    pub fn latency_frames_for_params(sample_rate: f32, p: &BroadcastParams) -> usize {
+        SpikeStage::latency_frames_for(
+            sample_rate,
+            spike_guard::clamp_lookahead_ms(p.spike_guard_lookahead_ms),
+        ) + AgcStage::latency_frames_for(sample_rate)
+            + LimiterStage::latency_frames_for(sample_rate, clamp_lookahead(p.limiter_lookahead_ms))
     }
 
     /// Process one chunk (at most `CHUNK` frames).
@@ -945,6 +1048,16 @@ impl BroadcastProcessor {
         self.input_gain.apply(chunk, ch);
 
         let dry = &mut self.stage_dry[..len];
+        let spike = &mut self.spike;
+        run_stage(
+            &mut self.spike_fade,
+            &mut self.spike_delay,
+            dry,
+            chunk,
+            ch,
+            |x| spike.process(x),
+        );
+        self.spike_events += self.spike.inner.take_events();
         let agc = &mut self.agc;
         run_stage(
             &mut self.agc_fade,
@@ -1020,8 +1133,11 @@ impl Processor for BroadcastProcessor {
         }
         let p = self.params;
         self.active_lookahead_ms = p.limiter_lookahead_ms;
+        self.active_spike_lookahead_ms = p.spike_guard_lookahead_ms;
         self.active_bands = p.num_bands;
 
+        self.spike
+            .configure(sample_rate, channels, self.active_spike_lookahead_ms);
         self.agc.configure(sample_rate, channels);
         self.trim.allocate();
         self.multiband.configure(sample_rate, channels);
@@ -1029,17 +1145,16 @@ impl Processor for BroadcastProcessor {
         // Apply the parameters (structural values included) before sizing
         // the delays from the limiter's realised latency.
         self.set_params(&p);
+        let spike_latency = self.spike.inner.latency_frames();
         let agc_latency = AgcStage::latency_frames_for(sample_rate);
         let limiter_latency = self.limiter.latency_frames();
-        debug_assert_eq!(
-            agc_latency + limiter_latency,
-            Self::latency_frames_for(sample_rate, self.active_lookahead_ms)
-        );
+        let total = spike_latency + agc_latency + limiter_latency;
+        debug_assert_eq!(total, self.latency_frames());
+        self.spike_delay.allocate(spike_latency, channels);
         self.agc_delay.allocate(agc_latency, channels);
         self.multiband_delay.allocate(0, channels);
         self.limiter_delay.allocate(limiter_latency, channels);
-        self.chain_delay
-            .allocate(agc_latency + limiter_latency, channels);
+        self.chain_delay.allocate(total, channels);
 
         self.stage_dry = vec![0.0; CHUNK * channels];
         self.chain_dry = vec![0.0; CHUNK * channels];
@@ -1067,6 +1182,7 @@ impl Processor for BroadcastProcessor {
         self.input_gain.set_rate(fs);
         let fade = (FADE_MS * 0.001 * fs).round() as usize;
         for f in [
+            &mut self.spike_fade,
             &mut self.agc_fade,
             &mut self.multiband_fade,
             &mut self.limiter_fade,
@@ -1096,11 +1212,13 @@ impl Processor for BroadcastProcessor {
         if self.channels == 0 {
             return;
         }
+        self.spike.reset();
         self.agc.reset();
         self.multiband.reset();
         self.trim.reset();
         self.limiter.reset();
         for d in [
+            &mut self.spike_delay,
             &mut self.agc_delay,
             &mut self.multiband_delay,
             &mut self.limiter_delay,
@@ -1110,6 +1228,7 @@ impl Processor for BroadcastProcessor {
         }
         self.input_gain.snap();
         for f in [
+            &mut self.spike_fade,
             &mut self.agc_fade,
             &mut self.multiband_fade,
             &mut self.limiter_fade,
@@ -1127,10 +1246,18 @@ impl Processor for BroadcastProcessor {
         self.input_peak = 0.0;
         self.output_peak = 0.0;
         self.limiter_gr_max = 0.0;
+        self.spike_events = 0;
         self.fresh = true;
     }
 
     fn latency_frames(&self) -> usize {
-        Self::latency_frames_for(self.sample_rate, self.active_lookahead_ms)
+        Self::latency_frames_for_params(
+            self.sample_rate,
+            &BroadcastParams {
+                spike_guard_lookahead_ms: self.active_spike_lookahead_ms,
+                limiter_lookahead_ms: self.active_lookahead_ms,
+                ..self.params
+            },
+        )
     }
 }
