@@ -220,7 +220,7 @@ fn bench_eq(c: &mut Criterion) {
         let mut k = 0u32;
         Box::new(move |buf| {
             k = k.wrapping_add(1);
-            p.bands[2].gain_db = if k % 2 == 0 { 2.5 } else { 4.0 };
+            p.bands[2].gain_db = if k.is_multiple_of(2) { 2.5 } else { 4.0 };
             e.set_params(&p);
             e.process(buf);
         })
