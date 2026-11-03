@@ -1,4 +1,4 @@
-//! Shared plumbing for the four elements: caps, settings hand-over between the
+//! Shared plumbing for the elements: caps, settings hand-over between the
 //! application thread and the streaming thread, and the per-buffer DSP driver.
 //!
 //! # Settings hand-over and locking

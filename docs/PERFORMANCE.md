@@ -18,7 +18,7 @@ in the commit messages.
 
 ```sh
 cargo bench -p strom-dsp                       # everything
-cargo bench -p strom-dsp --bench strip         # channel strip and phase 1 processors
+cargo bench -p strom-dsp --bench strip         # channel strip and its processors
 cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 ```
 
@@ -33,6 +33,10 @@ cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 | `dynamics_1b` | de-esser |
 | `channel_tools` | delay and stereo |
 | `cleanup` | input cleanup |
+| `agc` | loudness detector and wideband AGC |
+| `multiband` | multiband compressor (4 bands) |
+| `truepeak` | true-peak limiter |
+| `broadcast` | full broadcast chain with all meters |
 
 All benches use 48 kHz. Most use 480-frame (10 ms) buffers; some also run
 1024 frames.
@@ -44,6 +48,10 @@ on the same machine. Wall-clock numbers depend on the machine and its load:
 compare runs only on the same, otherwise idle, machine.
 
 ## Instruction counts (gungraun, Linux)
+
+| Bench | Covers |
+|---|---|
+| `strip_gungraun` | gate, compressor, EQ, limiter, and the full strip |
 
 `benches/strip_gungraun.rs` counts instructions for one 1024-frame, 48 kHz
 stereo buffer through the strip and through each processor, using Valgrind
