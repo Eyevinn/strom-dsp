@@ -57,7 +57,7 @@
 //!
 //! The scenarios are chosen so that a correctly smoothed change stays below
 //! the bound: the test is about hard discontinuities, not about changes that
-//! are meant to be heard. Where a time the user sets decides the speed (a
+//! are meant to be heard. Where a time property decides the speed (a
 //! gate's attack, a dynamics processor's attack), the scenario uses a
 //! moderate setting and says so. Exemptions are explicit, per scenario, with a
 //! reason ([`Case::exempt`]).
