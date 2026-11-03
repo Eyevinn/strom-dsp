@@ -74,4 +74,5 @@ fn bench_deesser(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_deesser);
+
 criterion_main!(benches);

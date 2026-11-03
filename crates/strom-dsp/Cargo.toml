@@ -82,3 +82,7 @@ harness = false
 [[bench]]
 name = "cleanup"
 harness = false
+
+[[bench]]
+name = "ducker"
+harness = false
