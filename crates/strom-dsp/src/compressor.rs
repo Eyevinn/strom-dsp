@@ -7,9 +7,26 @@
 //!
 //! # Signal flow (per frame of interleaved samples)
 //!
-//! 1. **Level detector**: `x_dB = 20·log10(max_c |x_c|)` over all channels (linked;
-//!    floored at −200 dB). For a steady sine this is a peak detector, so levels and
-//!    the threshold refer to **peak amplitude**.
+//! 1. **Level detector**: the linked peak `p[n] = max_c |x_c[n]|` over all
+//!    channels, then a **peak hold**: the detector level is the maximum of `p`
+//!    over the last `H` frames (sliding window, van Herk / Gil–Werman
+//!    [`SegmentedMin`] on `−p`), `H = min(`[`DETECTOR_HOLD_MS`]`, release)`, and
+//!    `x_dB = 20·log10(level)` (floored at −200 dB). For a steady sine this is
+//!    its **peak amplitude**, so levels and the threshold refer to peak level.
+//!
+//!    Why the hold (listening-test fix): without it the detector followed each
+//!    half-cycle of the waveform, so with fast times the gain rippled at twice
+//!    the signal frequency and distorted bass (2.5 % THD at 60 Hz with attack
+//!    1 ms / release 50 ms; Giannoulis et al. 2012, section on artefacts of
+//!    fast time constants: the detector release must be long compared with the
+//!    period of the lowest frequency of interest). A window that is at least
+//!    half a period long always contains a waveform peak, so the level of a
+//!    steady sine above `1/(2H)` (25 Hz) is constant and the gain does not
+//!    ripple at all, while an attack is still seen instantly. The cost is that
+//!    a release starts `H` later. Tying `H` to the release keeps that delay at
+//!    most one release time: an operator who sets a release below 20 ms gets
+//!    a proportionally shorter hold (and more low-frequency distortion, which
+//!    is then their choice).
 //! 2. **Gain computer** ([`GainComputer`], static curve), with threshold
 //!    `T = 20·log10(threshold)`, knee width `W = −40·log10(k)` dB (`k` = `knee`
 //!    clamped to `[0.001, 1]`) and slope `S = 1 − 1/ratio`, the gain reduction
@@ -27,6 +44,9 @@
 //!    `a_A = exp(−1/(τ_A·fs))`, `τ_A = attack_ms/1000` (and likewise for release).
 //!    **Time constant definition**: after a step of the static gain reduction, the
 //!    smoothed reduction (in dB) covers `1 − 1/e` (≈ 63.2 %) of the step after `τ`.
+//!    A rising input level steps the static reduction at once (attack: 63.2 %
+//!    after `τ_A`); a falling level steps it after the hold, i.e. `H` frames
+//!    later (release: 63.2 % after `H + τ_R`).
 //! 4. **Output gain**: `g = 10^(−y/20) · makeup`, applied to all channels.
 //!
 //! # Parameter smoothing
@@ -41,8 +61,8 @@
 //!
 //! Processing runs in blocks of [`BLOCK_FRAMES`]: per-frame peaks, the serial
 //! detector/smoother chain, then gain application. While the parameters are not
-//! gliding, a frame whose peak is below the knee's lower edge (compared in the
-//! linear domain) skips the `log10`, and a frame with zero smoothed reduction
+//! gliding, a block whose held levels are all below the knee's lower edge
+//! (compared in the linear domain) skips the `log10`, and a block with zero smoothed reduction
 //! skips the `exp`; the result is the same as evaluating the full formula.
 //!
 //! # Denormals
@@ -59,13 +79,70 @@
 //! separate key signal through a [`KeyDetector`]: optional key filter
 //! ([`Compressor::set_key_filter`], high-pass or band-pass) and the linked
 //! peak over the key's channels, which may differ in number from the
-//! programme's ([`Compressor::set_key_channels`]). Steps 2–4 are unchanged.
+//! programme's ([`Compressor::set_key_channels`]). The hold of step 1 and
+//! steps 2–4 are unchanged.
 //! [`Processor::process`] never touches the key path and is bit-identical to
 //! the compressor without sidechain support.
+//!
+//! # Detector modes and calibration
+//!
+//! [`Compressor::set_detector`] selects what step 1 measures before the hold.
+//! Both readings are **sine-calibrated**: a steady sine reads its peak level,
+//! so the threshold means the same in both modes (and the same as the gate's
+//! thresholds).
+//!
+//! - [`CompressorDetector::Peak`] (default, phase 1 behaviour plus the hold):
+//!   the level is the linked peak `max_c |x_c|`. A sine reads its peak, a
+//!   constant `|x| = c` reads `c`, noise reads its largest peaks (RMS + crest
+//!   factor).
+//! - [`CompressorDetector::Rms`] (the classic choice for programme and
+//!   speech; Zölzer, *DAFX*, RMS level measurement): a one-pole mean square of
+//!   the linked peak, `m[n] = a·m[n−1] + (1−a)·p[n]²`, `a = exp(−1/(τ·fs))`,
+//!   `τ =` rms-window ([`Compressor::set_rms_window`], 1 … 100 ms, default
+//!   [`DEFAULT_RMS_WINDOW_MS`]), read as `sqrt(2·m)` (the gate's
+//!   [`MeanSquareEnvelope`]). The factor 2 (+3.01 dB) is the sine
+//!   calibration: a sine reads its peak, a constant `c` reads `√2·c`, noise
+//!   reads its RMS + 3.01 dB. The hold then takes the maximum of `2·m`, so
+//!   the remaining ripple of the mean square at `2f` does not modulate the
+//!   gain; the price is that a low-frequency sine reads its ripple maximum,
+//!   `10·log10(1 + r)` dB above its peak with `r = 1/sqrt(1 + (4π·f·τ)²)`:
+//!   at τ = 10 ms +0.63 dB at 50 Hz, +0.33 dB at 100 Hz, +0.17 dB at
+//!   200 Hz, +0.03 dB at 1 kHz. A level step from silence to `L` dB above a
+//!   threshold crosses it after `−τ·ln(1 − 10^(−L/10))`; after the key stops
+//!   the reading decays with `2τ` (after the hold).
+//!
+//! Switching modes while running seeds the new detector with the level the
+//! old one held (a peak `p` becomes the power `p²` and vice versa), so the
+//! detector level is continuous at the switch; differences between the two
+//! readings afterwards are followed with the attack/release times.
+//!
+//! # Auto-makeup
+//!
+//! [`Compressor::set_auto_makeup`] (default off) adds a makeup gain derived
+//! from the static curve, so the perceived level stays roughly constant while
+//! threshold, ratio and knee change: the static gain reduction at the
+//! reference level `x_ref =` [`AUTO_MAKEUP_REFERENCE_DB`] (−18 dB,
+//! sine-calibrated: the EBU R68 alignment level) is made up,
+//!
+//! `M_auto = r(x_ref)` dB, i.e. `r = 0`, `S·(x_ref − T + W/2)²/(2W)` or
+//! `S·(x_ref − T)` by the knee region (the gain computer of step 2),
+//!
+//! so a signal reading `x_ref` leaves the compressor at its input level
+//! (Giannoulis et al. 2012 derive automatic makeup the same way, with the
+//! reference at 0 dBFS; a reference at the alignment level keeps typical
+//! programme, rather than full-scale peaks, at its level). The output gain is
+//! `10^((M_auto − y)/20) · makeup`: the explicit `makeup_gain` applies on top.
+//! `M_auto` is part of the makeup that glides (see "Parameter smoothing"), so
+//! switching it and changing threshold, ratio or knee with it on are
+//! click-free.
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
-use crate::dynamics::{vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, OnePole};
+use crate::dynamics::{
+    vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, MeanSquareEnvelope, OnePole,
+    SegmentedMin,
+};
 use crate::simd::{detect, Level};
+use crate::util::db_to_lin;
 use crate::Processor;
 use fearless_simd::dispatch;
 use fearless_simd::prelude::*;
@@ -74,6 +151,50 @@ pub use crate::dynamics::MIN_KNEE;
 
 /// Time constant (ms) of the one-pole glide applied to threshold, ratio, knee and makeup.
 pub const PARAM_SMOOTHING_MS: f64 = 10.0;
+
+/// Longest peak hold of the level detector (ms): the hold is
+/// `min(DETECTOR_HOLD_MS, release)`. 20 ms is half a period of 25 Hz, so a
+/// steady sine at or above 25 Hz gives a ripple-free level (see the module docs).
+pub const DETECTOR_HOLD_MS: f64 = 20.0;
+
+/// Level detector of the compressor (see "Detector modes" in the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompressorDetector {
+    /// Linked sample peak (phase 1 behaviour), with the peak hold.
+    #[default]
+    Peak,
+    /// Sine-calibrated RMS over the rms-window, with the peak hold.
+    Rms,
+}
+
+/// Default RMS averaging time (ms), the same as the gate's detector.
+pub const DEFAULT_RMS_WINDOW_MS: f32 = 10.0;
+/// Range of the RMS averaging time (ms).
+pub const RMS_WINDOW_RANGE: (f32, f32) = (1.0, 100.0);
+
+/// Reference detector level (dB, sine-calibrated) of the automatic makeup:
+/// the static gain reduction at this level is made up (see "Auto-makeup" in
+/// the module docs).
+pub const AUTO_MAKEUP_REFERENCE_DB: f64 = -18.0;
+
+/// Automatic makeup gain (dB, ≥ 0) of the static curve `gc`: its gain
+/// reduction at [`AUTO_MAKEUP_REFERENCE_DB`].
+pub fn auto_makeup_db(gc: &GainComputer) -> f64 {
+    gc.reduction_db(AUTO_MAKEUP_REFERENCE_DB)
+}
+
+/// Largest sample rate `configure` accepts (Hz); also sizes the hold window.
+const MAX_SAMPLE_RATE: f64 = 1.0e6;
+
+/// Hold length in frames for `release_ms` at `fs` (≥ 1; 1 = no hold).
+fn hold_frames(release_ms: f64, fs: f64) -> usize {
+    let f = (release_ms.min(DETECTOR_HOLD_MS) * 0.001 * fs).round();
+    if f.is_finite() && f >= 1.0 {
+        f as usize
+    } else {
+        1
+    }
+}
 
 /// Snap distance of the parameter glides.
 const GLIDE_SNAP: f64 = 1e-9;
@@ -157,12 +278,22 @@ struct Curve {
 
 impl Curve {
     fn from_params(p: &CompressorParams) -> Self {
+        Self::with_auto_makeup(p, false)
+    }
+
+    /// Curve with the makeup gain, including the automatic makeup when `auto`.
+    fn with_auto_makeup(p: &CompressorParams, auto: bool) -> Self {
         let gc = GainComputer::from_linear(p.threshold as f64, p.ratio as f64, p.knee as f64);
+        let auto_gain = if auto {
+            db_to_lin(auto_makeup_db(&gc))
+        } else {
+            1.0
+        };
         Self {
             threshold_db: gc.threshold_db,
             slope: gc.slope,
             knee_db: gc.knee_db,
-            makeup: p.makeup_gain as f64,
+            makeup: p.makeup_gain as f64 * auto_gain,
         }
     }
 
@@ -231,6 +362,17 @@ pub struct Compressor {
     /// Linear level at or below which the settled curve gives exactly 0 dB reduction.
     knee_start_lin: f64,
 
+    /// Sliding maximum of the detector level (as a minimum of its negation).
+    hold: SegmentedMin,
+    /// Most recent held detector level (amplitude for peak, power for RMS).
+    held: f64,
+    detector: CompressorDetector,
+    /// RMS averaging time (ms, clamped).
+    rms_window_ms: f32,
+    /// Mean-square envelope of the RMS detector.
+    mean_square: MeanSquareEnvelope,
+    /// Automatic makeup on (see "Auto-makeup" in the module docs).
+    auto_makeup: bool,
     /// Smoothed gain reduction (dB, ≥ 0).
     reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
@@ -271,6 +413,12 @@ impl Compressor {
             },
             gliding: false,
             knee_start_lin: curve.computer().knee_start_lin(),
+            hold: SegmentedMin::default(),
+            held: 0.0,
+            detector: CompressorDetector::Peak,
+            rms_window_ms: DEFAULT_RMS_WINDOW_MS,
+            mean_square: MeanSquareEnvelope::default(),
+            auto_makeup: false,
             reduction: AttackRelease::default(),
             fresh: true,
             level: Level::baseline(),
@@ -333,6 +481,77 @@ impl Compressor {
         &self.params
     }
 
+    /// Select the level detector (see "Detector modes" in the module docs).
+    /// Never allocates. While running, the new detector is seeded with the
+    /// level the old one held, so the detector level is continuous.
+    pub fn set_detector(&mut self, detector: CompressorDetector) {
+        if detector == self.detector {
+            return;
+        }
+        self.detector = detector;
+        if self.fresh {
+            self.held = 0.0;
+            self.mean_square.reset();
+            self.hold.reset(self.hold.window());
+        } else {
+            // Peak amplitude p ↔ sine-calibrated power p².
+            self.held = match detector {
+                CompressorDetector::Rms => {
+                    let power = self.held * self.held;
+                    self.mean_square.set_value(power);
+                    power
+                }
+                CompressorDetector::Peak => self.held.sqrt(),
+            };
+            self.hold.reset(self.hold.window());
+            self.hold.push(-self.held);
+        }
+    }
+
+    /// Current level detector.
+    pub fn detector(&self) -> CompressorDetector {
+        self.detector
+    }
+
+    /// Set the RMS averaging time (ms, 1 … 100, default
+    /// [`DEFAULT_RMS_WINDOW_MS`]; NaN becomes the default). Used only by
+    /// [`CompressorDetector::Rms`]. Never allocates; the envelope keeps its
+    /// value, so a change does not jump.
+    pub fn set_rms_window(&mut self, window_ms: f32) {
+        let (lo, hi) = RMS_WINDOW_RANGE;
+        self.rms_window_ms = clamp_or(window_ms, lo, hi, DEFAULT_RMS_WINDOW_MS);
+        self.mean_square
+            .set_time(self.rms_window_ms as f64, self.sample_rate);
+    }
+
+    /// Current (clamped) RMS averaging time (ms).
+    pub fn rms_window(&self) -> f32 {
+        self.rms_window_ms
+    }
+
+    /// Switch the automatic makeup gain on or off (see "Auto-makeup" in the
+    /// module docs). The explicit `makeup_gain` still applies on top. The
+    /// change glides like any makeup change. Never allocates.
+    pub fn set_auto_makeup(&mut self, on: bool) {
+        self.auto_makeup = on;
+        self.update_coefficients();
+    }
+
+    /// Whether the automatic makeup gain is on.
+    pub fn auto_makeup(&self) -> bool {
+        self.auto_makeup
+    }
+
+    /// Makeup gain (dB) the automatic makeup currently targets for the
+    /// current parameters (0 when it is off), excluding `makeup_gain`.
+    pub fn auto_makeup_gain_db(&self) -> f64 {
+        if self.auto_makeup {
+            auto_makeup_db(&self.target.computer())
+        } else {
+            0.0
+        }
+    }
+
     /// Smoothed gain reduction (dB, ≥ 0) after the most recently processed frame,
     /// excluding makeup gain.
     pub fn gain_reduction_db(&self) -> f64 {
@@ -375,6 +594,9 @@ impl Compressor {
         let mut makeup = [0.0f64; BLOCK_FRAMES];
         for (b, block) in samples.chunks_mut(BLOCK_FRAMES * ch).enumerate() {
             let frames = block.len() / ch;
+            if frames == 0 {
+                continue;
+            }
             // Vector loops cover whole vectors; lanes past `frames` hold
             // finite leftovers and are ignored. BLOCK_FRAMES is a multiple of
             // every native width.
@@ -387,19 +609,38 @@ impl Compressor {
                         .linked_peaks_simd(simd, &k[start..], kc, &mut peaks[..frames]);
                 }
             }
+            // Detector, then the peak hold: sliding maximum over the last
+            // `H` frames (serial). Peak: amplitude; RMS: sine-calibrated power.
+            let rms = self.detector == CompressorDetector::Rms;
+            let mut block_max = 0.0f64;
+            for (l, &p) in level[..frames].iter_mut().zip(&peaks) {
+                let d = if rms {
+                    self.mean_square.step(p as f64)
+                } else {
+                    p as f64
+                };
+                let h = -self.hold.push(-d);
+                block_max = if h > block_max { h } else { block_max };
+                *l = h;
+            }
+            self.held = level[frames - 1];
             // Settled curve and the whole block below the knee: the static
             // reduction is exactly 0, no need for the logarithm.
-            let quiet = !self.gliding
-                && peaks[..frames].iter().fold(0.0f32, |m, &p| m.max(p)) as f64
-                    <= self.knee_start_lin;
+            let knee_start = if rms {
+                self.knee_start_lin * self.knee_start_lin
+            } else {
+                self.knee_start_lin
+            };
+            let quiet = !self.gliding && block_max <= knee_start;
             if quiet {
                 level[..frames].fill(0.0);
             } else {
-                for (l, &p) in level.iter_mut().zip(&peaks) {
-                    *l = p as f64;
-                }
+                // Lanes past `frames` must hold finite values.
+                level[frames..lanes].fill(1.0);
+                // RMS: 20·log10(sqrt(P)) = 0.5 · 20·log10(P) (exact scaling).
+                let scale = if rms { 0.5 } else { 1.0 };
                 for v in level[..lanes].chunks_exact_mut(n) {
-                    vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)).store_slice(v);
+                    (vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)) * scale).store_slice(v);
                 }
             }
 
@@ -456,7 +697,17 @@ impl Compressor {
             fs,
         );
         self.glide.set_time(fs);
-        self.target = Curve::from_params(&self.params);
+        self.mean_square.set_time(self.rms_window_ms as f64, fs);
+        let h = hold_frames(self.params.release_ms as f64, fs);
+        if h != self.hold.window() {
+            // Restart the window with the level held so far, so a release
+            // change never drops the detector level abruptly.
+            self.hold.reset(h);
+            if !self.fresh {
+                self.hold.push(-self.held);
+            }
+        }
+        self.target = Curve::with_auto_makeup(&self.params, self.auto_makeup);
         if self.fresh {
             self.glide.jump(&self.target);
             self.current = self.target;
@@ -484,8 +735,11 @@ fn reduction_db_simd<S: Simd>(simd: S, gc: &GainComputer, x: S::f64s) -> S::f64s
 
 impl Processor for Compressor {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
-        self.sample_rate = (sample_rate as f64).clamp(1.0, 1.0e6);
+        self.sample_rate = (sample_rate as f64).clamp(1.0, MAX_SAMPLE_RATE);
         self.channels = channels;
+        // The only allocation: the hold window for the longest hold.
+        self.hold
+            .allocate(hold_frames(DETECTOR_HOLD_MS, self.sample_rate));
         if !self.level_forced {
             self.level = detect();
         }
@@ -511,6 +765,10 @@ impl Processor for Compressor {
         self.key.reset();
         self.reduction.set_value(0.0);
         self.fresh = true;
+        self.held = 0.0;
+        self.mean_square.reset();
+        let h = hold_frames(self.params.release_ms as f64, self.sample_rate);
+        self.hold.reset(h);
         self.update_coefficients();
     }
 }

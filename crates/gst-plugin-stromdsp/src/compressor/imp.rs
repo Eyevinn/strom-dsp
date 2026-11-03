@@ -7,8 +7,10 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
+use strom_dsp::compressor::{CompressorDetector, DEFAULT_RMS_WINDOW_MS, RMS_WINDOW_RANGE};
 use strom_dsp::{Compressor, CompressorParams};
 
+use super::StromDspCompressorDetector;
 use crate::common::{self, EngineSlot, SharedSettings};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -23,6 +25,12 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 struct Settings {
     enabled: bool,
     params: CompressorParams,
+    /// Level detector (default peak).
+    detector: StromDspCompressorDetector,
+    /// RMS averaging time (ms, 1 … 100).
+    rms_window: f32,
+    /// Automatic makeup from the static curve (default off).
+    auto_makeup: bool,
 }
 
 impl Default for Settings {
@@ -30,6 +38,9 @@ impl Default for Settings {
         Self {
             enabled: true,
             params: CompressorParams::default(),
+            detector: StromDspCompressorDetector::Peak,
+            rms_window: DEFAULT_RMS_WINDOW_MS,
+            auto_makeup: false,
         }
     }
 }
@@ -41,6 +52,12 @@ pub struct StromDspCompressor {
 }
 
 fn apply(dsp: &mut Compressor, s: &Settings) {
+    dsp.set_detector(match s.detector {
+        StromDspCompressorDetector::Peak => CompressorDetector::Peak,
+        StromDspCompressorDetector::Rms => CompressorDetector::Rms,
+    });
+    dsp.set_rms_window(s.rms_window);
+    dsp.set_auto_makeup(s.auto_makeup);
     dsp.set_params(&s.params);
 }
 
@@ -111,6 +128,37 @@ impl ObjectImpl for StromDspCompressor {
                     1.0,
                     d.knee,
                 ),
+                // Additions after the listening tests (phase 1b).
+                glib::ParamSpecEnum::builder_with_default(
+                    "detector",
+                    StromDspCompressorDetector::Peak,
+                )
+                .nick("Detector")
+                .blurb(
+                    "Level detector: peak (linked sample peak) or rms (RMS over \
+                     rms-window, the classic programme/speech choice). Both read a \
+                     steady sine at its peak, so the threshold means the same in both",
+                )
+                .readwrite()
+                .controllable()
+                .mutable_playing()
+                .build(),
+                common::float_prop(
+                    "rms-window",
+                    "RMS window",
+                    "Averaging time of the rms detector (ms); ignored by the peak detector",
+                    RMS_WINDOW_RANGE.0,
+                    RMS_WINDOW_RANGE.1,
+                    DEFAULT_RMS_WINDOW_MS,
+                ),
+                common::bool_prop(
+                    "auto-makeup",
+                    "Auto makeup",
+                    "Add the static gain reduction at -18 dBFS (sine peak) as makeup, \
+                     so the level stays roughly constant when threshold, ratio or knee \
+                     change; makeup-gain applies on top",
+                    false,
+                ),
             ]
         });
         PROPS.as_ref()
@@ -135,8 +183,24 @@ impl ObjectImpl for StromDspCompressor {
             gst::debug!(CAT, imp = self, "enabled: {was} -> {enabled}");
             return;
         }
+        if name == "detector" {
+            let d: StromDspCompressorDetector = value.get().expect("type checked upstream");
+            self.settings.update(|s| s.detector = d);
+            gst::debug!(CAT, imp = self, "detector set to {d:?}");
+            return;
+        }
+        if name == "auto-makeup" {
+            let on: bool = value.get().expect("type checked upstream");
+            self.settings.update(|s| s.auto_makeup = on);
+            gst::debug!(CAT, imp = self, "auto-makeup set to {on}");
+            return;
+        }
         let v: f32 = value.get().expect("type checked upstream");
         self.settings.update(|s| {
+            if name == "rms-window" {
+                s.rms_window = v;
+                return;
+            }
             let p = &mut s.params;
             match name {
                 "threshold" => p.threshold = v,
@@ -163,6 +227,9 @@ impl ObjectImpl for StromDspCompressor {
             "release" => p.release_ms.to_value(),
             "makeup-gain" => p.makeup_gain.to_value(),
             "knee" => p.knee.to_value(),
+            "detector" => s.detector.to_value(),
+            "rms-window" => s.rms_window.to_value(),
+            "auto-makeup" => s.auto_makeup.to_value(),
             name => unreachable!("unknown property {name}"),
         }
     }
@@ -176,7 +243,8 @@ impl ElementImpl for StromDspCompressor {
             gst::subclass::ElementMetadata::new(
                 "strom-dsp compressor",
                 "Filter/Effect/Audio",
-                "Feed-forward downward compressor with soft knee and linked channels. \
+                "Feed-forward downward compressor with soft knee and linked channels, \
+                 peak or RMS detector and optional auto-makeup. \
                  enabled=false is a bit-exact passthrough.",
                 "Eyevinn Technology",
             )

@@ -6,7 +6,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use proptest::prelude::*;
-use strom_dsp::compressor::PARAM_SMOOTHING_MS;
+use strom_dsp::compressor::{DETECTOR_HOLD_MS, PARAM_SMOOTHING_MS};
 use strom_dsp::util::{lin_to_db, one_pole_coef};
 use strom_dsp::{Compressor, CompressorParams, Processor};
 
@@ -202,9 +202,17 @@ fn release_time_constant() {
         let mut c = comp(FS, 1, p);
         let r0 = step_reduction(&mut c, 1.0, 1000);
         assert!((r0.last().unwrap() - 15.0).abs() < 1e-6);
-        let r = step_reduction(&mut c, 0.01, ms(release as f64) + 10);
+        // The detector holds the level for H = min(DETECTOR_HOLD_MS, release)
+        // frames before the static reduction steps down (listening-test THD
+        // fix); the documented time constant applies from there.
+        // A window of H frames includes the current one, so the static
+        // reduction steps down H − 1 frames after the input.
+        let delay = ms((release as f64).min(DETECTOR_HOLD_MS)) - 1;
+        let r = step_reduction(&mut c, 0.01, delay + ms(release as f64) + 10);
+        assert!((r[delay - 1] - 15.0).abs() < 1e-6, "held through the hold");
+        assert!(r[delay] < 15.0 - 1e-6, "released after the hold");
         let n = ms(release as f64);
-        let frac = r[n - 1] / 15.0;
+        let frac = r[delay + n - 1] / 15.0;
         assert!(
             (frac - (-(n as f64) / tau_frames(release)).exp()).abs() < 1e-3,
             "release {release}: {frac}"

@@ -115,6 +115,7 @@ const GST_FLAGS: [glib::ParamFlags; 4] = [
 fn phase1b_additions(factory: &str) -> &'static [&'static str] {
     match factory {
         "stromdsp-gate" => &["mode", "ratio"],
+        "stromdsp-compressor" => &["detector", "rms-window", "auto-makeup"],
         _ => &[],
     }
 }

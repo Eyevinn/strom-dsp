@@ -186,3 +186,44 @@ fn limiter_levels_are_bit_identical() {
         assert_eq!(b.safety_clip_count(), 0);
     }
 }
+
+#[test]
+fn compressor_detector_modes_are_bit_identical() {
+    use strom_dsp::compressor::CompressorDetector;
+    let (lo, hi) = levels();
+    for ch in CHANNELS {
+        let input = signal(ch, 12_000, 17 + ch as u64);
+        // Detector switches (seeded while running), rms-window and release
+        // (hold length) changes, and parameter glides.
+        let change = |c: &mut Compressor, k: usize| {
+            if k % 3 == 1 {
+                c.set_detector(if k.is_multiple_of(2) {
+                    CompressorDetector::Peak
+                } else {
+                    CompressorDetector::Rms
+                });
+                c.set_rms_window(1.0 + (k % 9) as f32 * 7.0);
+                c.set_auto_makeup(k % 5 < 3);
+                c.set_params(&CompressorParams {
+                    threshold: [0.1f32, 0.5, 0.02][k % 3],
+                    ratio: 1.0 + (k % 7) as f32 * 3.0,
+                    attack_ms: 0.01 + (k % 5) as f32,
+                    release_ms: 1.0 + (k % 4) as f32 * 15.0,
+                    makeup_gain: 1.0 + (k % 2) as f32,
+                    knee: [0.0625f32, 1.0, 0.0][k % 3],
+                });
+            }
+        };
+        let mut a = Compressor::new();
+        a.set_simd_level(lo);
+        a.set_detector(CompressorDetector::Rms);
+        a.configure(FS, ch);
+        let mut b = Compressor::new();
+        b.set_simd_level(hi);
+        b.set_detector(CompressorDetector::Rms);
+        b.configure(FS, ch);
+        let ya = run(&mut a, &input, ch, change);
+        let yb = run(&mut b, &input, ch, change);
+        assert_bits_equal(&ya, &yb, &format!("compressor detector modes ch={ch}"));
+    }
+}
