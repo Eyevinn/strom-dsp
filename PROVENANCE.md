@@ -235,6 +235,101 @@ basics from J. O. Smith III. No code listing was used.
   (`safety_clip_count()`); tests show it stays at 0. Release state is snapped
   to its target below 1e-15 (denormal-safe).
 
+### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`, phase 1b)
+
+- **Butterworth design** (Oppenheim & Schafer, *Discrete-Time Signal
+  Processing*; J. O. Smith III, *Introduction to Digital Filters*).
+  - Analog prototype poles sit at ψ_k = (2k+1)π/(2n) from the imaginary axis.
+    Each conjugate pair gives `s² + s/Q_k + 1` with `Q_k = 1/(2 sin ψ_k)`; odd
+    orders add a real pole.
+  - The bilinear transform is pre-warped with `K = tan(π fc/fs)`, so −3.01 dB
+    lands on fc at any rate.
+  - Pair sections are algebraically identical to the RBJ LPF/HPF at Q_k, so
+    the phase 1 biquad designs and SIMD kernels are reused.
+- **Crossover** (S. Linkwitz, JAES 24(1), 1976; LR2n = Butterworth n squared).
+  - From `B(s)B(−s) = 1 + (−1)ⁿs²ⁿ`: `LP² + HP² = B(−s)/B(s)` for n = 2, 4,
+    and `LP² − HP² = B(−s)/B(s)` for n = 1.
+  - `B(−s)/B(s)` is an all-pass: one cookbook APF per pole pair, plus
+    `(1−s)/(1+s)`.
+  - The topology (own choice) is a cascade of high-passes, where band s is
+    `LP_s` of the remainder. Each band then passes through the all-passes of
+    every higher split, so the band sum is the product of all split all-passes
+    (flat, zero latency).
+  - Own choice: the LR2 high-pass is defined as `−HP²`, so the plain band sum
+    is all-pass for every order.
+  - Frequency changes glide as in the EQ. Order and band-count changes
+    crossfade over 10 ms.
+
+### Oversampler (`src/oversample.rs`, phase 1b)
+
+- **Structure:** a cascade of 2× half-band FIR stages in polyphase form
+  (Crochiere & Rabiner, *Multirate Digital Signal Processing*, ch. 4–5; Lyons,
+  *Understanding DSP*, half-band filters).
+- **Filter design:** each stage is a windowed sinc with a Kaiser window
+  (Oppenheim & Schafer §7.5–7.6), with I0 computed from its power series.
+- **Own design choices:**
+  - The passband edge is 20/48 of the base rate.
+  - Side taps are normalised so H(0) = 1 and H(½) = 0.
+  - Tap counts and β (20/10.45, 8/10.40, 5/11.15) were found by scanning for a
+    stopband of at least 95 dB. Later stages are designed only against the
+    images the earlier stages leave.
+  - The pure-delay polyphase branch is chosen per stage so that the up and down
+    delays are whole base-rate frames.
+- **Measured:** passband error ≤ 0.0001 dB, images and aliases ≤ −98.4 dB.
+
+### STFT (`src/stft.rs`, phase 1b)
+
+- **Method:** weighted overlap-add after J. O. Smith III, *Spectral Audio
+  Signal Processing* (STFT, OLA, the COLA condition).
+- **Windows:** analysis and synthesis are both √(periodic Hann). Their product
+  satisfies COLA for hops N/2 and N/4, with sum N/(2H).
+- **Normalisation:** that sum and the 1/N inverse-FFT scale are folded into
+  the synthesis window.
+- **Latency (own analysis):** N − 1 samples for arbitrary buffer sizes. The
+  spec says N − hop, which only holds for hop-aligned blocks; an impulse test
+  verifies N − 1 exactly.
+
+### Meters (`src/meter/`, phase 1b)
+
+- **`LoudnessMeter`** wraps `ebur128`, always in histogram mode.
+  - Why histogram mode: the default queue mode reallocates after 500 s and
+    allocates on every LRA read (verified with a counting allocator).
+    Histogram mode is allocation-free on our path; verified with the counting
+    allocator and RTSan.
+  - Channel weights follow ITU-R BS.1770: 1.0 front, 1.41 surround, LFE
+    excluded (EBU Tech 3341 §2.10). Own choice: an unknown layout weights
+    every channel 1.0.
+  - Tests generate EBU Tech 3341 (v4, 2023) cases 1–6 and 9–19, and Tech 3342
+    (2023) cases 1–4, in code from the published descriptions. No test files
+    were downloaded.
+- **`CorrelationMeter`:** normalised cross-correlation at lag 0, with one-pole
+  averages. The side/mid ratio is derived from the same averages. Own choice:
+  r = 0 when either channel is below −100 dBFS RMS.
+- **`MonoDetector`:** own design. Two-threshold hysteresis on the S/M ratio and
+  the correlation, a hold time, and freezing below a silence level (the same
+  idea as the gate, Zölzer, *DAFX*).
+
+### Sidechain, expander mode and gate detector (`dynamics/key.rs`, `gate.rs`, phase 1b)
+
+- **`KeyDetector`:** an optional key filter (RBJ HPF, or BPF with 0 dB peak,
+  using the phase 1 `Biquad`), then the linked peak over the key's channels.
+  The detector-path structure follows Giannoulis et al. 2012. Own choice: a
+  key with the wrong channel count, or too short, reads as silence (fail-safe:
+  nothing is processed).
+- **Gate detector (fix after listening tests):** `MeanSquareEnvelope` is a
+  one-pole average of x² with τ = 10 ms (Zölzer, *DAFX*: RMS level
+  measurement).
+  - Own calibration: ×2 (+3.01 dB), so a steady sine reads its peak level.
+  - Own choice: a 1 dB minimum hysteresis.
+  - These replace the instant-attack peak follower, which let single noise
+    peaks open the gate when open == close. The guard test is
+    `tests/gate_chatter.rs`.
+- **Expander mode:** a downward expander after Zölzer, *DAFX*. Below
+  T = open threshold, the static gain is `max(D, (R−1)(x−T))` dB. Own choice:
+  hysteresis and hold act as in the gate, and only the closed target changes.
+- **Test signals:** pink noise is generated with the Voss method (M. Gardner,
+  *Scientific American*, 1978).
+
 ### GStreamer elements (`crates/gst-plugin-stromdsp`)
 
 Written from the gstreamer-rs bindings documentation and crate sources
@@ -285,6 +380,20 @@ deliberately not set (see `docs/PERFORMANCE.md`).
 | Crate | Used by | Licence |
 |---|---|---|
 | `fearless_simd` 1.2 | `strom-dsp` (SIMD with runtime dispatch) | Apache-2.0 OR MIT |
+| `ebur128` 0.1 | `strom-dsp` meter (BS.1770 loudness, gating, LRA, sample and true peak) | MIT |
+| `realfft` 3.5 (with `rustfft` 6.4) | `strom-dsp` STFT (real FFT) | MIT / MIT OR Apache-2.0 |
+
+**Why these are reused (phase 1b rule: hard to get right):**
+- **`ebur128`:** the standard has many edge cases: K-weighting at any rate,
+  75 %-overlap gating, absolute and relative gates, Tech 3342 percentiles, and
+  true-peak oversampling. The crate is a mature port of libebur128 and is used
+  by GStreamer's `ebur128level`.
+- **`realfft`/`rustfft`:** fast, correct FFTs (mixed radix, SIMD). Only
+  `process_with_scratch` runs on the real-time path; planning happens at
+  configure.
+
+Both are wrapped behind our own types and verified real-time safe on our path
+with the counting allocator and RTSan.
 | `gstreamer`, `gstreamer-base`, `gstreamer-audio` 0.25 | plugin | MIT OR Apache-2.0 |
 | `gst-plugin-version-helper` 0.8 (build) | plugin | MIT OR Apache-2.0 |
 | `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
