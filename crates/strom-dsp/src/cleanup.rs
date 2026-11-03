@@ -61,7 +61,9 @@
 //! notch comb (with its state) to the new one (from zero state). A notch
 //! started from zero state passes the signal and only then builds up its
 //! rejection, so the new comb has no start-up transient. A further hum change
-//! during a crossfade starts when that crossfade ends.
+//! during a crossfade starts when that crossfade ends. Between
+//! `configure`/`reset` and the first `process` call, parameters apply
+//! immediately (no fades), so the call order does not change the output.
 //!
 //! Filters run in `f64` (DF-I, phase 1 SIMD kernels) and flush their state
 //! below `1e-15`; no latency.
@@ -479,6 +481,8 @@ pub struct Cleanup {
     dry: Vec<f32>,
     /// `set_simd_level` was called: `configure` keeps the hum level.
     hum_forced: bool,
+    /// No frame processed since configure/reset: switches snap (no fade).
+    fresh: bool,
 }
 
 impl Default for Cleanup {
@@ -508,6 +512,7 @@ impl Cleanup {
             hum_switch: Switch::new(),
             dry: Vec::new(),
             hum_forced: false,
+            fresh: true,
         };
         c.apply_params();
         c
@@ -583,6 +588,18 @@ impl Processor for Cleanup {
         if ch == 0 {
             return;
         }
+        if self.fresh {
+            // First call after configure/reset: take the switch states as
+            // they are now (no fade), whatever the call order was.
+            for s in [
+                &mut self.dc_switch,
+                &mut self.hp_switch,
+                &mut self.hum_switch,
+            ] {
+                s.snap();
+            }
+            self.fresh = false;
+        }
         let usable = samples.len() / ch * ch;
         let samples = &mut samples[..usable];
         self.dc_switch.run(&mut self.dc, samples, ch, &mut self.dry);
@@ -603,5 +620,6 @@ impl Processor for Cleanup {
         ] {
             s.configure(self.sample_rate);
         }
+        self.fresh = true;
     }
 }

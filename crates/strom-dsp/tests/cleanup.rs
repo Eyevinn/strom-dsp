@@ -470,6 +470,29 @@ fn parameter_changes_do_not_click() {
     assert!(bound < a, "bound {bound} not restrictive");
 }
 
+/// Parameters set after `configure` (before the first `process`) act exactly
+/// like parameters set before it: no fade-in.
+#[test]
+fn params_before_or_after_configure_are_equivalent() {
+    let p = CleanupParams {
+        dc_block: true,
+        highpass_hz: 80.0,
+        hum: HumFrequency::Hz60,
+        ..Default::default()
+    };
+    let x: Vec<f32> = (0..4_800)
+        .map(|i| ((i as f32) * 0.05).sin() + 0.2)
+        .collect();
+    let mut before = cleanup(48_000.0, 2, p);
+    let mut after = Cleanup::new();
+    after.configure(48_000.0, 2);
+    after.set_params(&p);
+    let (mut a, mut b) = (x.clone(), x.clone());
+    before.process(&mut a);
+    after.process(&mut b);
+    assert_eq!(a, b);
+}
+
 /// `reset` makes the processor behave like a fresh instance.
 #[test]
 fn reset_matches_fresh_instance() {
