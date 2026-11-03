@@ -154,9 +154,9 @@ impl ObjectImpl for StromDspCompressor {
                 common::bool_prop(
                     "auto-makeup",
                     "Auto makeup",
-                    "Add the static gain reduction at -18 dBFS (sine peak) as makeup, \
-                     so the level stays roughly constant when threshold, ratio or knee \
-                     change; makeup-gain applies on top",
+                    "Keep the perceived level roughly constant: make up the gain \
+                     reduction the programme actually gets (slow, gated estimate over \
+                     about 10 s, at most 24 dB); makeup-gain applies on top",
                     false,
                 ),
             ]
