@@ -54,6 +54,12 @@ Each rule has a test that fails if the rule is broken:
 
 A new element is not done until it passes all of these.
 
+Keep the default test suite fast: `cargo test` should finish in about a minute on a laptop.
+- Default tests use short signals (a fraction of a second where the property allows it) and check correctness against theory: frequency responses, gain curves, ceilings, latency, interface.
+- Long programme runs (tens of seconds of audio, preset × level × programme grids, loudness and distortion figures) are measurements, not tests. They live in the measurement harness and the extended CI workflow, not in the default suite.
+- RealtimeSanitizer runs once over each element's processing path, not once per internal component.
+- Property tests use a small number of cases by default and more in the extended workflow.
+
 ## Provenance
 - strom-dsp is a clean-room implementation. Every algorithm is written from textbooks, papers and standards, and `PROVENANCE.md` names the reference for each one.
 - Never read, copy or port code from other DSP projects or products. Never tune an element to match the output of a specific product.
