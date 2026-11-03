@@ -103,6 +103,15 @@
 //! A NaN output sample (only possible from NaN/Inf input) is replaced by 0 and
 //! counted.
 //!
+//! # Reuse as a gain core
+//!
+//! The [true-peak limiter](crate::truepeak) reuses this whole gain machinery
+//! through two crate-internal hooks: it supplies the per-frame peaks from its
+//! own (oversampled) detector instead of `max_ch |x_ch[j]|`, and it adds an
+//! extra audio delay so the audio lines up with its detector's later peak
+//! stream. With the defaults (no external peaks, no extra delay) the
+//! `Limiter` is unchanged.
+//!
 //! # Efficiency
 //!
 //! The limiter is dominated by its serial per-frame gain pipeline, so unlike the
@@ -272,6 +281,10 @@ pub struct Limiter {
     level: Level,
     /// Set by `set_simd_level`: `configure` keeps `level` instead of detecting.
     level_forced: bool,
+    /// Extra audio delay (frames) on top of the lookahead, for a detector
+    /// whose peak stream lags the audio (see [`Limiter::set_extra_delay`]).
+    /// Always 0 for a plain `Limiter`.
+    extra_delay: usize,
 }
 
 impl Default for Limiter {
@@ -314,6 +327,7 @@ impl Limiter {
             fresh: true,
             level: Level::baseline(),
             level_forced: false,
+            extra_delay: 0,
         };
         l.set_params(&LimiterParams::default());
         l
@@ -371,6 +385,38 @@ impl Limiter {
     /// The SIMD instruction set `process` currently dispatches to.
     pub fn simd_level(&self) -> Level {
         self.level
+    }
+
+    /// Crate-internal core hook: delay the audio by `frames` more than the
+    /// lookahead, for an external detector whose peak stream (see
+    /// [`process_with_peaks`](Self::process_with_peaks)) describes the audio
+    /// `frames` frames late. The gain pipeline is unchanged: it works in
+    /// *peak-stream time*, and the output frame `n` is the input frame
+    /// `n − L − frames` times the gain the pipeline computed for peak frame
+    /// `n − L`. Takes effect at the next `configure` (it sizes the delay
+    /// line); [`Processor::latency_frames`] includes it.
+    pub(crate) fn set_extra_delay(&mut self, frames: usize) {
+        self.extra_delay = frames;
+    }
+
+    /// Crate-internal core hook: process `samples` like
+    /// [`Processor::process`], but take the linked peak of each frame from
+    /// `peaks` (one value per frame, `≥ 0`) instead of measuring the frames.
+    /// `peaks.len()` must be at least the frame count. Everything else
+    /// (required gain, sliding minimum, ramp, hold, release, delay, safety
+    /// clip at the ceiling) is the plain limiter's.
+    pub(crate) fn process_with_peaks(&mut self, samples: &mut [f32], peaks: &[f32]) {
+        let ch = self.channels;
+        if !self.is_configured() || samples.len() < ch || peaks.len() < samples.len() / ch {
+            return;
+        }
+        self.fresh = false;
+        if self.shape_dirty {
+            self.rebuild();
+        }
+        self.start_crossfade_if_needed();
+
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, Some(peaks)));
     }
 
     fn is_configured(&self) -> bool {
@@ -530,7 +576,8 @@ impl Limiter {
             self.now += 1;
         }
         self.delay.write_frames(frames);
-        self.delay.read_frames(la as usize, frames);
+        self.delay
+            .read_frames(la as usize + self.extra_delay, frames);
         let mut clips = 0;
         for ((f, &g), &lim) in frames.chunks_exact_mut(ch).zip(&gains).zip(&lims) {
             for y in f {
@@ -561,8 +608,8 @@ impl Limiter {
             self.ceil_hist[tap_a as usize & hmask].max(self.ceil_hist[tap_b as usize & hmask]);
         for ((y, &xa), &xb) in frame
             .iter_mut()
-            .zip(self.delay.read(self.lookahead))
-            .zip(self.delay.read(to))
+            .zip(self.delay.read(self.lookahead + self.extra_delay))
+            .zip(self.delay.read(to + self.extra_delay))
         {
             let v = (g * ((1.0 - w) * xa as f64 + w * xb as f64)) as f32;
             *y = safety(v, lim, &mut clips);
@@ -633,7 +680,7 @@ impl Processor for Limiter {
         // Room for a whole block on top of the longest delay: a block is
         // written before its delayed frames are read back.
         self.delay
-            .allocate(self.max_frames + BLOCK_FRAMES, channels);
+            .allocate(self.max_frames + self.extra_delay + BLOCK_FRAMES, channels);
 
         // History must reach back a + hi + H + 1 ≤ 2·Lmax + Hmax + 1 frames
         // for a rebuild, besides the frame being written. The window minimum
@@ -668,7 +715,7 @@ impl Processor for Limiter {
     }
 
     fn latency_frames(&self) -> usize {
-        self.target_lookahead
+        self.target_lookahead + self.extra_delay
     }
 
     fn process(&mut self, samples: &mut [f32]) {
@@ -682,7 +729,7 @@ impl Processor for Limiter {
         }
         self.start_crossfade_if_needed();
 
-        dispatch!(self.level, simd => self.process_blocks(simd, samples));
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, None));
     }
 }
 
@@ -715,16 +762,24 @@ impl Limiter {
     /// Block loop, monomorphised per instruction set: per-frame linked peaks
     /// and required gains (SIMD), then frame by frame through the serial gain
     /// pipeline, with bulk delay-line access and gain application.
+    /// `external` replaces the measured frame peaks (see
+    /// [`process_with_peaks`](Self::process_with_peaks)).
     #[inline(always)]
-    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
+    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32], external: Option<&[f32]>) {
         let ch = self.channels;
         let enabled = self.params.enabled;
         let rise = 1.0 - self.release_coef;
         let mut peaks = [0.0f32; BLOCK_FRAMES];
         let mut req = [0.0f64; BLOCK_FRAMES];
-        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+        for (b, block) in samples.chunks_mut(BLOCK_FRAMES * ch).enumerate() {
             let nf = block.len() / ch;
-            frame_peaks_simd(simd, block, ch, &mut peaks[..nf]);
+            match external {
+                Some(ext) => {
+                    let at = b * BLOCK_FRAMES;
+                    peaks[..nf].copy_from_slice(&ext[at..at + nf]);
+                }
+                None => frame_peaks_simd(simd, block, ch, &mut peaks[..nf]),
+            }
             required_gains(simd, self.ceiling, enabled, &peaks[..nf], &mut req[..nf]);
             let mut i = 0;
             // A cross-fade only starts at the top of `process` or right after
