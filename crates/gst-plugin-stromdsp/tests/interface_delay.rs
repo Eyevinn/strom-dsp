@@ -1,4 +1,4 @@
-//! Interface test for `stromdsp-delay` (phase 1b spec 3.4), modelled on
+//! Interface test for `stromdsp-delay`, modelled on
 //! `tests/interface.rs`: every property's name, GLib type, range, default and
 //! flags, no extra properties, klass, pads, and that the element is never a
 //! BaseTransform passthrough.

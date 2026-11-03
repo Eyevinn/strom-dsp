@@ -1,7 +1,7 @@
 //! `stromdsp-gate`: noise gate element.
 //!
-//! Phase 1b adds two properties (phase 1b spec §3.3); every
-//! phase 1 property, default and behaviour is unchanged:
+//! Two properties were added after the first release (additive; every
+//! original property, default and behaviour is unchanged):
 //!
 //! | Property | Type | Range | Default | Mutable |
 //! |---|---|---|---|---|
@@ -11,7 +11,7 @@
 //! In `expander` mode the closed gain follows the downward-expander curve
 //! `max(reduction, (ratio − 1)·(level − open-threshold))` dB instead of the
 //! fixed `reduction` (see `strom_dsp::gate`). `ratio` is ignored in `gate`
-//! mode, which is bit-identical to the phase 1 element.
+//! mode, which is bit-identical to the gate without these properties.
 
 use gst::glib;
 use gst::prelude::*;
@@ -23,7 +23,7 @@ mod imp;
 #[repr(i32)]
 #[enum_type(name = "StromDspGateMode")]
 pub enum StromDspGateMode {
-    /// Classic gate: fixed attenuation `reduction` when closed (phase 1).
+    /// Classic gate: fixed attenuation `reduction` when closed (the original behaviour).
     #[default]
     #[enum_value(name = "Gate: fixed attenuation when closed", nick = "gate")]
     Gate = 0,

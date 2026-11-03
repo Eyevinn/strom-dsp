@@ -1,6 +1,6 @@
-//! Harness tests of the phase 1b gate additions: expander mode through the
-//! element matches the library and its static curve, and `mode=gate` (with
-//! any `ratio`) is bit-identical to the phase 1 gate.
+//! Harness tests of the gate's `mode` and `ratio` properties: expander mode
+//! through the element matches the library and its static curve, and
+//! `mode=gate` (with any `ratio`) is bit-identical to the classic gate.
 
 mod util;
 
@@ -33,24 +33,24 @@ fn props(p: &GateParams) -> Vec<(&'static str, glib::Value)> {
     ]
 }
 
-/// Phase 1 behaviour: the library gate with only `set_params` (no mode or
-/// ratio calls), as the phase 1 element drove it.
-fn phase1_reference(rate: u32, channels: usize, input: &[f32], fpb: usize) -> Vec<f32> {
+/// Classic gate behaviour: the library gate with only `set_params` (no mode
+/// or ratio calls), as the element drove it before `mode` and `ratio` existed.
+fn classic_gate_reference(rate: u32, channels: usize, input: &[f32], fpb: usize) -> Vec<f32> {
     let mut dsp = Gate::new();
     dsp.set_params(&params());
     util::run_reference(dsp, rate, channels, input, fpb, &[], |_, _, _| {})
 }
 
 #[test]
-fn mode_gate_is_bit_identical_to_phase1() {
-    // The phase 1 harness signal, and long segments in which the gate closes.
+fn mode_gate_is_bit_identical_to_classic_gate() {
+    // The standard harness signal, and long segments in which the gate closes.
     let signals: [fn(u32, usize) -> Vec<f32>; 2] = [
         |r, c| util::test_signal(r, c, r as usize),
         |r, c| long_segments(r, c, 2),
     ];
     for ((rate, channels), signal) in FORMATS.into_iter().flat_map(|f| signals.map(|s| (f, s))) {
         let input = signal(rate, channels);
-        let want = phase1_reference(rate, channels, &input, 1024);
+        let want = classic_gate_reference(rate, channels, &input, 1024);
         // Default mode, explicit mode=gate, and mode=gate with a non-default
         // ratio (ignored in gate mode).
         for extra in [
@@ -133,7 +133,7 @@ fn expander_mode_matches_library() {
         // And it really differs from gate mode: at the end of the first quiet
         // segment (−54 dBFS, gate closed) the expander at ratio 1.5 attenuates
         // by 12 dB instead of 40 dB.
-        let gate = phase1_reference(rate, channels, &input, 1024);
+        let gate = classic_gate_reference(rate, channels, &input, 1024);
         let seg = SEGMENT_MS * rate as usize / 1000 * channels;
         let tail = 2 * seg - seg / 5..2 * seg;
         let peak = |v: &[f32]| v[tail.clone()].iter().fold(0f32, |m, x| m.max(x.abs()));

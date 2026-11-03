@@ -1,5 +1,5 @@
 //! Tests of the broadcast chain ([`strom_dsp::broadcast::BroadcastProcessor`]),
-//! phase 2 spec §2.6, §2.7 and §4 ("Chain", "Latency"). All signals are
+//! its meters, latency and loudness acceptance. All signals are
 //! synthetic with fixed seeds.
 //!
 //! - Latency: an impulse through a flat configuration comes out exactly at
@@ -900,7 +900,7 @@ fn no_allocation() {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance (phase 2 spec §4 "Chain").
+// Acceptance: integrated loudness and true peak per preset.
 
 /// 60 s programmes per preset (`strom_dsp::presets`, at the default 4 bands)
 /// at three input levels: the integrated loudness (excluding the first
@@ -917,7 +917,7 @@ mod acceptance {
 
     const SECONDS: usize = 60;
     const SKIP_SECONDS: usize = 10;
-    /// Allowed true-peak overshoot (phase 2 spec §2.5).
+    /// Allowed true-peak overshoot (0.1 dB, the true-peak limiter's guarantee).
     const TP_MARGIN_DB: f64 = 0.1;
 
     /// The preset with this nick, at the default band count.

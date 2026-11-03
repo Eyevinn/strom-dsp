@@ -21,7 +21,7 @@ gungraun = ["dep:gungraun"]
 [dependencies]
 # Portable SIMD with runtime dispatch (SSE4.2/AVX2/AVX-512/NEON), safe API.
 fearless_simd = "1.2"
-# Reused because they are hard to get right (phase 1b spec 1.2), always
+# Reused because they are hard to get right, always
 # wrapped behind our own types:
 # BS.1770 loudness / LRA / true peak (EBU R 128 measurement).
 ebur128 = "0.1"

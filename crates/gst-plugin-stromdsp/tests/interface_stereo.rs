@@ -1,4 +1,4 @@
-//! Interface test for `stromdsp-stereo` (phase 1b spec 3.5), modelled on
+//! Interface test for `stromdsp-stereo`, modelled on
 //! `tests/interface.rs`: every property's name, GLib type, range or enum
 //! values, default and flags, no extra properties, klass, 2-channel pads, and
 //! that the element is never a BaseTransform passthrough.

@@ -38,7 +38,7 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 
 /// Crossover frequency range (Hz).
 const XO_RANGE: (f32, f32) = (20.0, 20_000.0);
-/// Default band count (phase 2 spec §3.1).
+/// Default band count (1 … 5).
 const DEFAULT_NUM_BANDS: usize = 4;
 const DEFAULT_METER_INTERVAL_MS: u32 = 100;
 const MAX_METER_INTERVAL_MS: u32 = 10_000;

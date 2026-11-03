@@ -1,8 +1,9 @@
-//! Broadcast final processor chain (phase 2 spec §2.6):
+//! Broadcast final processor chain:
 //! input gain → wideband AGC → multiband compressor → true-peak limiter.
 //!
-//! Units follow the element interface (phase 2 spec §3.1): dB, LUFS, dBTP,
-//! dB/s, ms, Hz. Meter conventions follow the agreed element message:
+//! Units follow the element interface (`stromdsp-broadcastprocessor`): dB,
+//! LUFS, dBTP, dB/s, ms, Hz. Meter conventions follow the element's public
+//! contract (its meter message):
 //! gain reductions are **positive dB of reduction**, the AGC gain is
 //! **signed** (+ = boost), and silence reads [`SILENCE_DB`].
 //!
@@ -102,7 +103,7 @@ pub const SILENCE_DB: f64 = -200.0;
 /// Number of crossover frequencies (`MAX_BANDS − 1`).
 pub const MAX_CROSSOVERS: usize = MAX_BANDS - 1;
 
-/// All parameters of the chain (phase 2 spec §3.1, minus `preset` and
+/// All parameters of the chain (the element's properties, minus `preset` and
 /// `meter-interval`, which belong to the element).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BroadcastParams {
@@ -146,8 +147,11 @@ pub struct BroadcastParams {
 }
 
 impl Default for BroadcastParams {
-    /// Neutral placeholder until presets exist; the element applies the
-    /// `ebu-r128` preset as its default.
+    /// Neutral library defaults. They share the top-level values of the
+    /// `ebu-r128` preset (target, ceiling, AGC range and rates, crossovers)
+    /// but not its band settings or limiter release. The element applies
+    /// the full `ebu-r128` preset ([`BroadcastParams::preset`]) as its
+    /// default.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -172,7 +176,7 @@ impl Default for BroadcastParams {
     }
 }
 
-/// Meter values of the chain (phase 2 spec §2.7). Read once per block by
+/// Meter values of the chain. Read once per block by
 /// the element; dB/LUFS values are [`SILENCE_DB`] when there is nothing to
 /// measure.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,5 +1,5 @@
-//! Multiband compressor (phase 2 spec 2.4) and the crossover requirements it
-//! relies on (phase 2 spec 2.1), verified against theory:
+//! Multiband compressor and the crossover requirements it
+//! relies on, verified against theory:
 //!
 //! - the analytic magnitude of the bilinear-transformed (pre-warped) LR4
 //!   bands: with `r_s(f) = tan(πf/fs)/tan(πf_s/fs)` for split `s`,
@@ -234,7 +234,7 @@ fn log_freqs(lo: f64, hi: f64, n: usize) -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------
-// Crossover requirements (phase 2 spec 2.1), on the phase 1b `Crossover`.
+// Crossover requirements, on `filter::Crossover`.
 
 fn lr4(fs: f32, nb: usize, splits: [f32; MAX_SPLITS]) -> Crossover {
     let mut x = Crossover::new();
@@ -481,7 +481,7 @@ fn static_curve_per_band_matches_gain_computer() {
     }
 }
 
-/// One band is a plain wideband compressor: bit-identical to the phase 1
+/// One band is a plain wideband compressor: bit-identical to the plain
 /// `Compressor` with the converted parameters.
 #[test]
 fn one_band_is_wideband_compressor() {

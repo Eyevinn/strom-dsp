@@ -2,7 +2,8 @@
 //!
 //! Reference: D. Giannoulis, M. Massberg, J. D. Reiss, "Digital Dynamic Range
 //! Compressor Design — A Tutorial and Analysis", JAES 60(6), 2012 (gain computer
-//! with soft knee). Knee parameterisation per spec section 3.3.
+//! with soft knee). The knee is given as a linear factor `k` (see
+//! [`GainComputer::from_linear`]).
 
 use crate::util::{db_to_lin, lin_to_db};
 
@@ -32,7 +33,7 @@ pub struct GainComputer {
 
 impl GainComputer {
     /// Curve from the interface units: `threshold` as linear amplitude, `ratio`
-    /// (≥ 1) and the linear knee factor `knee` (spec 3.3): the knee spans
+    /// (≥ 1) and the linear knee factor `knee`: the knee spans
     /// `threshold·k … threshold/k`, i.e. `W = −40·log10(k)` dB, with `k` clamped
     /// to `[MIN_KNEE, 1]`.
     pub fn from_linear(threshold: f64, ratio: f64, knee: f64) -> Self {
@@ -118,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn knee_definition_spec_3_3() {
+    fn knee_definition_linear_factor() {
         let g = GainComputer::from_linear(0.5, 4.0, 0.1);
         assert!((g.knee_db - 40.0).abs() < 1e-9);
         assert!((g.slope - 0.75).abs() < 1e-15);

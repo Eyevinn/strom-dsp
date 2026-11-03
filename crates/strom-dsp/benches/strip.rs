@@ -1,4 +1,4 @@
-//! Criterion benchmarks (spec 6.3): one channel strip (gate → compressor →
+//! Criterion benchmarks: one channel strip (gate → compressor →
 //! 4-band EQ) plus a limiter at 48 kHz, and each processor on its own.
 //!
 //! Only the stable public API is used (`new`, `configure`, `set_params`,

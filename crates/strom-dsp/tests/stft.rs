@@ -1,4 +1,4 @@
-//! STFT tests (phase 1b spec 2.5 and 4): perfect reconstruction with an
+//! STFT tests: perfect reconstruction with an
 //! identity callback at every frame/hop combination (error ≤ −100 dB),
 //! latency by impulse, spectral modifications behave as theory says, the
 //! callback sees the right channel, and zero allocations in `process`.

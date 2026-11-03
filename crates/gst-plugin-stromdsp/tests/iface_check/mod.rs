@@ -1,4 +1,4 @@
-//! Property-interface checker for the phase 1b element interface tests
+//! Property-interface checker for the element interface tests
 //! (`interface_deesser.rs`, `interface_cleanup.rs`), modelled on
 //! `tests/interface.rs`: name, GLib type, range, default, flags (readable,
 //! writable, controllable, mutable in PLAYING), no extra properties, klass,

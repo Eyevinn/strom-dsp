@@ -149,7 +149,7 @@ impl ObjectImpl for StromDspCompressor {
                     1.0,
                     d.knee,
                 ),
-                // Additions after the listening tests (phase 1b).
+                // Added after the first release.
                 glib::ParamSpecEnum::builder_with_default("detector", broadcast_detector())
                     .nick("Detector")
                     .blurb(

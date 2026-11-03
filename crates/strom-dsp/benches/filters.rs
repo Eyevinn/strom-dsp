@@ -1,4 +1,4 @@
-//! Criterion benchmarks of the higher-order filters (phase 1b, 2.4):
+//! Criterion benchmarks of the higher-order filters:
 //! Butterworth order 4 and 8, and the Linkwitz-Riley LR4 crossover with 3 and
 //! 5 bands, all at 48 kHz stereo with 480-frame (10 ms) buffers.
 //!

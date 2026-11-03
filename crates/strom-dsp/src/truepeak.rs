@@ -1,4 +1,4 @@
-//! True-peak limiter (phase 2): the phase 1 lookahead limiter with its
+//! True-peak limiter: the lookahead limiter of [`crate::limiter`] with its
 //! detector on a 4× oversampled signal, so the ceiling is a *true-peak*
 //! ceiling in dBTP in the sense of ITU-R BS.1770 Annex 2.
 //!
@@ -9,7 +9,7 @@
 //!         │                                                       (+)─ peak p ─┐
 //!         ├─ |Δ⁶x|/64 (high-frequency term) ── max over ±W ── × κ ─┘           │
 //! input ──┤                                                                    ▼
-//!         └─ delay L + U + W ──────────────── × gain (phase 1 limiter gain core) ── output
+//!         └─ delay L + U + W ──────────────── × gain (lookahead limiter gain core) ── output
 //! ```
 //!
 //! - **Interpolated peak.** [`Oversampler::upsample_peaks`] interpolates the
@@ -26,7 +26,7 @@
 //! - **Guard window.** Sliding maxima over `2W + 1` frames
 //!   (`W` = [`GUARD_FRAMES`]) of both terms, added:
 //!   `p = max_{±W} |x̂| + κ · max_{±W} hf`. It costs `W` frames of latency.
-//! - **Gain.** `p` feeds the phase 1 limiter's gain pipeline unchanged
+//! - **Gain.** `p` feeds the lookahead limiter's gain pipeline unchanged
 //!   ([`crate::limiter`]: required gain `min(1, c / p)`, sliding minimum with
 //!   hold, two-box S-ramp, one-pole release, per-frame ceiling history,
 //!   cross-fades, safety clip) through its crate-internal core hooks. The

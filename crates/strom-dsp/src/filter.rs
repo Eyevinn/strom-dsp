@@ -25,7 +25,7 @@
 //!   are reused; the first-order section is derived directly
 //!   (`b = (K, K)/(K+1)`, `a1 = (K−1)/(K+1)` for the low-pass,
 //!   `b = (1, −1)/(K+1)` for the high-pass).
-//! - **Structure**: the sections run in series through the phase 1 Direct
+//! - **Structure**: the sections run in series through the [`crate::biquad`] Direct
 //!   Form I kernels (`f64` state and coefficients, channels as SIMD lanes,
 //!   runtime dispatch, denormal flush every 32 frames; see [`crate::biquad`]).
 //!   The order of the sections is the order of `k` (lowest Q first).

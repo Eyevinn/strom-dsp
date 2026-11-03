@@ -69,7 +69,7 @@ impl ChannelRole {
 ///
 /// **Unknown layouts:** every channel counts with weight 1.0 and nothing is
 /// excluded, because guessing that a channel is an LFE could hide real
-/// programme. This is also what phase 2's AGC detector specifies. If the
+/// programme. The broadcast chain's AGC detector does the same. If the
 /// channel count does not match the layout, the meter falls back to `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelLayout {

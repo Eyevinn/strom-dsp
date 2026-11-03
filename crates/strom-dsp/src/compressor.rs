@@ -14,7 +14,7 @@
 //!    `x_dB = 20·log10(level)` (floored at −200 dB). For a steady sine this is
 //!    its **peak amplitude**, so levels and the threshold refer to peak level.
 //!
-//!    Why the hold (listening-test fix): without it the detector followed each
+//!    Why the hold (a fix for distortion found by ear on bass-heavy programme): without it the detector followed each
 //!    half-cycle of the waveform, so with fast times the gain rippled at twice
 //!    the signal frequency and distorted bass (2.5 % THD at 60 Hz with attack
 //!    1 ms / release 50 ms; Giannoulis et al. 2012, section on artefacts of
@@ -91,7 +91,7 @@
 //! so the threshold means the same in both modes (and the same as the gate's
 //! thresholds).
 //!
-//! - [`CompressorDetector::Peak`] (default, phase 1 behaviour plus the hold):
+//! - [`CompressorDetector::Peak`] (default, the original behaviour plus the hold):
 //!   the level is the linked peak `max_c |x_c|`. A sine reads its peak, a
 //!   constant `|x| = c` reads `c`, noise reads its largest peaks (RMS + crest
 //!   factor).
@@ -146,7 +146,7 @@
 //! The weighting, the split below, the gate and the bounds are our own.
 //!
 //! Why not a fixed reference level: the static reduction at a fixed level
-//! (Giannoulis et al. 2012 use 0 dBFS; phase 1b used −18 dB) is right only
+//! (Giannoulis et al. 2012 use 0 dBFS; an earlier version used −18 dB) is right only
 //! for programme that sits at that level. Speech peaking near −3 dBFS reads
 //! well above −18 dB, so the old reference under-compensated by 2 … 8 LU;
 //! 0 dBFS over-compensates quiet programme by as much. No fixed level fits
@@ -235,7 +235,7 @@ pub const DETECTOR_HOLD_MS: f64 = 20.0;
 /// Level detector of the compressor (see "Detector modes" in the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressorDetector {
-    /// Linked sample peak (phase 1 behaviour), with the peak hold.
+    /// Linked sample peak (the original behaviour), with the peak hold.
     #[default]
     Peak,
     /// Sine-calibrated RMS over the rms-window, with the peak hold.

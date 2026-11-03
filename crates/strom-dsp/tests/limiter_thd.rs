@@ -1,4 +1,4 @@
-//! Guard test for the listening-test bug "limiter distorts bass at fast
+//! Guard test for a bug found by ear, "limiter distorts bass at fast
 //! settings": total harmonic distortion of steady sines through the limiter,
 //! well above its ceiling (−13 dBFS sine into a −25 dB ceiling), lookahead
 //! 5 ms, attack 1 ms, release 50 ms and 100 ms.
@@ -17,7 +17,7 @@ use strom_dsp::{Limiter, LimiterParams, Processor};
 
 const FS: f32 = 48_000.0;
 const CH: usize = 2;
-/// −13 dBFS peak, as in the listening test.
+/// −13 dBFS peak, the level at which the bug was heard.
 const AMP_DB: f64 = -13.0;
 /// Ceiling 12 dB below the sine peak.
 const CEILING_DB: f32 = -25.0;
@@ -98,7 +98,7 @@ fn thd_meter_is_accurate() {
     assert!((thd(&x, 50.0) - want).abs() < 1e-9);
 }
 
-/// Targets of the listening-test fix: attack 1 ms, release 50 ms and 100 ms,
+/// Targets of the fix: attack 1 ms, release 50 ms and 100 ms,
 /// lookahead 5 ms. The ceiling and the safety clip are checked too.
 #[test]
 fn limiter_thd_fast_times_meets_targets() {
@@ -126,7 +126,7 @@ fn limiter_thd_fast_times_meets_targets() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The other listening-test settings (1 ms / 10 ms, 5 ms / 200 ms) and more
+/// The other settings tried by ear (1 ms / 10 ms, 5 ms / 200 ms) and more
 /// frequencies, including ones whose period is not a whole number of frames.
 /// With a 10 ms release the hold is 10 ms, still at least one peak of `|x|`
 /// from 50 Hz up, so the gain is steady here too. Bound: 0.01 %.

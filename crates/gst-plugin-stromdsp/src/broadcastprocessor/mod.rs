@@ -1,5 +1,4 @@
-//! `stromdsp-broadcastprocessor`: broadcast/streaming final processor
-//! (phase 2 spec §3).
+//! `stromdsp-broadcastprocessor`: broadcast/streaming final processor.
 //!
 //! ```text
 //! input gain → wideband AGC → multiband compressor → true-peak limiter
@@ -74,8 +73,7 @@
 //! Setting `preset` to anything but `custom` sets every property except
 //! `enabled`, `meter-interval`, `num-bands` and `limiter-lookahead`, for the
 //! current `num-bands` (band settings and crossovers depend on the band
-//! count). Leaving out `limiter-lookahead` is a documented deviation from
-//! phase 2 spec §3.2: it is READY-only.
+//! count). `limiter-lookahead` is left out because it is READY-only.
 //!
 //! - Writing any other property afterwards changes only that property, and
 //!   `preset` then reads `custom`. A write that leaves the value as it was

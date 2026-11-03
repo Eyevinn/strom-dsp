@@ -15,7 +15,7 @@
 //!    `L` dB above a threshold crosses it after `−τ_m·ln(1 − 10^(−L/10))`
 //!    (0.1 ms at 20 dB, 1.1 ms at 10 dB, 4.3 ms at 3 dB).
 //!
-//!    Why RMS: the phase 1 detector was a peak follower with instant attack, so
+//!    Why RMS: the original detector was a peak follower with instant attack, so
 //!    single peaks of steady noise 10 dB *below* the threshold (crest factor
 //!    above 10 dB) opened the gate and it chattered in speech pauses. An average
 //!    over ~10 ms opens only on a sustained level (Zölzer, *DAFX*, dynamics
@@ -41,7 +41,7 @@
 //!      gate's full range, from 0 dB to `reduction_db`, in exactly `release`
 //!      (at least [`GATE_FADE_MIN_RANGE_DB`](crate::dynamics::GATE_FADE_MIN_RANGE_DB)):
 //!      **release is the time to close**.
-//!      Listening tests showed that a one-pole release (the phase 1 definition)
+//!      Found by ear on speech: a one-pole release (the original definition)
 //!      needs ≈ 6.9 τ to reach −60 dB, so the gate faded audibly for most of a
 //!      second and never closed in short pauses.
 //!
@@ -113,7 +113,7 @@ use fearless_simd::prelude::*;
 /// Gate operating mode (see "Expander mode" in the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateMode {
-    /// Classic gate: fixed attenuation `reduction_db` when closed (phase 1 behaviour).
+    /// Classic gate: fixed attenuation `reduction_db` when closed (the original behaviour).
     #[default]
     Gate,
     /// Downward expander below `open_threshold_db` with slope `ratio`, floored

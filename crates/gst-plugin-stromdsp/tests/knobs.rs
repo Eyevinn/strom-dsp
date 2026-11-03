@@ -46,12 +46,12 @@
 //! | raised-cosine fade over 20 ms | ≈ −67 dB |
 //!
 //! The steady-state floor of the elements is −90 … −150 dB (f32 rounding).
-//! The Strom team's listening reading was "above −40 dB is a click, −40 to
-//! −60 dB is worth a listen". −50 dB fails every hard switch by a wide
-//! margin, and passes any fade that is smooth (no slope kink) and at least a
-//! few ms long. It is not tight enough to demand the −60 dB target from
-//! every change: a dynamics processor's own attack (a one-pole by design, the
-//! user's choice of speed) is allowed to be a fast but smooth change.
+//! As a listening guide: above −40 dB is a click, −40 to −60 dB is worth a
+//! listen. −50 dB fails every hard switch by a wide margin, and passes any
+//! fade that is smooth (no slope kink) and at least a few ms long. It is not
+//! tight enough to demand the −60 dB target from every change: a dynamics
+//! processor's own attack (a one-pole by design, its speed set by the attack
+//! property) is allowed to be a fast but smooth change.
 //!
 //! # Scenarios
 //!

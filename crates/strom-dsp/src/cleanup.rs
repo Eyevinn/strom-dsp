@@ -65,7 +65,7 @@
 //! `configure`/`reset` and the first `process` call, parameters apply
 //! immediately (no fades), so the call order does not change the output.
 //!
-//! Filters run in `f64` (DF-I, phase 1 SIMD kernels) and flush their state
+//! Filters run in `f64` (DF-I, the SIMD kernels of `crate::biquad`) and flush their state
 //! below `1e-15`; no latency.
 
 use fearless_simd::Simd;

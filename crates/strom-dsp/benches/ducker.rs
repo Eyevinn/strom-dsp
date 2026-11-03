@@ -1,4 +1,4 @@
-//! Criterion benchmarks for the phase 1b dynamics processors, at 48 kHz
+//! Criterion benchmarks for the ducker, at 48 kHz
 //! stereo programme, 480 frames (10 ms) per buffer. Share of one core = time
 //! per buffer ÷ 10 ms.
 //!

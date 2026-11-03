@@ -1,4 +1,4 @@
-//! Multiband compressor (phase 2): LR4 crossover, one compressor per band,
+//! Multiband compressor: LR4 crossover, one compressor per band,
 //! summed.
 //!
 //! # Signal flow
@@ -8,11 +8,11 @@
 //!       → Compressor per band (linked channels) → Σ bands → output
 //! ```
 //!
-//! - **Crossover**: the phase 1b [`Crossover`] at Linkwitz-Riley 4th order
+//! - **Crossover**: the [`Crossover`] at Linkwitz-Riley 4th order
 //!   (S. Linkwitz, JAES 1976; see [`crate::filter`] for the topology). Its
 //!   plain band sum is an all-pass, so with every band at unity gain the
 //!   chain has a flat magnitude response and zero added latency.
-//! - **Per band**: the phase 1 [`Compressor`] (Giannoulis, Massberg & Reiss,
+//! - **Per band**: the [`Compressor`] (Giannoulis, Massberg & Reiss,
 //!   JAES 2012), driven through its public API. Each band has its own
 //!   threshold, ratio, attack, release, makeup and knee, so the bands are
 //!   independent; within a band the compressor's detector links all channels
@@ -21,7 +21,7 @@
 //!   crossover passes the input through bit for bit, so the chain is exactly
 //!   a wideband compressor.
 //!
-//! # Units (own interface, phase 2 spec 3.1)
+//! # Units (own interface)
 //!
 //! Everything is in dB/ms/Hz. The wrapper converts to the compressor's
 //! linear units: `threshold = 10^(threshold_db/20)`,
@@ -53,7 +53,7 @@
 //!   crossover's 10 ms crossfade (new bands fade in from silence, removed
 //!   bands fold into the new top band during the fade). The compressor of a
 //!   band that becomes active starts from a reset state. Hosts should still
-//!   treat the band count as a setup-time property (the phase 2 element makes
+//!   treat the band count as a setup-time property (`stromdsp-broadcastprocessor` makes
 //!   `num-bands` READY-only), because the crossfade is not designed to be
 //!   inaudible on programme material.
 //!
@@ -95,10 +95,10 @@ pub const MAKEUP_RANGE_DB: (f32, f32) = (-12.0, 24.0);
 /// Range of a band's `knee_db` (dB; 0 = hard knee).
 pub const KNEE_RANGE_DB: (f32, f32) = (0.0, 24.0);
 
-/// Default crossover frequencies (Hz), phase 2 spec 3.1.
+/// Default crossover frequencies (Hz).
 pub const DEFAULT_FREQUENCIES_HZ: [f32; MAX_SPLITS] = [120.0, 800.0, 4000.0, 10_000.0];
 
-/// Default number of bands (phase 2 spec 3.1).
+/// Default number of bands (1 … 5).
 pub const DEFAULT_NUM_BANDS: usize = 4;
 
 /// Snap distance (dB) of the drive glide.
@@ -162,7 +162,7 @@ impl MultibandBandParams {
         }
     }
 
-    /// The phase 1 compressor parameters (linear units) for these settings,
+    /// The [`Compressor`] parameters (linear units) for these settings,
     /// after clamping. See "Units" in the module documentation.
     pub fn compressor_params(&self) -> CompressorParams {
         let p = self.clamped();

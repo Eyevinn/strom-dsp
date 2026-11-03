@@ -1,8 +1,8 @@
-//! Guard test for the listening-test bug "compressor distorts bass with fast
+//! Guard test for a bug found by ear, "compressor distorts bass with fast
 //! times": total harmonic distortion of steady sines through the compressor
 //! at attack 1 ms, release 50 ms, ratio 10:1, well above the threshold.
 //!
-//! With the phase 1 detector (per-frame peak `|x|` straight into the gain
+//! With the original detector (per-frame peak `|x|` straight into the gain
 //! computer) the gain followed every half-cycle of the waveform: 2.5 % THD at
 //! 60 Hz and 0.77 % at 200 Hz. Targets: ≤ 1 % at 50/60 Hz, ≤ 0.3 % at
 //! 100 Hz, ≤ 0.1 % at 200 Hz, and lower with slower times.
@@ -21,7 +21,7 @@ use strom_dsp::{
 
 const FS: f32 = 48_000.0;
 const CH: usize = 2;
-/// −13 dBFS peak, as in the listening test.
+/// −13 dBFS peak, the level at which the bug was heard.
 const AMP_DB: f64 = -13.0;
 
 /// Amplitude of the DFT bin at `freq` Hz of `x` (one channel), `x.len()`
@@ -69,7 +69,7 @@ fn measure<P: Processor>(proc: &mut P, freq: f64) -> f64 {
     thd(&last, freq)
 }
 
-fn listening_test_params() -> CompressorParams {
+fn fast_params() -> CompressorParams {
     CompressorParams {
         threshold: 0.0316,
         ratio: 10.0,
@@ -113,10 +113,10 @@ fn input_sine_is_clean() {
     }
 }
 
-/// Targets of the listening-test fix with attack 1 ms, release 50 ms, 10:1.
+/// Targets of the fix with attack 1 ms, release 50 ms, 10:1.
 #[test]
 fn compressor_thd_fast_times_meets_targets() {
-    let p = listening_test_params();
+    let p = fast_params();
     let mut failures = Vec::new();
     for (f, limit) in [(50.0, 0.01), (60.0, 0.01), (100.0, 0.003), (200.0, 0.001)] {
         let mut c = Compressor::new();
@@ -150,7 +150,7 @@ fn compressor_thd_decreases_with_slower_times() {
             c.set_params(&CompressorParams {
                 attack_ms,
                 release_ms,
-                ..listening_test_params()
+                ..fast_params()
             });
             let t = measure(&mut c, f);
             eprintln!(
@@ -221,7 +221,7 @@ fn compressor_thd_rms_detector_meets_targets() {
     for (f, limit) in [(50.0, 0.01), (60.0, 0.01), (100.0, 0.003), (200.0, 0.001)] {
         let mut c = Compressor::new();
         c.set_detector(CompressorDetector::Rms);
-        c.set_params(&listening_test_params());
+        c.set_params(&fast_params());
         let t = measure(&mut c, f);
         eprintln!("compressor RMS {f} Hz (1 ms / 50 ms): THD {}", pct(t));
         if t > limit {

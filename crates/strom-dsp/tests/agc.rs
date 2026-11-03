@@ -1,5 +1,5 @@
-//! Tests of the wideband AGC ([`strom_dsp::agc::Agc`]), from its specification
-//! (phase 2 spec 2.3) and BS.1770 measurement. All signals are synthetic
+//! Tests of the wideband AGC ([`strom_dsp::agc::Agc`]), from its documented
+//! behaviour and BS.1770 measurement. All signals are synthetic
 //! (pink noise made by inverse FFT, fixed seeds).
 //!
 //! - Convergence: pink noise from −40 to −6 LUFS lands on the target ±1 LU
