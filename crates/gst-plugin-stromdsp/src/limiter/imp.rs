@@ -31,17 +31,41 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     )
 });
 
+/// The element's settings: the library parameters, starting from the
+/// broadcast preset (`strom_dsp::presets`) instead of `LimiterParams::default()`.
+#[derive(Debug, Clone, Copy)]
+struct Settings(LimiterParams);
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self(LimiterParams::broadcast())
+    }
+}
+
+impl std::ops::Deref for Settings {
+    type Target = LimiterParams;
+    fn deref(&self) -> &LimiterParams {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Settings {
+    fn deref_mut(&mut self) -> &mut LimiterParams {
+        &mut self.0
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct StromDspLimiter {
-    settings: SharedSettings<LimiterParams>,
+    settings: SharedSettings<Settings>,
     engine: EngineSlot<Limiter>,
     /// Negotiated sample rate (0 = not negotiated), for latency reporting
     /// without touching the DSP lock.
     rate: AtomicU32,
 }
 
-fn apply(dsp: &mut Limiter, p: &LimiterParams) {
-    dsp.set_params(p);
+fn apply(dsp: &mut Limiter, s: &Settings) {
+    dsp.set_params(s);
 }
 
 /// Lookahead delay as time. With a known `rate` the frame count comes from the
@@ -76,7 +100,7 @@ impl ObjectSubclass for StromDspLimiter {
 impl ObjectImpl for StromDspLimiter {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            let d = LimiterParams::default();
+            let d = LimiterParams::broadcast();
             vec![
                 common::bool_prop(
                     "enabled",

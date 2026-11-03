@@ -1,8 +1,9 @@
 //! Interface test of the phase 1b gate additions (the phase 1b spec
 //! 3.3): `mode` (GLib enum `StromDspGateMode`, `gate` = 0 default,
-//! `expander` = 1) and `ratio` (Float, 1 … 20, default 2). Both are
+//! `expander` = 1) and `ratio` (Float, 1 … 20, default 2). The defaults
+//! are the broadcast preset (`strom_dsp::presets`). Both are
 //! readable, writable, controllable and mutable in PLAYING. The phase 1
-//! properties are checked, unchanged, by `tests/interface.rs`.
+//! properties are checked by `tests/interface.rs`.
 
 mod util;
 

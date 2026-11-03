@@ -7,7 +7,8 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
-use strom_dsp::gate::{GateMode, DEFAULT_EXPANDER_RATIO, EXPANDER_RATIO_RANGE};
+use strom_dsp::gate::{GateMode, EXPANDER_RATIO_RANGE};
+use strom_dsp::presets::{GATE_BROADCAST_MODE, GATE_BROADCAST_RATIO};
 use strom_dsp::{Gate, GateParams};
 
 use super::StromDspGateMode;
@@ -37,14 +38,24 @@ struct Settings {
     ratio: f32,
 }
 
+/// The element's defaults are the library's broadcast preset
+/// (`strom_dsp::presets`), not `GateParams::default()`.
 impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
-            params: GateParams::default(),
-            mode: StromDspGateMode::Gate,
-            ratio: DEFAULT_EXPANDER_RATIO,
+            params: GateParams::broadcast(),
+            mode: broadcast_mode(),
+            ratio: GATE_BROADCAST_RATIO,
         }
+    }
+}
+
+/// [`GATE_BROADCAST_MODE`] as the GLib enum.
+fn broadcast_mode() -> StromDspGateMode {
+    match GATE_BROADCAST_MODE {
+        GateMode::Gate => StromDspGateMode::Gate,
+        GateMode::Expander => StromDspGateMode::Expander,
     }
 }
 
@@ -73,7 +84,7 @@ impl ObjectSubclass for StromDspGate {
 impl ObjectImpl for StromDspGate {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            let d = GateParams::default();
+            let d = GateParams::broadcast();
             vec![
                 common::bool_prop(
                     "enabled",
@@ -131,7 +142,7 @@ impl ObjectImpl for StromDspGate {
                     d.reduction_db,
                 ),
                 // Phase 1b additions (phase 1b spec §3.3).
-                glib::ParamSpecEnum::builder_with_default("mode", StromDspGateMode::Gate)
+                glib::ParamSpecEnum::builder_with_default("mode", broadcast_mode())
                     .nick("Mode")
                     .blurb(
                         "gate: fixed attenuation 'reduction' when closed; expander: \
@@ -149,7 +160,7 @@ impl ObjectImpl for StromDspGate {
                      ignored in gate mode",
                     EXPANDER_RATIO_RANGE.0,
                     EXPANDER_RATIO_RANGE.1,
-                    DEFAULT_EXPANDER_RATIO,
+                    GATE_BROADCAST_RATIO,
                 ),
             ]
         });

@@ -37,6 +37,7 @@ pub mod limiter;
 pub mod meter;
 pub mod multiband;
 pub mod oversample;
+pub mod presets;
 pub mod resample;
 pub mod simd;
 pub mod stereo;

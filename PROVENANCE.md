@@ -517,6 +517,35 @@ Written from the gstreamer-rs bindings documentation and crate sources
   lookahead to upstream's min/max in the LATENCY query, and posts a Latency
   message when the lookahead changes.
 
+### Element defaults (`crates/strom-dsp/src/presets.rs`)
+
+The property defaults of `stromdsp-gate`, `-compressor` and `-limiter`, and
+the decision to keep `stromdsp-equalizer` neutral, are strom-dsp's own choice
+(spec §4, revised 2026-11-03). They are chosen for live broadcast speech and
+programme from textbook and common broadcast practice, never from any product's
+presets. Each value and its reason is documented in `presets.rs` and in the
+README ("Why these defaults"). The references are:
+
+- EBU R68, the −18 dBFS alignment level. This sets the compressor threshold
+  and the level assumptions for the gate.
+- EBU R128 and ITU-R BS.1770: −23 LUFS programme loudness and −1 dBTP maximum
+  true peak. These set the limiter ceiling and where speech sits relative to
+  the compressor threshold.
+- Giannoulis, Massberg & Reiss, JAES 60(6), 2012, and Zölzer, *DAFX* (dynamics
+  chapter): the soft knee, the RMS detector for programme levelling, and time
+  constants that must be long compared with the lowest signal period.
+- General speech properties: syllable rate about 4–5 per second, consonant
+  onsets of a few ms, and intra-word gaps under about 100 ms. These set the
+  attack, hold and release times.
+
+The library's `*Params::default()` values are unchanged, because the theory
+tests are written against them. The elements start from
+`GateParams::broadcast()`, `CompressorParams::broadcast()`,
+`LimiterParams::broadcast()` and the `*_BROADCAST_*` constants for the
+setter-based properties. Strom sets every property it relies on explicitly,
+so these defaults do not change Strom's sound. The compressor's `auto-makeup`
+default (`false`) may be revisited once its redesign lands.
+
 ### Performance and real-time-safety tooling
 
 `tests/rtsan.rs` uses RealtimeSanitizer through `rtsan-standalone`, written

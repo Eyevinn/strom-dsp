@@ -244,7 +244,7 @@ impl Case {
 fn base_setup(factory: &str) -> Vec<(&'static str, &'static str)> {
     match factory {
         // Open on the −12 dBFS tone; attack 20 ms so that an opening gate is a
-        // smooth change (the default 5 ms one-pole starts with a slope kink of
+        // smooth change (a fast 5 ms one-pole starts with a slope kink of
         // about −48 dB: an intended fast attack, see the module docs).
         "stromdsp-gate" => vec![
             ("open-threshold", "-40"),
@@ -310,7 +310,7 @@ fn cases() -> Vec<Case> {
     ));
     v.push(case(g, &[], &[("enabled", "false")]));
     v.push(case(g, &[("enabled", "false")], &[("enabled", "true")]));
-    // The gate closes (default 100 ms release) …
+    // The gate closes (default 200 ms release) …
     v.push(case(
         g,
         &[

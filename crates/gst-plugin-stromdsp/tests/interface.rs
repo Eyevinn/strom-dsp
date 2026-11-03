@@ -1,6 +1,8 @@
 //! Interface test: the drop-in contract of phase 1 spec §4.
 //!
-//! The tables below are a verbatim transcription of section 4. Every property
+//! The tables below are a verbatim transcription of section 4, except the
+//! defaults, which are strom-dsp's own broadcast choice (§4, revised
+//! 2026-11-03; `strom_dsp::presets`, README "Why these defaults"). Every property
 //! of every element is checked for name, GLib value type, range, default,
 //! flags (readable, writable, controllable, mutable in PLAYING vs READY), and
 //! that no extra properties exist. If anything drifts from section 4, this
@@ -47,12 +49,12 @@ fn p(name: &str, kind: Kind) -> Prop {
 fn gate_spec() -> Vec<Prop> {
     vec![
         p("enabled", Bool(true)),
-        p("open-threshold", Float(-80.0, 0.0, -20.0)),
-        p("close-threshold", Float(-80.0, 0.0, -30.0)),
-        p("attack", Float(0.01, 200.0, 5.0)),
-        p("hold", Float(0.0, 1000.0, 50.0)),
-        p("release", Float(1.0, 2000.0, 100.0)),
-        p("reduction", Float(-80.0, 0.0, -60.0)),
+        p("open-threshold", Float(-80.0, 0.0, -45.0)),
+        p("close-threshold", Float(-80.0, 0.0, -50.0)),
+        p("attack", Float(0.01, 200.0, 3.0)),
+        p("hold", Float(0.0, 1000.0, 120.0)),
+        p("release", Float(1.0, 2000.0, 200.0)),
+        p("reduction", Float(-80.0, 0.0, -35.0)),
     ]
 }
 
@@ -60,12 +62,12 @@ fn gate_spec() -> Vec<Prop> {
 fn compressor_spec() -> Vec<Prop> {
     vec![
         p("enabled", Bool(true)),
-        p("threshold", Float(0.0, 1.0, 0.5)),
-        p("ratio", Float(1.0, 100.0, 1.0)),
-        p("attack", Float(0.01, 10000.0, 20.0)),
-        p("release", Float(0.01, 10000.0, 100.0)),
+        p("threshold", Float(0.0, 1.0, 0.125)),
+        p("ratio", Float(1.0, 100.0, 3.0)),
+        p("attack", Float(0.01, 10000.0, 10.0)),
+        p("release", Float(0.01, 10000.0, 150.0)),
         p("makeup-gain", Float(0.0, 100.0, 1.0)),
-        p("knee", Float(0.0, 1.0, 0.0625)),
+        p("knee", Float(0.0, 1.0, 0.5)),
     ]
 }
 
@@ -98,7 +100,7 @@ fn limiter_spec() -> Vec<Prop> {
         p("enabled", Bool(true)),
         p("threshold", Float(-60.0, 0.0, -1.0)),
         p("attack", Float(0.01, 50.0, 1.0)),
-        p("release", Float(1.0, 2000.0, 100.0)),
+        p("release", Float(1.0, 2000.0, 200.0)),
         p("lookahead", Float(0.0, 20.0, 5.0)),
     ]
 }
