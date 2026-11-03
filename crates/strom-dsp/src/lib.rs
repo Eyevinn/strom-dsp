@@ -22,7 +22,11 @@
 #![warn(missing_docs)]
 
 pub mod biquad;
+pub mod cleanup;
 pub mod compressor;
+pub mod deesser;
+pub mod delay;
+pub mod ducker;
 pub mod dynamics;
 pub mod equalizer;
 pub mod filter;
@@ -30,7 +34,9 @@ pub mod gate;
 pub mod limiter;
 pub mod meter;
 pub mod oversample;
+pub mod resample;
 pub mod simd;
+pub mod stereo;
 pub mod stft;
 pub mod util;
 

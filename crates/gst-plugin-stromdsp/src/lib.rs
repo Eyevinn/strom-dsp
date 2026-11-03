@@ -9,17 +9,29 @@
 
 use gst::glib;
 
+pub mod cleanup;
 mod common;
 pub mod compressor;
+pub mod deesser;
+pub mod delay;
+pub mod ducker;
 pub mod equalizer;
 pub mod gate;
 pub mod limiter;
+pub mod meter;
+pub mod stereotools;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gate::register(plugin)?;
     compressor::register(plugin)?;
     equalizer::register(plugin)?;
     limiter::register(plugin)?;
+    ducker::register(plugin)?;
+    deesser::register(plugin)?;
+    delay::register(plugin)?;
+    stereotools::register(plugin)?;
+    cleanup::register(plugin)?;
+    meter::register(plugin)?;
     Ok(())
 }
 
