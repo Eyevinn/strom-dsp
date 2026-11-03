@@ -463,6 +463,33 @@ Tests check the static curve per band against the gain-computer formula, and
 the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warped
 `r`. No commercial broadcast-processor material was used.
 
+### Downward expander per band (`src/dynamics/expander.rs`, `Compressor::set_expander`, `MultibandCompressor::set_expanders`)
+
+- **Static curve:** the gain computer of Giannoulis, Massberg & Reiss
+  (JAES 60(6), 2012), mirrored below its own threshold `E`: slope
+  `S = ratio − 1`, the same quadratic soft knee of width `W` centred on `E`,
+  and a floor (largest attenuation) as `min(F, e)`. It is added to the
+  compressor's static reduction of the same detector level, so one gain
+  computer has compression, a unity region and expansion, with a knee at
+  each threshold. The idea of a downward expander below a threshold, with a
+  hold time and a release that is slower than the attack, is the textbook
+  noise gate / expander of Zölzer (ed.), *DAFX*, dynamics chapter.
+- **Own choices:**
+  - The expander part is smoothed separately from the compression part
+    (open fast, close slowly), because an expander needs the opposite of a
+    compressor's attack/release.
+  - Anti-chatter is a **hold on the attenuation** (the target may rise only
+    after it has stayed above the smoothed value for `hold`) plus the
+    slower close time, not hysteresis. The guard test measures the gain's
+    total movement per second on a level hovering at the threshold
+    (`tests/multiband_expander.rs::no_chatter_at_threshold`).
+  - Threshold, slope, knee and floor glide over 10 ms like the compressor's
+    curve. At ratio 1 the stage turns itself off once open, so the
+    compressor is bit-identical to one without it (guard:
+    `ratio_one_is_bit_exact`).
+  - Defaults: off (ratio 1); knee 6 dB, open 3 ms, close 150 ms, hold
+    100 ms, floor 12 dB.
+
 ### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`)
 
 - **Butterworth design** (Oppenheim & Schafer, *Discrete-Time Signal

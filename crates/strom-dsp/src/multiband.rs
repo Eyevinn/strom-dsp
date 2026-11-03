@@ -31,6 +31,19 @@
 //! compressor's detector reading of the **band** signal: the peak level of a
 //! steady sine (both detector modes are sine-calibrated).
 //!
+//! # Downward expander per band
+//!
+//! [`MultibandCompressor::set_expanders`] gives each band a downward
+//! expander below its own threshold, in the band compressor's gain computer
+//! ([`Compressor::set_expander`], [`crate::dynamics::expander`]): compression
+//! above the band threshold, unity between the two thresholds, expansion
+//! below the expander threshold, a soft knee at each, and a floor. The
+//! expander threshold is against the same sine-calibrated band level as the
+//! band threshold. Against chatter it uses a hold and a slower close time
+//! (no hysteresis); the hold stops it from chopping word endings. Ratio 1
+//! (the default) leaves the band bit-identical to a band without it. With
+//! one band it is a wideband expander.
+//!
 //! # Drive
 //!
 //! `drive_db` is one gain applied to the input before the crossover. The
@@ -66,7 +79,7 @@
 //! [`CHUNK_FRAMES`] frames.
 
 use crate::compressor::{CompressorDetector, CompressorParams};
-use crate::dynamics::OnePole;
+use crate::dynamics::{ExpanderParams, OnePole};
 use crate::filter::{Crossover, CrossoverParams, LrOrder, MAX_CROSSOVER_BANDS, MAX_SPLITS};
 use crate::simd::Level;
 use crate::util::db_to_lin;
@@ -350,6 +363,31 @@ impl MultibandCompressor {
     /// `num_bands() − 1` are in use).
     pub fn frequencies_hz(&self) -> [f64; MAX_SPLITS] {
         self.crossover.frequencies_hz()
+    }
+
+    /// Set the downward expander of every band (index = band; see "Downward
+    /// expander per band" in the module docs). Inactive bands keep theirs
+    /// for when they become active. Never allocates; changes glide.
+    pub fn set_expanders(&mut self, expanders: &[ExpanderParams; MAX_CROSSOVER_BANDS]) {
+        for (c, e) in self.compressors.iter_mut().zip(expanders) {
+            c.set_expander(e);
+        }
+    }
+
+    /// Smoothed attenuation (dB, ≥ 0) of band `k`'s expander after the most
+    /// recently processed frame; 0 for an inactive band.
+    pub fn band_expander_reduction_db(&self, k: usize) -> f64 {
+        if k < self.num_bands() {
+            self.compressors[k].expander_reduction_db()
+        } else {
+            0.0
+        }
+    }
+
+    /// [`band_expander_reduction_db`](Self::band_expander_reduction_db) of
+    /// every band (inactive bands read 0), for metering.
+    pub fn expander_reduction_db(&self) -> [f64; MAX_CROSSOVER_BANDS] {
+        core::array::from_fn(|k| self.band_expander_reduction_db(k))
     }
 
     /// Smoothed gain reduction (dB, ≥ 0, excluding makeup) of band `k` after
