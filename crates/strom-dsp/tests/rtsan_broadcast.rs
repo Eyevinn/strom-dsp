@@ -2,8 +2,10 @@
 //! `tests/rtsan_multiband.rs`.
 //!
 //! Many buffers of varying size (including more than one internal chunk),
-//! with a parameter change before every buffer (gains, spike guard, AGC,
-//! multiband, limiter, every bypass and `enabled` toggle), while `set_params`,
+//! in both latency modes, with a parameter change before every buffer
+//! (gains, spike guard, AGC, multiband with expanders and bass clipper,
+//! final clipper, governor and budget, limiter, every bypass and `enabled`
+//! toggle, the IM feedback switch), while `set_params`,
 //! `process`, `take_meters`, `reset_integrated` and (now and then) `reset`
 //! execute inside a real-time scope. Any allocation, lock, sleep, system
 //! call or other non-real-time-safe call in that scope aborts the test.
@@ -18,7 +20,7 @@
 #![cfg(feature = "rtsan")]
 
 use rtsan_standalone::ScopedSanitizeRealtime;
-use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
+use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::Processor;
 
 const BUFFERS: usize = 400;
@@ -46,13 +48,19 @@ impl Rng {
 #[test]
 fn broadcast_is_realtime_safe() {
     let max = *SIZES.iter().max().unwrap();
-    for (rate, ch) in CONFIGS {
+    for ((rate, ch), mode) in CONFIGS
+        .into_iter()
+        .flat_map(|c| LatencyMode::ALL.map(move |m| (c, m)))
+    {
         let mut bp = BroadcastProcessor::new();
+        let mut start = BroadcastParams::default();
+        mode.apply(&mut start);
+        bp.set_params(&start);
         bp.configure(rate, ch);
         let mut rng = Rng(0x1234_5678);
         let signal: Vec<f32> = (0..max * ch).map(|_| rng.range(-1.0, 1.0)).collect();
         let mut buf = vec![0.0f32; max * ch];
-        let mut p = BroadcastParams::default();
+        let mut p = start;
         let mut sum = 0.0f64;
         for i in 0..BUFFERS {
             let len = SIZES[i % SIZES.len()] * ch;
@@ -80,16 +88,36 @@ fn broadcast_is_realtime_safe() {
                 b.release_ms = rng.range(5.0, 5000.0);
                 b.makeup_db = rng.range(-12.0, 24.0);
             }
+            for e in &mut p.band_expanders {
+                e.threshold_db = rng.range(-80.0, 0.0);
+                e.ratio = rng.range(1.0, 10.0);
+                e.floor_db = rng.range(0.0, 40.0);
+            }
+            p.expander_hold_ms = rng.range(0.0, 1000.0);
+            p.bass_clipper_enabled = i % 4 != 0;
+            p.bass_clip_threshold_db = rng.range(-40.0, 0.0);
+            p.clipper_enabled = i % 8 != 0;
+            p.clipper_bandwidth_hz = rng.range(8000.0, 22_000.0);
+            p.governor_enabled = i % 10 != 0;
+            p.clip_budget_db = rng.range(0.0, 6.0);
             p.limiter_release_ms = rng.range(1.0, 2000.0);
             // Structural: accepted at any time, applied at the next configure.
             p.num_bands = 1 + i % 5;
             p.limiter_lookahead_ms = rng.range(0.5, 20.0);
+            p.spike_guard_lookahead_ms = rng.range(0.0, 2.0);
+            p.bass_clipper_lookahead_ms = rng.range(0.0, 10.0);
             {
                 let _rt = ScopedSanitizeRealtime::default();
                 bp.set_params(&p);
+                bp.set_bass_im_feedback(i % 13 != 0);
                 bp.process(&mut buf[..len]);
                 let m = bp.take_meters();
-                sum += m.output_short_term_lufs + m.agc_gain_db + m.limiter_gain_reduction_db;
+                sum += m.output_short_term_lufs
+                    + m.agc_gain_db
+                    + m.limiter_gain_reduction_db
+                    + m.budget_excess_db
+                    + m.loudness_deficit_lu
+                    + bp.bass_im_reduction_db();
                 if i % 23 == 22 {
                     bp.reset_integrated();
                 }
