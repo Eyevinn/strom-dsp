@@ -787,3 +787,67 @@ fn no_allocation_in_process_and_set_params() {
     let after = allocs();
     assert_eq!(after - before, 0, "allocations in set_params/process");
 }
+
+/// Every channel of a multichannel equalizer behaves exactly like a mono
+/// equalizer fed that channel alone, for every lane-group layout (pairs plus
+/// an odd channel), in the steady state and while parameters change.
+#[test]
+fn multichannel_equals_mono_per_channel() {
+    let fs = 48_000.0;
+    let p0 = params_with(&[
+        band(BandType::HighPass, 80.0, 0.0, 0.707),
+        band(BandType::Peaking, 300.0, -3.0, 1.2),
+        band(BandType::Peaking, 3000.0, 2.5, 0.9),
+        band(BandType::HighShelf, 10_000.0, 2.0, 0.707),
+    ]);
+    let mut p1 = p0;
+    p1.bands[1].gain_db = 9.0; // ramp
+    p1.bands[2].band_type = BandType::LowShelf; // crossfade
+    p1.bands[3].enabled = false; // fade out
+    let frames = 4000;
+    for ch in [1usize, 2, 3, 5, 8] {
+        let mut seed = 77 + ch as u64;
+        let input = noise(frames * ch, &mut seed, 0.8);
+        let mut multi = input.clone();
+        let mut e = eq(fs, ch, &p0);
+        let (a, b) = multi.split_at_mut(1000 * ch);
+        e.process(a);
+        e.set_params(&p1);
+        for chunk in b.chunks_mut(256 * ch) {
+            e.process(chunk);
+        }
+        for k in 0..ch {
+            let mut mono: Vec<f32> = input.iter().skip(k).step_by(ch).copied().collect();
+            let mut m = eq(fs, 1, &p0);
+            let (a, b) = mono.split_at_mut(1000);
+            m.process(a);
+            m.set_params(&p1);
+            for chunk in b.chunks_mut(256) {
+                m.process(chunk);
+            }
+            let got: Vec<f32> = multi.iter().skip(k).step_by(ch).copied().collect();
+            assert_eq!(got, mono, "ch {ch}, channel {k}");
+        }
+    }
+}
+
+/// `set_params` before or after `configure` gives the same output.
+#[test]
+fn set_params_before_or_after_configure_is_identical() {
+    let p = params_with(&[
+        band(BandType::LowShelf, 120.0, 4.0, 0.707),
+        band(BandType::Peaking, 2500.0, -6.0, 2.0),
+    ]);
+    let mut a = Equalizer::new();
+    a.set_params(&p);
+    a.configure(44_100.0, 2);
+    let mut b = Equalizer::new();
+    b.configure(44_100.0, 2);
+    b.set_params(&p);
+    let mut seed = 3u64;
+    let input = noise(2048 * 2, &mut seed, 0.7);
+    let (mut x, mut y) = (input.clone(), input);
+    a.process(&mut x);
+    b.process(&mut y);
+    assert_eq!(x, y);
+}
