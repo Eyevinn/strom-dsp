@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::f64::consts::PI;
 
 use declipper_support::*;
-use strom_dsp::declipper::{Declipper, DeclipperParams, XFADE_MS};
+use strom_dsp::declipper::{Declipper, DeclipperLatency, DeclipperParams, XFADE_MS};
 use strom_dsp::Processor;
 
 // ---------------------------------------------------------------------------
@@ -155,30 +155,56 @@ fn unclipped_set(secs: f64) -> Vec<(String, Vec<f64>)> {
 // ---------------------------------------------------------------------------
 // Tests.
 
-/// An impulse comes out exactly `latency_frames` later, enabled or not, and
-/// the latency is the documented function of the rate (480 frames at 48 kHz).
+const MODES: [DeclipperLatency; 3] = [
+    DeclipperLatency::Low,
+    DeclipperLatency::Normal,
+    DeclipperLatency::High,
+];
+
+/// An impulse comes out exactly `latency_frames` later, enabled or not, in
+/// every latency setting, and the latency is the documented function of the
+/// rate and setting (144, 240 and 480 frames at 48 kHz): at most 3 ms for
+/// `Low`, 5 ms for the default.
 #[test]
 fn latency_is_exact() {
-    assert_eq!(Declipper::latency_frames_for(48_000.0), 480);
-    for fs in [8_000.0f32, 44_100.0, 48_000.0, 96_000.0, 192_000.0] {
-        for enabled in [true, false] {
+    assert_eq!(DeclipperParams::default().latency, DeclipperLatency::Normal);
+    assert_eq!(
+        Declipper::latency_frames_for(48_000.0, DeclipperLatency::Low),
+        144
+    );
+    assert_eq!(
+        Declipper::latency_frames_for(48_000.0, DeclipperLatency::Normal),
+        240
+    );
+    assert_eq!(
+        Declipper::latency_frames_for(48_000.0, DeclipperLatency::High),
+        480
+    );
+    for (fs, mode, enabled) in [8_000.0f32, 44_100.0, 48_000.0, 96_000.0, 192_000.0]
+        .into_iter()
+        .flat_map(|fs| MODES.into_iter().map(move |m| (fs, m)))
+        .flat_map(|(fs, m)| [true, false].into_iter().map(move |e| (fs, m, e)))
+    {
+        {
             let p = DeclipperParams {
                 enabled,
+                latency: mode,
                 ..Default::default()
             };
             let mut d = declipper(fs, 1, p);
             let lat = d.latency_frames();
-            assert_eq!(lat, Declipper::latency_frames_for(fs));
+            assert_eq!(lat, Declipper::latency_frames_for(fs, mode));
             assert!(
-                lat as f32 <= 0.020 * fs.max(16_000.0),
+                lat as f32 <= (mode.ms() / 1000.0 * fs).round().max(16.0),
                 "{fs}: latency {lat}"
             );
+            assert!(d.max_run_frames() >= 1 && d.max_run_frames() < lat);
             let mut x = vec![0.0f32; lat + 1000];
             x[100] = 0.5;
             let y = run(&mut d, &x, 1, 64);
             for (i, &v) in y.iter().enumerate() {
                 let want = if i == 100 + lat { 0.5 } else { 0.0 };
-                assert_eq!(v, want, "fs {fs} enabled {enabled} frame {i}");
+                assert_eq!(v, want, "fs {fs} {mode:?} enabled {enabled} frame {i}");
             }
             assert_eq!(d.latency_frames(), lat);
         }
@@ -540,6 +566,7 @@ fn extreme_inputs_stay_finite() {
             max_overshoot_db: 24.0,
             tilt_hz: 200.0,
             enabled: true,
+            latency: DeclipperLatency::Low,
         },
         DeclipperParams {
             min_level_db: f32::NAN,
@@ -548,6 +575,7 @@ fn extreme_inputs_stay_finite() {
             max_overshoot_db: f32::NAN,
             tilt_hz: f32::NAN,
             enabled: true,
+            latency: DeclipperLatency::High,
         },
     ];
     for p in &params {

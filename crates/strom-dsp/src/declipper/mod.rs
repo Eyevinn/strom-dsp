@@ -1,9 +1,9 @@
 //! Real-time declipper: finds hard-clipped runs on the waveform and rebuilds
 //! them by constrained AR interpolation.
 //!
-//! [`Declipper`] delays the signal by a fixed [`LATENCY_MS`]
-//! (`round(10 ms · fs)` frames, see [`Declipper::latency_frames_for`]).
-//! Inside that delay it:
+//! [`Declipper`] delays the signal by a fixed latency chosen with
+//! [`DeclipperLatency`] (3, 5 or 10 ms; `round(ms · fs)` frames, see
+//! [`Declipper::latency_frames_for`]). Inside that delay it:
 //!
 //! 1. **detects** clipped runs per channel with the [`ClipDetector`]: two or
 //!    more consecutive samples on a flat (or, optionally, slightly drooping)
@@ -11,9 +11,13 @@
 //!    level above `min_level`. The clip level is each plateau's own value,
 //!    so a clip below 0 dBFS, or with a DC offset after it, is found too;
 //!    the detector docs give the exact rules;
-//! 2. **rebuilds** each run, as soon as [`context`](Declipper::context_frames)
-//!    frames after it have arrived, from a window of that many frames on
-//!    each side, by least-squares AR interpolation ([`lsar`]): the AR model
+//! 2. **rebuilds** each run from a window of [`PAST_CONTEXT_MS`] before it
+//!    and up to [`FUTURE_CONTEXT_MS`] after it, by least-squares AR
+//!    interpolation ([`lsar`]). The context is asymmetric: the past is
+//!    always there, the future costs latency. A run is rebuilt as soon as
+//!    the full future context has arrived, or at the latest when its first
+//!    sample is about to leave the delay line, with whatever future context
+//!    there is by then (`latency − run length − 1` frames or more). The AR model
 //!    is estimated from the window (Janssen et al. 1986), the run's samples
 //!    are the values that minimise the prediction error, and each one is kept
 //!    on the clipped side of its observed value (Abel & Smith 1991) and no
@@ -24,8 +28,21 @@
 //!    again in their own turn.
 //!
 //! Samples that are not in a repaired run come out bit-exact, delayed by the
-//! latency. A run longer than `max_run_ms` is passed through unchanged and
-//! counted ([`DeclipperStats::runs_too_long`]).
+//! latency. A run longer than `max_run_ms`, or too long to be found and
+//! rebuilt inside the latency ([`Declipper::max_run_frames`]), is passed
+//! through unchanged and counted ([`DeclipperStats::runs_too_long`]).
+//!
+//! # Latency
+//!
+//! | [`DeclipperLatency`] | latency | longest run at 48 kHz |
+//! |---|---|---|
+//! | `Low` | 3 ms | `max_run_ms` (default 2 ms = 96 frames) |
+//! | `Normal` (default) | 5 ms | likewise |
+//! | `High` | 10 ms | likewise |
+//!
+//! The latency is fixed at [`configure`](Processor::configure); a change of
+//! [`DeclipperParams::latency`] takes effect at the next `configure`. What
+//! each setting costs in quality is measured in `tests/declipper_quality.rs`.
 //!
 //! # Headroom
 //!
@@ -44,7 +61,8 @@
 //!
 //! [`configure`](Processor::configure) allocates the delay rings, the run
 //! queues and one solver sized for the largest problem (window of
-//! `2·context + max run` frames, `max run + JOINT_LATER` unknowns). `process`
+//! past and future context plus the longest run, `max run + JOINT_LATER`
+//! unknowns). `process`
 //! never allocates. The cost per run is `O(m³)` in the number of unknowns `m`,
 //! bounded by the run cap.
 //!
@@ -63,14 +81,45 @@ pub use lsar::{LsarError, LsarSolver};
 
 use crate::Processor;
 
-/// Latency (ms). Every supported rate gets exactly `round(10 ms · fs)`
-/// frames; the formula in [`Declipper::latency_frames_for`] only guards the
-/// context.
-pub const LATENCY_MS: f32 = 10.0;
+/// Context before a run used for the AR model (ms; at least `3 × AR order`
+/// frames). The past costs no latency.
+pub const PAST_CONTEXT_MS: f32 = 5.0;
 
-/// Context on each side of a run used for the AR model (ms; at least
-/// `3 × AR order` frames).
-pub const CONTEXT_MS: f32 = 5.0;
+/// Most context after a run used for the AR model (ms). A run is rebuilt
+/// once this much has arrived, or earlier when the latency runs out.
+pub const FUTURE_CONTEXT_MS: f32 = 5.0;
+
+/// Least context after a run (ms, at least 4 frames): longer runs than the
+/// latency allows with this much context are passed through.
+pub const MIN_FUTURE_CONTEXT_MS: f32 = 0.5;
+
+/// Delay between a run's last sample and the sample that reports it
+/// (frames): a pair is decided on the second sample after it, and one
+/// detector call can queue a run for the next.
+const DETECT_DELAY: usize = 4;
+
+/// Latency setting of the [`Declipper`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeclipperLatency {
+    /// 3 ms: less future context for the rebuild.
+    Low,
+    /// 5 ms.
+    #[default]
+    Normal,
+    /// 10 ms: the full future context for runs up to 5 ms.
+    High,
+}
+
+impl DeclipperLatency {
+    /// The latency in milliseconds.
+    pub fn ms(self) -> f32 {
+        match self {
+            Self::Low => 3.0,
+            Self::Normal => 5.0,
+            Self::High => 10.0,
+        }
+    }
+}
 
 /// AR model order at 48 kHz; it scales with the sample rate, within
 /// [`AR_ORDER_MIN`] … [`AR_ORDER_MAX`].
@@ -107,12 +156,15 @@ pub const TILT_HZ_RANGE: (f32, f32) = (0.0, 200.0);
 /// Bypass crossfade (ms).
 pub const XFADE_MS: f32 = 5.0;
 
-/// Parameters of [`Declipper`]. All but `enabled` take effect for runs that
-/// close after the change.
+/// Parameters of [`Declipper`]. All but `enabled` and `latency` take effect
+/// for runs that close after the change.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeclipperParams {
     /// `false`: crossfade to the delayed dry input.
     pub enabled: bool,
+    /// Latency setting (applied at the next `configure`). Default
+    /// [`DeclipperLatency::Normal`] (5 ms).
+    pub latency: DeclipperLatency,
     /// Lowest plateau level that counts as clipping (dBFS). Default −20:
     /// covers up to 20 dB of gain applied after the clip.
     pub min_level_db: f32,
@@ -137,6 +189,7 @@ impl Default for DeclipperParams {
     fn default() -> Self {
         Self {
             enabled: true,
+            latency: DeclipperLatency::Normal,
             min_level_db: -20.0,
             tolerance: 1e-5,
             max_run_ms: 2.0,
@@ -186,8 +239,11 @@ pub struct Declipper {
     configured: bool,
     sample_rate: f32,
     channels: usize,
+    /// Latency setting in effect (the one at the last `configure`).
+    latency_mode: DeclipperLatency,
     latency: usize,
-    context: usize,
+    past: usize,
+    future: usize,
     order: usize,
     max_run_limit: usize,
     max_run: usize,
@@ -224,24 +280,36 @@ impl Declipper {
         }
     }
 
-    /// Context frames on each side of a run at `sample_rate`.
-    pub fn context_frames_for(sample_rate: f32) -> usize {
-        ms_frames(CONTEXT_MS, sample_rate).max(3 * Self::order_for(sample_rate))
+    /// Context frames before a run at `sample_rate`.
+    pub fn past_context_frames_for(sample_rate: f32) -> usize {
+        ms_frames(PAST_CONTEXT_MS, sample_rate).max(3 * Self::order_for(sample_rate))
     }
 
-    /// Latency (frames) at `sample_rate`: `max(round(10 ms·fs), context + 17)`.
-    pub fn latency_frames_for(sample_rate: f32) -> usize {
-        ms_frames(LATENCY_MS, sample_rate).max(Self::context_frames_for(sample_rate) + 17)
+    /// Latency (frames) of `mode` at `sample_rate`: `round(ms · fs)`, at
+    /// least 16.
+    pub fn latency_frames_for(sample_rate: f32, mode: DeclipperLatency) -> usize {
+        ms_frames(mode.ms(), sample_rate).max(16)
     }
 
-    /// Context frames on each side of a run.
-    pub fn context_frames(&self) -> usize {
-        self.context
+    /// Context frames before a run.
+    pub fn past_context_frames(&self) -> usize {
+        self.past
     }
 
-    /// Longest repairable run (frames) at the current settings.
+    /// Most context frames after a run.
+    pub fn future_context_frames(&self) -> usize {
+        self.future
+    }
+
+    /// Longest repairable run (frames) at the current settings: `max_run_ms`,
+    /// or what the latency allows (`latency − 4 − max(0.5 ms, 4 frames)`).
     pub fn max_run_frames(&self) -> usize {
         self.max_run
+    }
+
+    /// The latency setting in effect.
+    pub fn latency_mode(&self) -> DeclipperLatency {
+        self.latency_mode
     }
 
     /// Current parameters.
@@ -276,7 +344,7 @@ impl Declipper {
             return;
         }
         let p = self.params;
-        self.max_run = ms_frames(p.max_run_ms, self.sample_rate).clamp(2, self.max_run_limit);
+        self.max_run = ms_frames(p.max_run_ms, self.sample_rate).clamp(1, self.max_run_limit);
         self.cap_factor = 10f64.powf(f64::from(p.max_overshoot_db) / 20.0) - 1.0;
         let dp = DetectorParams {
             min_level: 10f32.powf(p.min_level_db / 20.0),
@@ -318,8 +386,8 @@ impl Declipper {
         let s = run.start;
         let e = run.end();
         let now = self.n;
-        let ws = s.saturating_sub(self.context as u64);
-        let mut we = (e + self.context as u64).min(now);
+        let ws = s.saturating_sub(self.past as u64);
+        let mut we = (e + self.future as u64).min(now);
         let open = ch.det.open_candidate();
 
         self.unknown.clear();
@@ -444,12 +512,20 @@ impl Processor for Declipper {
         self.sample_rate = sample_rate;
         self.channels = channels;
         self.order = Self::order_for(sample_rate);
-        self.context = Self::context_frames_for(sample_rate);
-        self.latency = Self::latency_frames_for(sample_rate);
-        self.max_run_limit = (self.latency - self.context - 1).min(MAX_RUN_FRAMES_CAP);
-        let ring = (self.latency + self.context + 2).next_power_of_two();
+        self.latency_mode = self.params.latency;
+        self.latency = Self::latency_frames_for(sample_rate, self.latency_mode);
+        self.past = Self::past_context_frames_for(sample_rate);
+        let min_future = ms_frames(MIN_FUTURE_CONTEXT_MS, sample_rate).max(4);
+        self.max_run_limit = self
+            .latency
+            .saturating_sub(DETECT_DELAY + min_future)
+            .clamp(1, MAX_RUN_FRAMES_CAP);
+        self.future = ms_frames(FUTURE_CONTEXT_MS, sample_rate)
+            .min(self.latency - 1)
+            .max(1);
+        let ring = (self.latency + self.past + 2).next_power_of_two();
         self.ring_mask = ring - 1;
-        let pending_cap = (self.latency + self.context) / 2 + 4;
+        let pending_cap = (self.latency + self.past) / 2 + 4;
         self.ch = (0..channels)
             .map(|_| Channel {
                 det: ClipDetector::default(),
@@ -470,7 +546,7 @@ impl Processor for Declipper {
                 p_len: 0,
             })
             .collect();
-        let n_max = 2 * self.context + self.max_run_limit + 1;
+        let n_max = self.past + self.max_run_limit + self.future + 1;
         let m_max = self.max_run_limit + JOINT_LATER;
         self.solver = LsarSolver::new(n_max, m_max, self.order);
         self.w = vec![0.0; n_max];
@@ -490,7 +566,7 @@ impl Processor for Declipper {
         let nch = self.channels;
         let mask = self.ring_mask as u64;
         let lat = self.latency as u64;
-        let ctx = self.context as u64;
+        let fut = self.future as u64;
         for frame in samples.chunks_exact_mut(nch) {
             let n = self.n;
             let slot = (n & mask) as usize;
@@ -500,7 +576,7 @@ impl Processor for Declipper {
                 ch.work[slot] = *x;
                 ch.dir[slot] = 0;
                 if let Some(run) = ch.det.push(*x) {
-                    if run.too_long {
+                    if run.too_long || run.start + lat < n {
                         self.stats.runs_too_long += 1;
                     } else if ch.p_len == ch.pending.len() {
                         self.stats.runs_failed += 1;
@@ -519,7 +595,9 @@ impl Processor for Declipper {
                         break;
                     }
                     let run = ch.pending[ch.p_head];
-                    if run.end() + ctx > n {
+                    // Full future context, or the deadline: the run's first
+                    // sample leaves the delay line at this frame.
+                    if run.end() + fut > n && run.start + lat > n {
                         break;
                     }
                     ch.p_head = (ch.p_head + 1) % ch.pending.len();
