@@ -16,7 +16,8 @@
 //! | [`GainComputer`] | static compressor curve with quadratic soft knee (dB in, dB out) |
 //! | [`GateStateMachine`] | open/close hysteresis with hold counter |
 //! | [`DelayLine`] | multichannel interleaved ring buffer with frame taps |
-//! | [`SlidingMin`] | O(1) amortised sliding-window minimum |
+//! | [`SlidingMin`] | O(1) amortised sliding-window minimum (monotonic deque) |
+//! | [`SegmentedMin`] | sliding-window minimum with constant per-value cost (van Herk / Gil–Werman) |
 //! | [`BoxAverage`] | exact integer moving average, rounding down |
 //! | [`RampSmoother`] | two cascaded boxes: smooth S-ramp that never exceeds its inputs' bound |
 //! | [`frame`] | linked-channel helpers: per-frame peaks and gain application |
@@ -37,5 +38,5 @@ pub(crate) mod vmath;
 pub use gain_computer::{GainComputer, MIN_KNEE};
 pub use gate_state::GateStateMachine;
 pub use ramp::{BoxAverage, RampSmoother, RAMP_FRAC_BITS};
-pub use ring::{DelayLine, SlidingMin};
+pub use ring::{DelayLine, SegmentedMin, SlidingMin};
 pub use smoother::{AttackRelease, OnePole, PeakEnvelope};

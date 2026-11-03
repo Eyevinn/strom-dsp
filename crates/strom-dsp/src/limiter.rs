@@ -16,10 +16,14 @@
 //!
 //! With attack length `A ≤ L` frames, split as `A = A1 + A2`:
 //!
-//! 1. **Sliding minimum** ([`SlidingMin`])
+//! 1. **Sliding minimum** ([`SegmentedMin`])
 //!    `h[m] = min { r[j] : m − L ≤ j ≤ m − L + A }`
 //!    (a window of `A + 1` required gains, ending `L − A` frames in the past, so
-//!    it is causal). Computed with a monotonic deque: O(1) amortised per frame.
+//!    it is causal). Computed with the van Herk / Gil–Werman segment algorithm
+//!    (prefix and suffix minima of fixed-length segments): a constant number of
+//!    comparisons per frame, independent of the material. It uses comparisons
+//!    only, so `h[m]` is the *exact* minimum of the window, which is all the
+//!    argument below needs.
 //! 2. **Two cascaded moving averages** ([`RampSmoother`]) of lengths `A1 + 1` and
 //!    `A2 + 1` over `h`. Their combined kernel is a trapezoid/triangle spanning offsets
 //!    `0 … A`, so a step in `h` becomes a smooth S-shaped ramp of `A` frames.
@@ -30,7 +34,9 @@
 //! *Why the ceiling is guaranteed*: the box output at `n` is a weighted mean
 //! (non-negative weights summing to 1) of `h[n − k]` for `0 ≤ k ≤ A`. The window
 //! of `h[n − k]` is `[n − k − L, n − k − L + A]`, which contains `n − L` for every
-//! such `k`. Hence each `h[n − k] ≤ r[n − L]`, so the mean is `≤ r[n − L]`, and the
+//! such `k`. Since each `h` is the exact window minimum (including right after
+//! a rebuild, which pre-fills the segment minimum with the full window from the
+//! stored history), each `h[n − k] ≤ r[n − L]`, so the mean is `≤ r[n − L]`, and the
 //! release stage never exceeds the box output. The gain reaches its target
 //! exactly when the peak is output, starting `A` frames earlier.
 //!
@@ -88,7 +94,7 @@
 //! decays through the subnormal range. The box stage is integer arithmetic.
 
 use crate::dynamics::frame::{frame_peaks_simd, BLOCK_FRAMES};
-use crate::dynamics::{DelayLine, RampSmoother, SlidingMin};
+use crate::dynamics::{DelayLine, RampSmoother, SegmentedMin};
 use crate::simd::{detect, Level};
 use crate::util::{db_to_lin, one_pole_coef, DENORMAL_FLUSH};
 use crate::Processor;
@@ -212,8 +218,7 @@ pub struct Limiter {
     hist_mask: usize,
 
     // Gain pipeline.
-    window_min: SlidingMin,
-    win_hi: u64,
+    window_min: SegmentedMin,
     win_push_delay: u64,
     ramp: RampSmoother,
     gain: f64,
@@ -256,8 +261,7 @@ impl Limiter {
             req_hist: Vec::new(),
             ceil_hist: Vec::new(),
             hist_mask: 0,
-            window_min: SlidingMin::default(),
-            win_hi: 0,
+            window_min: SegmentedMin::default(),
             win_push_delay: 0,
             ramp: RampSmoother::default(),
             gain: 1.0,
@@ -312,7 +316,8 @@ impl Limiter {
     }
 
     /// Force the SIMD instruction set used by `process` (for hosts and tests),
-    /// e.g. [`Level::fallback`] to run the portable scalar path. By default
+    /// e.g. `Level::fallback()` (needs fearless_simd's `force_support_fallback`
+    /// feature) to run the portable scalar path. By default
     /// `configure` detects the best level ([`crate::simd::detect`]); a level
     /// set here is kept across later `configure` calls. Every level produces
     /// bit-identical output. Never allocates.
@@ -362,23 +367,21 @@ impl Limiter {
         let hi = hi as u64;
         let mask = self.hist_mask;
         let m = self.now;
-        self.win_hi = hi;
         self.win_push_delay = d;
 
         // Replay h for t in [m-1-a, m-1]: the ramp's output depends only on
-        // its last a+1 inputs, so this restores its exact state.
+        // its last a+1 inputs, so this restores its exact state. The window
+        // of h[t] is [t − hi, t − d] (hi − d + 1 values); pre-fill the
+        // minimum with the w − 1 values before the first window's end.
         let start = m - 1 - a as u64;
-        self.window_min.clear();
+        self.window_min.reset((hi - d + 1) as usize);
         self.ramp.reset(a, 1.0);
-        let mut next = start - hi;
+        for e in start - hi..start - d {
+            self.window_min.push(self.req_hist[e as usize & mask]);
+        }
         for t in start..m {
-            while next + d <= t {
-                self.window_min
-                    .push(next, self.req_hist[next as usize & mask]);
-                next += 1;
-            }
-            self.window_min.expire(t - hi);
-            self.ramp.step(self.window_min.min().unwrap_or(1.0));
+            let h = self.window_min.push(self.req_hist[(t - d) as usize & mask]);
+            self.ramp.step(h);
         }
     }
 
@@ -406,10 +409,8 @@ impl Limiter {
 
         // Sliding minimum of required gain, then the two-box ramp.
         let pushed = m - self.win_push_delay;
-        self.window_min
-            .push(pushed, self.req_hist[pushed as usize & hmask]);
-        self.window_min.expire(m - self.win_hi);
-        let target = self.ramp.step(self.window_min.min().unwrap_or(1.0));
+        let h = self.window_min.push(self.req_hist[pushed as usize & hmask]);
+        let target = self.ramp.step(h);
 
         // Release.
         let g = self.gain;
