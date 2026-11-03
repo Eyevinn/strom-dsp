@@ -38,14 +38,36 @@
 //!
 //! A biquad is recursive in time, so it cannot be vectorised along time. The
 //! channels of a frame are independent, though, so they are processed as SIMD
-//! lanes: channels are split into pairs (plus one single channel if the count
-//! is odd) and each pair's state is stored structure-of-arrays
-//! (`x1[2], x2[2], y1[2], y2[2]`). Mono and stereo are single groups and get
-//! dedicated, bounds-check-free loops. The same kernels run several biquads in
-//! series sample by sample (see [`crate::Equalizer`]), so the independent
-//! recursions of different stages overlap in the CPU pipeline; this measured
-//! about 1.9× faster than running each biquad over the whole buffer in turn
-//! (same kernels, Apple M5 Pro, 4 bands).
+//! lanes, with explicit `fearless_simd` vectors and runtime dispatch:
+//!
+//! - **Dispatch:** [`Biquad::new`] and `Equalizer::configure` detect the best
+//!   [`Level`] ([`crate::simd::detect`]); `process` dispatches on it once per
+//!   call. Kernels are generic over the level and run inside
+//!   `Simd::vectorize`, so each is compiled once per level (NEON; SSE2,
+//!   SSE4.2, AVX2, AVX-512; scalar fallback) with that level's target features.
+//!   `set_simd_level` overrides the choice (hosts, tests).
+//! - **Width:** channels are grouped by the native `f64` width of the level
+//!   (2 on NEON/SSE/fallback, 4 on AVX2, 8 on AVX-512); the rest form one
+//!   padded group (an `f64x2` if at most two channels are left). Mono and
+//!   stereo are single groups and get dedicated offset-free loops.
+//! - **Exactness:** every lane executes the same operations in the same
+//!   order, so a channel's output does not depend on its group, the vector
+//!   width or the level, except for the FMA policy ([`uses_fma`]): fused on
+//!   NEON/AVX2/AVX-512, unfused on SSE, and on the fallback the same as the
+//!   platform's baseline (fused on aarch64). `tests/simd_equivalence.rs`
+//!   checks bit-identity (same policy) or a documented bound (different
+//!   policy) against the fallback.
+//! - **Series:** the same kernels run several biquads in series sample by
+//!   sample (see [`crate::Equalizer`]), so the independent recursions of
+//!   different stages overlap in the CPU pipeline; this measured about 1.9×
+//!   faster than running each biquad over the whole buffer in turn (Apple M5
+//!   Pro, 4 bands). A software-pipelined ("skewed") schedule and a
+//!   bands-as-lanes ("wavefront") schedule for mono were measured and rejected,
+//!   see `docs/PERFORMANCE.md`.
+//!
+//! The DF-I sum is evaluated as `s = x2·b2; s += x1·b1; s += y2·(−a2);
+//! t = x·b0 + s; y = y1·(−a1) + t`: the loop-carried path through `y1` is a
+//! single multiply-add and the stage input enters one multiply-add earlier.
 //!
 //! Denormals: the steady-state kernel flushes the filter state to zero below
 //! `1e-15` every 32 frames rather than every sample (a
@@ -56,7 +78,7 @@
 
 use core::f64::consts::PI;
 
-use crate::lanes::Lanes;
+use fearless_simd::{Level, Simd};
 
 /// Normalised biquad coefficients (`a0 = 1`):
 /// `H(z) = (b0 + b1·z⁻¹ + b2·z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)`.
@@ -273,318 +295,13 @@ impl BiquadCoefficients {
 // ---------------------------------------------------------------------------
 // Lane kernels (crate-internal; shared by `Biquad` and `Equalizer`).
 
-/// Maximum number of biquads run in series by one kernel call.
-pub(crate) const MAX_STAGES: usize = 8;
+mod kernel;
 
-/// Number of `f64` values of DF-I state per channel.
-pub(crate) const STATE_PER_CHANNEL: usize = 4;
-
-/// DF-I state of `L` channels, structure-of-arrays.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct LaneState<const L: usize> {
-    x1: Lanes<L>,
-    x2: Lanes<L>,
-    y1: Lanes<L>,
-    y2: Lanes<L>,
-}
-
-impl<const L: usize> LaneState<L> {
-    /// Load from `[x1; L][x2; L][y1; L][y2; L]`.
-    #[inline(always)]
-    fn load(src: &[f64]) -> Self {
-        Self {
-            x1: Lanes::load(&src[0..]),
-            x2: Lanes::load(&src[L..]),
-            y1: Lanes::load(&src[2 * L..]),
-            y2: Lanes::load(&src[3 * L..]),
-        }
-    }
-
-    #[inline(always)]
-    fn store(&self, dst: &mut [f64]) {
-        self.x1.store(&mut dst[0..]);
-        self.x2.store(&mut dst[L..]);
-        self.y1.store(&mut dst[2 * L..]);
-        self.y2.store(&mut dst[3 * L..]);
-    }
-
-    /// One DF-I step. The other terms are summed as a shallow tree first and
-    /// the `y[n−1]` term last, so the loop-carried dependency is a single
-    /// (fused, where available) multiply-add, and the path from the stage
-    /// input to its output stays short.
-    /// No denormal flush here (it would lengthen that dependency); callers
-    /// flush with [`LaneState::flush_denormals`] at least every
-    /// [`FLUSH_INTERVAL`] frames.
-    #[inline(always)]
-    fn tick(&mut self, c: &BiquadCoefficients, x: Lanes<L>) -> Lanes<L> {
-        let p = self.x1.mul_add(c.b1, x * c.b0);
-        let q = self.y2.mul_add(-c.a2, self.x2 * c.b2);
-        let y = self.y1.mul_add(-c.a1, p + q);
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-
-    /// Flush every state value below [`crate::util::DENORMAL_FLUSH`] to zero.
-    #[inline(always)]
-    fn flush_denormals(&mut self) {
-        self.x1 = self.x1.flush_denormal();
-        self.x2 = self.x2.flush_denormal();
-        self.y1 = self.y1.flush_denormal();
-        self.y2 = self.y2.flush_denormal();
-    }
-}
-
-/// Frames between denormal flushes of the filter state in the kernels.
-pub(crate) const FLUSH_INTERVAL: usize = 32;
-
-/// Split `channels` into lane groups `(first channel, width)`: pairs, plus a
-/// single last channel if the count is odd.
-///
-/// Pairs match 128-bit SIMD (NEON, SSE2: two `f64`). Groups of four were
-/// measured to be slower on NEON: the state of a 4-band chain no longer fits
-/// in registers.
-pub(crate) fn channel_groups(channels: usize) -> impl Iterator<Item = (usize, usize)> {
-    (0..channels / 2)
-        .map(|g| (2 * g, 2))
-        .chain((channels % 2 == 1).then_some((channels - 1, 1)))
-}
-
-/// One steady (fixed-coefficient) biquad in a series chain.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SteadyStage {
-    pub coefs: BiquadCoefficients,
-    /// Start of this stage's state bank (`STATE_PER_CHANNEL · channels` values).
-    pub state: usize,
-}
-
-/// Run `stages` in series over interleaved `data` (whole frames of `channels`),
-/// sample by sample. `states` holds every bank referenced by the stages.
-///
-/// `ramps` is either empty (fixed coefficients: the steady-state loop) or has
-/// one entry per stage; a stage with `Some(delta)` adds `delta` to its
-/// coefficients before each sample (per-sample linear interpolation), the
-/// others keep theirs.
-pub(crate) fn run_chain(
-    data: &mut [f32],
-    channels: usize,
-    stages: &[SteadyStage],
-    ramps: &[Option<BiquadCoefficients>],
-    states: &mut [f64],
-) {
-    debug_assert!(stages.len() <= MAX_STAGES);
-    debug_assert!(ramps.is_empty() || ramps.len() == stages.len());
-    if stages.is_empty() {
-        return;
-    }
-    for (c0, width) in channel_groups(channels) {
-        match (width, ramps.is_empty()) {
-            (2, true) => chain_group::<2, false>(data, channels, c0, stages, ramps, states),
-            (2, false) => chain_group::<2, true>(data, channels, c0, stages, ramps, states),
-            (_, true) => chain_group::<1, false>(data, channels, c0, stages, ramps, states),
-            (_, false) => chain_group::<1, true>(data, channels, c0, stages, ramps, states),
-        }
-    }
-}
-
-fn chain_group<const L: usize, const RAMP: bool>(
-    data: &mut [f32],
-    channels: usize,
-    c0: usize,
-    stages: &[SteadyStage],
-    ramps: &[Option<BiquadCoefficients>],
-    states: &mut [f64],
-) {
-    // A fixed stage count lets the compiler unroll the chain and keep every
-    // state in registers.
-    let args = (data, channels, c0, stages, ramps, states);
-    match stages.len() {
-        1 => chain_n::<L, 1, RAMP>(args),
-        2 => chain_n::<L, 2, RAMP>(args),
-        3 => chain_n::<L, 3, RAMP>(args),
-        4 => chain_n::<L, 4, RAMP>(args),
-        5 => chain_n::<L, 5, RAMP>(args),
-        6 => chain_n::<L, 6, RAMP>(args),
-        7 => chain_n::<L, 7, RAMP>(args),
-        _ => chain_n::<L, 8, RAMP>(args),
-    }
-}
-
-/// One frame through `N` stages.
-#[inline(always)]
-fn chain_tick<const L: usize, const N: usize, const RAMP: bool>(
-    coefs: &mut [BiquadCoefficients; N],
-    deltas: &[Option<BiquadCoefficients>; N],
-    st: &mut [LaneState<L>; N],
-    mut x: Lanes<L>,
-) -> Lanes<L> {
-    for ((c, d), s) in coefs.iter_mut().zip(deltas).zip(st.iter_mut()) {
-        if RAMP {
-            if let Some(d) = d {
-                c.add_step(d);
-            }
-        }
-        x = s.tick(c, x);
-    }
-    x
-}
-
-type ChainArgs<'a> = (
-    &'a mut [f32],
-    usize,
-    usize,
-    &'a [SteadyStage],
-    &'a [Option<BiquadCoefficients>],
-    &'a mut [f64],
-);
-
-fn chain_n<const L: usize, const N: usize, const RAMP: bool>(
-    (data, channels, c0, stages, ramps, states): ChainArgs<'_>,
-) {
-    let off = STATE_PER_CHANNEL * c0;
-    let mut coefs: [BiquadCoefficients; N] = core::array::from_fn(|i| stages[i].coefs);
-    let deltas: [Option<BiquadCoefficients>; N] =
-        core::array::from_fn(|i| if RAMP { ramps[i] } else { None });
-    let mut st: [LaneState<L>; N] =
-        core::array::from_fn(|i| LaneState::load(&states[stages[i].state + off..]));
-    for block in data.chunks_mut(FLUSH_INTERVAL * channels) {
-        if channels == L {
-            for frame in block.chunks_exact_mut(L) {
-                let y =
-                    chain_tick::<L, N, RAMP>(&mut coefs, &deltas, &mut st, Lanes::load_f32(frame));
-                y.store_f32(frame);
-            }
-        } else {
-            for frame in block.chunks_exact_mut(channels) {
-                let lanes = &mut frame[c0..c0 + L];
-                let y =
-                    chain_tick::<L, N, RAMP>(&mut coefs, &deltas, &mut st, Lanes::load_f32(lanes));
-                y.store_f32(lanes);
-            }
-        }
-        st.iter_mut().for_each(LaneState::flush_denormals);
-    }
-    for (s, stage) in st.iter().zip(stages) {
-        s.store(&mut states[stage.state + off..]);
-    }
-}
-
-/// The realisation being faded out during a crossfade.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FadeOut {
-    /// `None`: the old realisation is the dry input.
-    pub old: Option<SteadyStage>,
-    /// Crossfade frames already done before the first frame of this call.
-    pub done: usize,
-    /// `1 / crossfade length`.
-    pub inv_len: f64,
-}
-
-/// One stage of a chain whose coefficients and/or realisation are changing.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ChangingStage {
-    /// `None`: the new realisation is the dry input (fading out to "off").
-    pub new: Option<SteadyStage>,
-    /// Per-sample coefficient increment of `new`, added before each sample.
-    pub delta: Option<BiquadCoefficients>,
-    /// Crossfade from an old realisation, if one is running.
-    pub fade: Option<FadeOut>,
-}
-
-/// Like [`run_chain`], with crossfades between two realisations per stage
-/// (and per-sample coefficient interpolation). Used only while a crossfade
-/// is running.
-pub(crate) fn run_changing(
-    data: &mut [f32],
-    channels: usize,
-    stages: &[ChangingStage],
-    states: &mut [f64],
-) {
-    debug_assert!(stages.len() <= MAX_STAGES);
-    if stages.is_empty() {
-        return;
-    }
-    for (c0, width) in channel_groups(channels) {
-        match width {
-            2 => changing_group::<2>(data, channels, c0, stages, states),
-            _ => changing_group::<1>(data, channels, c0, stages, states),
-        }
-    }
-}
-
-fn changing_group<const L: usize>(
-    data: &mut [f32],
-    channels: usize,
-    c0: usize,
-    stages: &[ChangingStage],
-    states: &mut [f64],
-) {
-    let off = STATE_PER_CHANNEL * c0;
-    let n = stages.len();
-    let load = |s: Option<SteadyStage>, states: &[f64]| {
-        s.map(|s| LaneState::<L>::load(&states[s.state + off..]))
-            .unwrap_or_default()
-    };
-    let mut coefs = [BiquadCoefficients::IDENTITY; MAX_STAGES];
-    let mut cur = [LaneState::<L>::default(); MAX_STAGES];
-    let mut old = [LaneState::<L>::default(); MAX_STAGES];
-    for (k, s) in stages.iter().enumerate() {
-        coefs[k] = s.new.map(|n| n.coefs).unwrap_or_default();
-        cur[k] = load(s.new, states);
-        old[k] = load(s.fade.and_then(|f| f.old), states);
-    }
-    for (i, frame) in data.chunks_exact_mut(channels).enumerate() {
-        let lanes = &mut frame[c0..c0 + L];
-        let mut x = Lanes::<L>::load_f32(lanes);
-        for (k, s) in stages.iter().enumerate() {
-            if let Some(d) = &s.delta {
-                coefs[k].add_step(d);
-            }
-            let y_new = match s.new {
-                Some(_) => {
-                    let y = cur[k].tick(&coefs[k], x);
-                    cur[k].flush_denormals();
-                    y
-                }
-                None => x,
-            };
-            x = match &s.fade {
-                None => y_new,
-                Some(f) => {
-                    let y_old = match &f.old {
-                        Some(o) => {
-                            let y = old[k].tick(&o.coefs, x);
-                            old[k].flush_denormals();
-                            y
-                        }
-                        None => x,
-                    };
-                    let g = ((f.done + i + 1) as f64 * f.inv_len).min(1.0);
-                    Lanes::blend(y_old, y_new, g)
-                }
-            };
-        }
-        x.store_f32(lanes);
-    }
-    for (k, s) in stages[..n].iter().enumerate() {
-        if let Some(st) = s.new {
-            cur[k].store(&mut states[st.state + off..]);
-        }
-        if let Some(o) = s.fade.and_then(|f| f.old) {
-            old[k].store(&mut states[o.state + off..]);
-        }
-    }
-}
-
-/// Zero the whole state region if any value in it is non-finite (a NaN/Inf
-/// input poisoned it).
-pub(crate) fn sanitize_bank(states: &mut [f64]) {
-    if states.iter().any(|v| !v.is_finite()) {
-        states.iter_mut().for_each(|v| *v = 0.0);
-    }
-}
+pub use crate::lanes::uses_fma;
+pub(crate) use kernel::{
+    run_chain, run_changing, sanitize_bank, ChangingStage, FadeOut, SteadyStage, MAX_STAGES,
+    STATE_PER_CHANNEL,
+};
 
 // ---------------------------------------------------------------------------
 // Public filter.
@@ -603,13 +320,16 @@ pub struct Biquad {
     delta: BiquadCoefficients,
     ramp_left: usize,
     channels: usize,
-    /// DF-I state, `STATE_PER_CHANNEL · channels` values in lane-group layout.
+    /// SIMD level the kernels run at (detected in `new`).
+    level: Level,
+    /// DF-I state, `STATE_PER_CHANNEL · channels` values (see the kernel layout).
     state: Vec<f64>,
 }
 
 impl Biquad {
     /// Create a filter for `channels` interleaved channels (at least 1) with
-    /// the given coefficients and zero state. Allocates the state.
+    /// the given coefficients and zero state. Allocates the state and detects
+    /// the SIMD level ([`crate::simd::detect`]).
     pub fn new(coefs: BiquadCoefficients, channels: usize) -> Self {
         let channels = channels.max(1);
         Self {
@@ -618,8 +338,25 @@ impl Biquad {
             delta: BiquadCoefficients::default(),
             ramp_left: 0,
             channels,
+            level: crate::simd::detect(),
             state: vec![0.0; STATE_PER_CHANNEL * channels],
         }
+    }
+
+    /// Override the SIMD level detected in [`Biquad::new`], for hosts (e.g. to
+    /// force a lower instruction set) and tests (e.g. to compare a vector path
+    /// with `Level::fallback()` when `fearless_simd`'s `force_support_fallback`
+    /// feature is enabled). Any `Level` value is a proof that the CPU supports
+    /// it, so this is always safe. It may be called between any two
+    /// [`Biquad::process`] calls: the state layout does not depend on the level.
+    /// Levels with the same [`uses_fma`] produce bit-identical output.
+    pub fn set_simd_level(&mut self, level: Level) {
+        self.level = level;
+    }
+
+    /// The SIMD level the filter runs at.
+    pub fn simd_level(&self) -> Level {
+        self.level
     }
 
     /// Number of interleaved channels.
@@ -667,6 +404,11 @@ impl Biquad {
     /// untouched. Outputs are clamped to the finite `f32` range; if a
     /// non-finite input poisons the state, the state is cleared afterwards.
     pub fn process(&mut self, samples: &mut [f32]) {
+        let level = self.level;
+        fearless_simd::dispatch!(level, simd => self.process_with(simd, samples));
+    }
+
+    fn process_with<S: Simd>(&mut self, simd: S, samples: &mut [f32]) {
         let ch = self.channels;
         let frames = samples.len() / ch;
         let mut data = &mut samples[..frames * ch];
@@ -677,7 +419,7 @@ impl Biquad {
         if self.ramp_left > 0 && frames > 0 {
             let n = self.ramp_left.min(frames);
             let (head, tail) = data.split_at_mut(n * ch);
-            run_chain(head, ch, &stage, &[Some(self.delta)], &mut self.state);
+            run_chain(simd, head, ch, &stage, &[Some(self.delta)], &mut self.state);
             self.ramp_left -= n;
             if self.ramp_left == 0 {
                 self.coefs = self.target;
@@ -693,7 +435,7 @@ impl Biquad {
             coefs: self.coefs,
             state: 0,
         }];
-        run_chain(data, ch, &stage, &[], &mut self.state);
+        run_chain(simd, data, ch, &stage, &[], &mut self.state);
         sanitize_bank(&mut self.state);
     }
 }
@@ -922,18 +664,6 @@ mod tests {
             bq.process(&mut x);
             assert!(bq.state.iter().all(|&v| v == 0.0), "{:?}", bq.state);
             assert!(x[x.len() - ch..].iter().all(|&v| v == 0.0));
-        }
-    }
-
-    #[test]
-    fn channel_groups_cover_every_channel_once() {
-        for ch in 1..=13 {
-            let mut seen = vec![0; ch];
-            for (c0, w) in channel_groups(ch) {
-                assert!(matches!(w, 1 | 2));
-                seen[c0..c0 + w].iter_mut().for_each(|s| *s += 1);
-            }
-            assert!(seen.iter().all(|&s| s == 1), "{ch}");
         }
     }
 }

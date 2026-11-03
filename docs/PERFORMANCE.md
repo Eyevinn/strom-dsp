@@ -89,6 +89,57 @@ instructions (`fmul v0.4s` on aarch64, `mulps`/`vmulps` on x86-64) show a
 loop was vectorised; scalar forms (`fmul s0`, `mulss`) show it was not. The
 listing follows the release profile, so it shows what ships.
 
+## Explicit SIMD in the biquad/EQ kernels
+
+The biquad and equalizer kernels use `fearless_simd` vectors with runtime
+dispatch (see the `strom_dsp::biquad` module docs). The level is detected in
+`configure`/`Biquad::new` and dispatched once per `process` call. Channels
+are lanes at the native `f64` width: 2 on NEON/SSE, 4 on AVX2 and 8 on
+AVX-512. Hosts and tests can force a level with `set_simd_level`.
+
+FMA policy: fused on NEON/AVX2/AVX-512 and unfused on SSE. The scalar
+fallback matches the platform baseline (fused on aarch64). Levels with the
+same policy are bit-identical. `tests/simd_equivalence.rs` checks this
+against `Level::fallback()`, and `tests/equalizer_fallback.rs` reruns the
+whole EQ suite on the fallback.
+
+Measured on an Apple M5 Pro (NEON), 4-band EQ, 480 frames, criterion median
+(the machine was under moderate load, so expect about ±5 % run to run):
+
+| Case | Before (autovectorised `[f64; 2]`) | Explicit SIMD |
+|---|---|---|
+| mono | 1.16 µs | 0.98 µs |
+| stereo | 1.30 µs | 1.02 µs |
+| 8 channels | 5.03 µs | 3.93 µs |
+| stereo, gain automated | 3.07 µs | 2.68 µs |
+
+Most of the gain comes from two changes:
+
+- **Compile-time group widths:** loads and stores have a fixed size, with no
+  per-lane loops.
+- **DF-I evaluation order:** the stage input enters one FMA before the `y1`
+  term, so the input-to-output path of a stage is 2 FMAs instead of
+  mul + FMA + add + FMA. The loop-carried path stays 1 FMA.
+
+Variants measured on NEON and rejected:
+
+- **Skewed (software-pipelined) schedule** with channels as lanes (stage k
+  processes frame t−k): 2–6 % slower.
+- **Bands as lanes ("wavefront") for mono**, one lane shift per sample:
+  about 2.5× slower in the prototype. Even with ideal codegen, the
+  loop-carried chain (lane shift → FMA → FMA, ≥ 10 cycles) is longer than the
+  ~9 cycles/frame the per-channel path already reaches.
+- **Input term last** (`y = x·b0 + (y1·(−a1) + …)`): 11 % slower, because the
+  `y1` recurrence becomes 2 FMAs.
+- **`f64x4` groups on NEON** (two registers per state): 60 % slower for 8
+  channels (register pressure).
+- **Unrolling by two frames:** no gain.
+
+The x86 paths (SSE2/SSE4.2/AVX2/AVX-512) are verified for correctness by the
+same tests on x86-64 CI, but no x86 timings have been taken. `f64x8` on
+AVX-512 is chosen on the instruction-count argument (one register per state,
+32 registers), not on a measurement.
+
 ## Denormal policy
 
 We do **not** set flush-to-zero / denormals-are-zero (FTZ/DAZ) in the CPU:
