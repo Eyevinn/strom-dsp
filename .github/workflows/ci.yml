@@ -116,8 +116,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Every tests/rtsan*.rs file (each starts with #![cfg(feature = "rtsan")]).
       - name: Real-time safety tests
-        run: cargo test -p strom-dsp --features rtsan --test rtsan
+        shell: bash
+        run: |
+          for f in crates/strom-dsp/tests/rtsan*.rs; do
+            t=$(basename "$f" .rs)
+            cargo test -p strom-dsp --features rtsan --test "$t"
+          done
       # The canary allocates inside a real-time scope. It must abort; if it
       # passes, the sanitizer is not active and the step above proved nothing.
       - name: Sanitizer canary (must fail)
