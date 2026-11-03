@@ -919,13 +919,34 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
   - plateau = samples within `tolerance·|level|` of the run's first sample
     (default 1e-5), level floor −20 dBFS, edge into and out of the run at
     least `max(10⁻³·|level|, 4·tol)` and 4× steeper than the run's own
-    slope at that end (corner rule);
-  - two-sample runs only with a ceiling confirmed by a ≥ 3-sample run at the
-    same level within 2 s, or a second difference at each edge ≥ 4× the one
-    a sample further out (a clip bends abruptly, a smooth peak evenly);
+    slope at that end (corner rule); a *soft corner* (the neighbour lies
+    just inside the level, by more than `2·tol`, and the step one sample
+    further out meets the edge) counts only for runs that need no
+    confirmation;
+  - a flat run of ≥ 4 samples is clipped on its own; runs of 2–3 samples
+    are clipped only at the *known clip level*, or when they repeat the
+    level of the previous short run (same direction, or mirrored for
+    symmetric clipping) within 5 s. A pair takes part only when it lies
+    inside the cubic (Lagrange interpolation, any numerical-analysis
+    textbook) through the two samples on each side of it by at least
+    `max(tol, 10⁻⁴·|level|)`: a smooth peak between two samples lies
+    outside that cubic, because the interpolation error at a peak has the
+    sign of the fourth derivative;
+  - *known clip level* (own design): per direction, set and confirmed by
+    flat runs of ≥ 4 samples and by repeated short runs, expiring 5 s after
+    its last confirmation; a single sample counts as clipped when it is
+    within `tol` of the known level, both neighbours lie inside the level by
+    at least the edge, and it lies inside the cubic through its four
+    neighbours by at least `max(tol, 10⁻⁴·|level|)` (above the rounding
+    noise of 16-bit audio at full scale). Single samples never confirm the
+    level, so it cannot keep itself alive, and a gain change after the
+    clip moves the plateaus to a new level that has to be confirmed again;
   - optional tolerance for a first-order high-pass after the clip (default
     50 Hz): slope ≤ `ω_c·|level|` and second difference ≤ `ω_c²·|level|`
     inside the run, from the exponential decay of a high-passed plateau;
+    the magnitude may only decay (the high-pass removes a local mean that
+    lies inside the clip level), and tilted runs need ≥ 4 samples (a short
+    straight piece of waveform at a peak looks the same);
   - constrained least squares by a bounded active-set loop (≤ 4 solves; a
     bound is never released), then projection into the box; the box upper
     edge is a cap (default +12 dB over the clipped value);

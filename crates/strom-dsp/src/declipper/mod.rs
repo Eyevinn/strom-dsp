@@ -284,6 +284,7 @@ impl Declipper {
             max_run: self.max_run,
             ceiling_hold: (detector::CEILING_HOLD_S * self.sample_rate) as u64,
             max_tilt: 2.0 * std::f32::consts::PI * p.tilt_hz / self.sample_rate,
+            singles: true,
         };
         for c in &mut self.ch {
             c.det.set_params(dp);

@@ -337,8 +337,9 @@ pub fn default_detector() -> DetectorParams {
         min_level: 10f32.powf(p.min_level_db / 20.0),
         tolerance: p.tolerance,
         max_run: (p.max_run_ms * 48.0).round() as usize,
-        ceiling_hold: (2.0 * FS) as u64,
+        ceiling_hold: (strom_dsp::declipper::detector::CEILING_HOLD_S as f64 * FS) as u64,
         max_tilt: 2.0 * std::f32::consts::PI * p.tilt_hz / FS as f32,
+        singles: true,
     }
 }
 
