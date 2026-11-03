@@ -193,4 +193,31 @@ Reusable building blocks are public too:
 
 ## Performance
 
-<!-- BENCHMARK-RESULTS -->
+Run the benchmark with `cargo bench -p strom-dsp --bench strip` (criterion).
+These numbers are criterion medians on an Apple M5 Pro (aarch64, NEON level),
+release profile with fat LTO, 48 kHz.
+- **% of one core** = time per buffer ÷ buffer duration. 480 frames are 10 ms;
+  1024 frames are 21.3 ms.
+- **The strip** is gate → compressor → 4-band EQ (HPF 80 Hz, bell 300 Hz
+  −3 dB, bell 3 kHz +2.5 dB, high shelf 10 kHz +2 dB) → limiter. The input is a
+  synthetic programme, so every stage does real work.
+
+| Benchmark | 480 frames | 1024 frames | % of one core |
+|---|---|---|---|
+| **Channel strip, stereo** | **6.83 µs** | **14.33 µs** | **0.068 %** |
+| Gate, stereo | 0.79 µs | 1.65 µs | 0.008 % |
+| Compressor, stereo | 2.54 µs | 5.38 µs | 0.025 % |
+| EQ 4-band, mono | 0.98 µs | 2.01 µs | 0.010 % |
+| EQ 4-band, stereo | 1.02 µs | 2.08 µs | 0.010 % |
+| EQ 4-band, 8 channels | 3.91 µs | 8.15 µs | 0.039 % |
+| EQ 4-band, stereo, gain automated every buffer | 2.69 µs | 5.63 µs | 0.027 % |
+| Limiter, stereo | 3.04 µs | 6.46 µs | 0.030 % |
+| Limiter, stereo, +20 dB input (heavy limiting) | 3.08 µs | 6.58 µs | 0.031 % |
+
+The spec target is "well under 1 % of one core per strip". One strip costs
+about 0.07 %, so one core can run more than 1000 stereo strips.
+
+x86-64 timings (SSE4.2/AVX2/AVX-512 paths) have not been measured yet. CI runs
+the tests on those paths. For instruction-count benchmarks (gungraun), the
+RealtimeSanitizer tests, SIMD design notes and the denormal policy, see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
