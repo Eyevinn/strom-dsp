@@ -106,6 +106,7 @@
 mod butterworth;
 mod crossover;
 mod design;
+pub mod hilbert;
 
 pub use butterworth::{Butterworth, ButterworthParams};
 pub use crossover::{Crossover, CrossoverParams, LrOrder, MAX_CROSSOVER_BANDS, MAX_SPLITS};
@@ -113,6 +114,7 @@ pub use design::{
     butterworth, butterworth_all_pass, butterworth_pair_q, clamp_cutoff, FilterKind, Sections,
     MAX_ORDER, MAX_SECTIONS, MIN_FREQUENCY_HZ, NYQUIST_FRACTION,
 };
+pub use hilbert::HilbertPair;
 
 use crate::util::one_pole_coef;
 

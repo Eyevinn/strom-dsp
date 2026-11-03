@@ -119,21 +119,36 @@ pub fn tone_amplitude(x: &[f32], fs: f64, f: f64) -> f64 {
     2.0 * (re * re + im * im).sqrt() / wsum
 }
 
+/// Settings of [`speech_like_bursts`].
+#[derive(Clone, Copy)]
+pub struct Bursts {
+    /// Band limit of the burst noise (Hz).
+    pub bandwidth: f64,
+    /// Burst length (s).
+    pub burst_s: f64,
+    /// Gap length (s).
+    pub gap_s: f64,
+    /// RMS of the burst sections (linear).
+    pub burst_rms: f64,
+    /// RMS of the noise between bursts (linear).
+    pub floor_rms: f64,
+    pub seed: u64,
+}
+
 /// Speech-like bursts: band-limited noise (two passes of a 2nd-order
 /// low-pass at `bandwidth` Hz) under a raised-cosine envelope with 20 ms
 /// ramps, `burst_s` on and `gap_s` off, scaled so the burst sections have
 /// RMS `burst_rms`; between the bursts, white noise of RMS `floor_rms`.
 /// Returns the signal and the `(start, end)` frame ranges of each burst.
-pub fn speech_like_bursts(
-    frames: usize,
-    fs: f64,
-    bandwidth: f64,
-    burst_s: f64,
-    gap_s: f64,
-    burst_rms: f64,
-    floor_rms: f64,
-    seed: u64,
-) -> (Vec<f32>, Vec<(usize, usize)>) {
+pub fn speech_like_bursts(frames: usize, fs: f64, b: &Bursts) -> (Vec<f32>, Vec<(usize, usize)>) {
+    let Bursts {
+        bandwidth,
+        burst_s,
+        gap_s,
+        burst_rms,
+        floor_rms,
+        seed,
+    } = *b;
     let mut voice = white(frames, 1.0, seed);
     lowpass(&mut voice, fs, bandwidth, 2);
     let v_rms = rms(&voice).max(1e-12);

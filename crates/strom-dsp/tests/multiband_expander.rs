@@ -18,7 +18,7 @@ mod measure_support;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use measure_support::{db, lin, rms, sine, speech_like_bursts, Rng};
+use measure_support::{db, lin, rms, sine, speech_like_bursts, Bursts, Rng};
 use strom_dsp::compressor::CompressorDetector;
 use strom_dsp::dynamics::ExpanderParams;
 use strom_dsp::filter::{Crossover, CrossoverParams, LrOrder};
@@ -87,7 +87,11 @@ fn multiband(ch: usize, p: &MultibandParams, e: &ExpanderParams) -> MultibandCom
 
 /// Static reduction of the combined curve, written out from the formulas
 /// (Giannoulis et al. 2012 for the compressor; its mirror below `E`).
-fn formula(x: f64, t: f64, w: f64, ratio: f64, e: f64, we: f64, er: f64, floor: f64) -> f64 {
+fn formula(
+    x: f64,
+    (t, w, ratio): (f64, f64, f64),
+    (e, we, er, floor): (f64, f64, f64, f64),
+) -> f64 {
     let s = 1.0 - 1.0 / ratio;
     let over = x - t;
     let comp = if over <= -w / 2.0 {
@@ -159,7 +163,9 @@ fn static_curve_per_band_matches_formula() {
     for nb in 1..=MAX_BANDS {
         for k in 0..nb {
             let f = centre(k, nb);
-            for x_db in [-60.0, -50.0, -46.0, -42.0, -40.0, -37.0, -30.0, -22.0, -18.0, -10.0] {
+            for x_db in [
+                -60.0, -50.0, -46.0, -42.0, -40.0, -37.0, -30.0, -22.0, -18.0, -10.0,
+            ] {
                 // Amplitude so that the band reads x_db.
                 let probe = sine(24_000, FS, f, 0.1);
                 let gain = band_level(nb, k, &probe) / 0.1;
@@ -172,13 +178,13 @@ fn static_curve_per_band_matches_formula() {
                 let got = m.band_gain_reduction_db(k) + m.band_expander_reduction_db(k);
                 let want = formula(
                     level,
-                    t,
-                    w,
-                    ratio,
-                    e.threshold_db as f64,
-                    e.knee_db as f64,
-                    e.ratio as f64,
-                    e.floor_db as f64,
+                    (t, w, ratio),
+                    (
+                        e.threshold_db as f64,
+                        e.knee_db as f64,
+                        e.ratio as f64,
+                        e.floor_db as f64,
+                    ),
                 );
                 worst = worst.max((got - want).abs());
                 assert!(
@@ -265,7 +271,7 @@ fn hover_ripple(nb: usize, k: usize, e: &ExpanderParams) -> f64 {
     let mut lo = f64::INFINITY;
     let mut hi = 0.0f64;
     let mut tv = 0.0;
-    let mut prev = None;
+    let mut prev: Option<f64> = None;
     for (j, chunk) in x.chunks_mut(16).enumerate() {
         m.process(chunk);
         if j * 16 >= 2 * FS as usize {
@@ -273,12 +279,16 @@ fn hover_ripple(nb: usize, k: usize, e: &ExpanderParams) -> f64 {
             lo = lo.min(a);
             hi = hi.max(a);
             if let Some(p) = prev {
-                tv += (a - p as f64).abs();
+                tv += (a - p).abs();
             }
             prev = Some(a);
         }
     }
-    eprintln!("p-p {:.3} dB, total variation {:.3} dB/s", hi - lo, tv / 2.0);
+    eprintln!(
+        "p-p {:.3} dB, total variation {:.3} dB/s",
+        hi - lo,
+        tv / 2.0
+    );
     tv / 2.0
 }
 
@@ -327,7 +337,18 @@ fn no_chatter_at_threshold() {
 #[test]
 fn noise_between_bursts_is_lowered() {
     let frames = 12 * FS as usize;
-    let (x, bursts) = speech_like_bursts(frames, FS, 3400.0, 0.3, 0.7, lin(-24.0), lin(-66.0), 7);
+    let (x, bursts) = speech_like_bursts(
+        frames,
+        FS,
+        &Bursts {
+            bandwidth: 3400.0,
+            burst_s: 0.3,
+            gap_s: 0.7,
+            burst_rms: lin(-24.0),
+            floor_rms: lin(-66.0),
+            seed: 7,
+        },
+    );
     let e = ExpanderParams {
         threshold_db: -45.0,
         ratio: 3.0,
@@ -345,10 +366,7 @@ fn noise_between_bursts_is_lowered() {
         y
     };
     let y = run(&e);
-    let reference = run(&ExpanderParams {
-        ratio: 1.0,
-        ..e
-    });
+    let reference = run(&ExpanderParams { ratio: 1.0, ..e });
     let (mut worst_gap, mut worst_burst) = (0.0f64, 0.0f64);
     for (i, &(s, end)) in bursts.iter().enumerate().skip(1) {
         let b = s + (0.02 * FS) as usize..end;
@@ -358,7 +376,10 @@ fn noise_between_bursts_is_lowered() {
         let g = s - (0.15 * FS) as usize..s;
         let gap = db(rms(&y[g.clone()]) / rms(&reference[g]));
         worst_gap = worst_gap.max((gap + 10.0).abs());
-        assert!((gap + 10.0).abs() < 0.5, "gap before burst {i}: {gap:.3} dB");
+        assert!(
+            (gap + 10.0).abs() < 0.5,
+            "gap before burst {i}: {gap:.3} dB"
+        );
     }
     eprintln!(
         "bursts: worst change {worst_burst:.3} dB; gaps: worst deviation from −10 dB \
@@ -440,10 +461,12 @@ fn no_allocation() {
     let before = allocs();
     for (i, c) in x.chunks_mut(512).enumerate() {
         if i % 10 == 0 {
-            m.set_expanders(&[ExpanderParams {
-                ratio: 1.0 + (i % 7) as f32,
-                ..e
-            }; MAX_BANDS]);
+            m.set_expanders(
+                &[ExpanderParams {
+                    ratio: 1.0 + (i % 7) as f32,
+                    ..e
+                }; MAX_BANDS],
+            );
         }
         m.process(c);
     }

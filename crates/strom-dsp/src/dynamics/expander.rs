@@ -174,7 +174,11 @@ impl ExpanderParams {
         let c =
             |v: f32, (lo, hi): (f32, f32), fb: f32| if v.is_nan() { fb } else { v.clamp(lo, hi) };
         Self {
-            threshold_db: c(self.threshold_db, EXPANDER_THRESHOLD_RANGE_DB, d.threshold_db),
+            threshold_db: c(
+                self.threshold_db,
+                EXPANDER_THRESHOLD_RANGE_DB,
+                d.threshold_db,
+            ),
             ratio: c(self.ratio, EXPANDER_RATIO_RANGE, d.ratio),
             floor_db: c(self.floor_db, EXPANDER_FLOOR_RANGE_DB, d.floor_db),
             knee_db: c(self.knee_db, EXPANDER_KNEE_RANGE_DB, d.knee_db),

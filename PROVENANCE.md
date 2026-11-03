@@ -490,6 +490,54 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - Defaults: off (ratio 1); knee 6 dB, open 3 ms, close 150 ms, hold
     100 ms, floor 12 dB.
 
+### All-pass phase-difference pair (`src/filter/hilbert.rs`)
+
+- **What:** two chains of first-order all-pass sections whose phases
+  differ by 90° over a 600:1 band; `√(a² + b²)` of their outputs is the
+  analytic-signal magnitude, used only in a control path (bass clipper).
+- **References:** S. Darlington, "Realization of a constant phase
+  difference", Bell System Technical Journal 29, 1950, and the general
+  all-pass phase-difference (Hilbert pair) literature used for Weaver
+  single-sideband modulation: alternate the poles of one increasing
+  sequence between the two chains. Bilinear transform with pre-warping
+  (Oppenheim & Schafer).
+- **Own design:** the pole positions were found by our own numerical
+  minimax optimisation (Gauss–Newton steps with Lawson-style reweighting,
+  i.e. iteratively reweighted least squares, written for this project) over
+  the phase error in `ln` of the pre-warped frequency: 8 + 8 sections,
+  0.0091° maximum error over 600:1. The module docs give the derivation of
+  why equal spacing is not enough (error at the ends of the sequence decays
+  only like `e^{−distance}`). Darlington's elliptic-function solution was not
+  used.
+
+### Bass clipper (`src/bassclip.rs`, on band 0 of the multiband)
+
+- **Envelope:** the analytic-signal magnitude of band 0 from the all-pass
+  pair above (expired US 4,495,643: gain control of a low band from its
+  envelope, without generating harmonics — expired; status not legally
+  reviewed). For a steady sine it is flat, so the gain is constant.
+- **Gain:** the limiter's gain core reused (sliding minimum over the
+  lookahead, cascaded-box ramp of the lookahead's length, one-pole release;
+  see the limiter entry), with attack equal to the lookahead and no hold:
+  look-ahead gain control with a band-limited gain signal (expired
+  US 5,737,434 — expired; status not legally reviewed). Required gain
+  `min(1, T/env)`.
+- **IM feedback:** a slow value lowers the bass threshold by at most 3 dB
+  while bass peaks (envelope within 6 dB of the threshold) coincide with
+  activity of the upper clipper, and releases it (1 s) otherwise (expired
+  US 5,737,432 — expired; status not legally reviewed). Own choices: the
+  activity input is the share of samples the upper clipper touched per
+  block, with the full reduction at 1 %; attack 30 ms.
+- **Own choices:** release 50 ms (the analytic envelope is flat, so a
+  short release does not ripple; with the rectified waveform it would —
+  that is the guard test), lookahead set by the host (3 ms in the
+  broadcast processor), raised-cosine enable fade of 10 ms over a constant
+  delay, control path stopped while off.
+- **Tests:** `tests/bass_clipper.rs` (harmonics with a rectified-envelope
+  guard, IM sidebands with and without feedback against a stand-in upper
+  clipper, band alignment, click-free changes, no allocation) and
+  `tests/rtsan_multiband_expander_bass.rs`.
+
 ### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`)
 
 - **Butterworth design** (Oppenheim & Schafer, *Discrete-Time Signal
