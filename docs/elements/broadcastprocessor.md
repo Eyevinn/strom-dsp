@@ -6,6 +6,8 @@ guaranteed true-peak ceiling. The chain is:
 
 ```
 input gain → spike guard → wideband AGC → multiband compressor (LR4) → true-peak limiter
+                                          (downward expander per band,
+                                           bass clipper on band 0)
 ```
 
 - **Spike guard:** removes clicks and other short, isolated peaks before
@@ -19,6 +21,23 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → t
 - **AGC:** slow and loudness-targeting. Its BS.1770 detector freezes in
   pauses and below `agc-gate`.
 - **Multiband:** LR4 crossover, one compressor per band.
+- **Downward expander per band:** in each band's gain computer, below its
+  own threshold: compression above the band threshold, unity between the
+  two thresholds, expansion below the expander threshold, a 6 dB soft knee
+  at each, and a floor (largest attenuation). It lowers room tone and noise
+  between words after the AGC has lifted them. Against chatter it uses a
+  hold (`expander-hold`) and a slower close (150 ms) than open (3 ms), not
+  hysteresis. Ratio 1 turns it off exactly. With `num-bands` 1 it is a
+  wideband expander.
+- **Bass clipper on band 0:** lookahead gain control of the bass band from
+  its analytic-signal envelope (a 90° all-pass pair in the control path
+  only), so a loud steady bass is held at `bass-clip-threshold` without
+  harmonics (measured below −130 dBc on a 60 Hz sine 6 dB over). The gain
+  ramps over the 3 ms lookahead and releases with 50 ms. The other bands
+  are delayed by the same 3 ms. It needs a separate bass band: with
+  `num-bands` 1 it does nothing (the 3 ms delay stays). Its IM feedback
+  (lowering the bass threshold by up to 3 dB while bass peaks coincide with
+  clipping after the multiband) has no source yet and stays idle.
 - **True-peak limiter:** 4× oversampled detector, ceiling in dBTP per BS.1770
   Annex 2.
 - **Stage bypass:** each stage has `*-enabled`, and the whole element has
@@ -30,13 +49,15 @@ The conventions shared by all elements are in the
 
 ## Latency
 
-`24 + round(spike lookahead · fs / 1000) + round(limiter-lookahead · fs /
-1000) + 32` frames: the spike guard's 4× interpolator (24) and lookahead
-(0.5 ms), the limiter's lookahead and its true-peak detector delay (32).
-That is 48 + 272 = 320 frames (6.67 ms) at 48 kHz with the defaults. The
-spike guard's lookahead is a configuration value of the library (0.5 ms
-standard, 0 for low latency: 24 frames, 0.5 ms); the element uses the
-standard one. It is reported in the LATENCY query, is the same with
+`24 + round(spike lookahead · fs / 1000) + round(3 · fs / 1000) +
+round(limiter-lookahead · fs / 1000) + 32` frames: the spike guard's 4×
+interpolator (24) and lookahead (0.5 ms), the bass clipper's fixed 3 ms
+lookahead (there with the bass clipper off or the multiband bypassed
+too), the limiter's lookahead and its true-peak detector delay (32).
+That is 48 + 144 + 240 + 32 = 464 frames (9.67 ms) at 48 kHz with the
+defaults. The spike guard's lookahead is a configuration value of the
+library (0.5 ms standard, 0 for low latency: 24 frames, 0.5 ms); the
+element uses the standard one. It is reported in the LATENCY query, is the same with
 `enabled=false` and with any stage bypassed, and a `Latency` message is posted
 when it changes (only at caps negotiation). With `enabled=false` the output is
 the input delayed by exactly that latency. The element never uses
@@ -72,6 +93,12 @@ mutable in PLAYING unless noted.
 | `bandN-attack` | float, ms | 0.1…500 | 30, 15, 8, 5, 3 |
 | `bandN-release` | float, ms | 5…5000 | 300, 200, 150, 100, 80 |
 | `bandN-makeup` | float, dB | −12…24 | 0 |
+| `bandN-expander-threshold` | float, dB (band level, like `bandN-threshold`) | −80…0 | −47 |
+| `bandN-expander-ratio` | float (1 = off) | 1…10 | 1.5 |
+| `bandN-expander-floor` | float, dB (largest attenuation) | 0…40 | 4 |
+| `expander-hold` | float, ms | 0…1000 | 100 |
+| `bass-clipper-enabled` | bool | | true |
+| `bass-clip-threshold` | float, dB (band 0 analytic envelope) | −40…0 | −14 |
 | `limiter-enabled` | bool | | true |
 | `limiter-release` | float, ms | 1…2000 | 200 |
 | `limiter-lookahead` | float, ms (READY only, not controllable) | 0.5…20 | 5 |
@@ -112,7 +139,15 @@ and deliberately gentle:
 | `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 |
 
 All presets: `input-gain` 0, all stages on, `spike-threshold` 8 dB,
-`multiband-drive` 0, band makeup 0.
+`multiband-drive` 0, band makeup 0, `expander-hold` 100 ms,
+`bass-clipper-enabled` true, `bass-clip-threshold` = target + 9 dB.
+
+| Nick | `bandN-expander-threshold` (every band) | `bandN-expander-ratio` | `bandN-expander-floor` | `bass-clip-threshold` |
+|---|---|---|---|---|
+| `ebu-r128` | −47 dB | 1.5 | 4 dB | −14 dB |
+| `atsc-a85` | −48 | 1.5 | 4 | −15 |
+| `streaming` | −40 | 1.5 | 4 | −7 |
+| `speech` | −40 | 2 | 6 | −9 |
 
 **Why these values:**
 - **Targets and ceilings:** EBU R 128, ATSC A/85, and the AES TD1004/TD1008
@@ -133,6 +168,20 @@ All presets: `input-gain` 0, all stages on, `spike-threshold` 8 dB,
   count; they come down to that level, not to the programme's.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, and a
   150 ms limiter release.
+- **Expander:** target − 24 dB, 1:1.5, at most 4 dB for programme; target
+  − 22 dB, 1:2, at most 6 dB for speech. After the AGC, room tone and noise
+  between words sit near or below target − 25 dB, while quiet word endings
+  stay above target − 20 dB. The floor is small on purpose: a quiet passage
+  of music that falls below the threshold loses at most 4 dB, slowly.
+  Measured: speech-like bursts with noise 40 dB below them through the
+  `speech` preset: the noise between the bursts drops by 5.8 dB, the bursts
+  change by less than 0.01 dB.
+- **Expander hold** 100 ms: bridges gaps inside words, so word endings are
+  not chopped.
+- **Bass clip threshold** target + 9 dB: 4 dB above the band threshold. A
+  steady bass at target + 13 dB comes out of the 2:1 band compressor at
+  target + 9 dB, so the clipper catches only louder bass peaks and the ones
+  the 30 ms band-0 attack lets through.
 
 Crossovers and band time constants depend only on the band count:
 
@@ -235,6 +284,8 @@ reads −200.0, never NaN.
 | `agc-gain` | gdouble, dB | signed; + is boost |
 | `band-gain-reduction` | GstValueArray of gdouble | positive dB of reduction, one per active band |
 | `limiter-gain-reduction` | gdouble | positive dB of reduction; max of values sampled every 512 frames |
+| `band-expander-gain-reduction` | GstValueArray of gdouble | positive dB of expander attenuation, one per active band |
+| `bass-clip-gr` | gdouble | positive dB of bass-clipper reduction, largest since the last message |
 
 ## Example
 

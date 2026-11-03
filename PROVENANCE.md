@@ -434,6 +434,14 @@ Own choices:
   band's lowest frequency (Giannoulis et al. 2012; Zölzer, *DAFX*).
 - **Crossover choices:** a 200 Hz bass split, and 3 kHz at the ear's most
   sensitive region (ISO 226).
+- **Expander and bass clipper in the chain** (own values): every band's
+  expander threshold at target − 24 dB (speech − 22 dB), ratio 1.5 (speech
+  2), floor 4 dB (speech 6 dB), hold 100 ms, knee 6 dB, open 3 ms, close
+  150 ms; the bass clip threshold at target + 9 dB, with a 3 ms lookahead
+  that adds 144 frames at 48 kHz to the chain latency. Reasoning: studio
+  noise levels relative to R 68 / R 128 alignment and speech timing, the
+  same textbook sources as the gate's defaults; the floor is kept small so
+  a misjudged threshold can do little on quiet music.
 
 The values were checked with the chain acceptance test in
 `tests/broadcast.rs` (60 s programme at −35, −23 and −10 LUFS input:
@@ -508,6 +516,81 @@ Own choices:
 Tests check the static curve per band against the gain-computer formula, and
 the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warped
 `r`. No commercial broadcast-processor material was used.
+
+### Downward expander per band (`src/dynamics/expander.rs`, `Compressor::set_expander`, `MultibandCompressor::set_expanders`)
+
+- **Static curve:** the gain computer of Giannoulis, Massberg & Reiss
+  (JAES 60(6), 2012), mirrored below its own threshold `E`: slope
+  `S = ratio − 1`, the same quadratic soft knee of width `W` centred on `E`,
+  and a floor (largest attenuation) as `min(F, e)`. It is added to the
+  compressor's static reduction of the same detector level, so one gain
+  computer has compression, a unity region and expansion, with a knee at
+  each threshold. The idea of a downward expander below a threshold, with a
+  hold time and a release that is slower than the attack, is the textbook
+  noise gate / expander of Zölzer (ed.), *DAFX*, dynamics chapter.
+- **Own choices:**
+  - The expander part is smoothed separately from the compression part
+    (open fast, close slowly), because an expander needs the opposite of a
+    compressor's attack/release.
+  - Anti-chatter is a **hold on the attenuation** (the target may rise only
+    after it has stayed above the smoothed value for `hold`) plus the
+    slower close time, not hysteresis. The guard test measures the gain's
+    total movement per second on a level hovering at the threshold
+    (`tests/multiband_expander.rs::no_chatter_at_threshold`).
+  - Threshold, slope, knee and floor glide over 10 ms like the compressor's
+    curve. At ratio 1 the stage turns itself off once open, so the
+    compressor is bit-identical to one without it (guard:
+    `ratio_one_is_bit_exact`).
+  - Defaults: off (ratio 1); knee 6 dB, open 3 ms, close 150 ms, hold
+    100 ms, floor 12 dB.
+
+### All-pass phase-difference pair (`src/filter/hilbert.rs`)
+
+- **What:** two chains of first-order all-pass sections whose phases
+  differ by 90° over a 600:1 band; `√(a² + b²)` of their outputs is the
+  analytic-signal magnitude, used only in a control path (bass clipper).
+- **References:** S. Darlington, "Realization of a constant phase
+  difference", Bell System Technical Journal 29, 1950, and the general
+  all-pass phase-difference (Hilbert pair) literature used for Weaver
+  single-sideband modulation: alternate the poles of one increasing
+  sequence between the two chains. Bilinear transform with pre-warping
+  (Oppenheim & Schafer).
+- **Own design:** the pole positions were found by our own numerical
+  minimax optimisation (Gauss–Newton steps with Lawson-style reweighting,
+  i.e. iteratively reweighted least squares, written for this project) over
+  the phase error in `ln` of the pre-warped frequency: 8 + 8 sections,
+  0.0091° maximum error over 600:1. The module docs give the derivation of
+  why equal spacing is not enough (error at the ends of the sequence decays
+  only like `e^{−distance}`). Darlington's elliptic-function solution was not
+  used.
+
+### Bass clipper (`src/bassclip.rs`, on band 0 of the multiband)
+
+- **Envelope:** the analytic-signal magnitude of band 0 from the all-pass
+  pair above (expired US 4,495,643: gain control of a low band from its
+  envelope, without generating harmonics — expired; status not legally
+  reviewed). For a steady sine it is flat, so the gain is constant.
+- **Gain:** the limiter's gain core reused (sliding minimum over the
+  lookahead, cascaded-box ramp of the lookahead's length, one-pole release;
+  see the limiter entry), with attack equal to the lookahead and no hold:
+  look-ahead gain control with a band-limited gain signal (expired
+  US 5,737,434 — expired; status not legally reviewed). Required gain
+  `min(1, T/env)`.
+- **IM feedback:** a slow value lowers the bass threshold by at most 3 dB
+  while bass peaks (envelope within 6 dB of the threshold) coincide with
+  activity of the upper clipper, and releases it (1 s) otherwise (expired
+  US 5,737,432 — expired; status not legally reviewed). Own choices: the
+  activity input is the share of samples the upper clipper touched per
+  block, with the full reduction at 1 %; attack 30 ms.
+- **Own choices:** release 50 ms (the analytic envelope is flat, so a
+  short release does not ripple; with the rectified waveform it would —
+  that is the guard test), lookahead set by the host (3 ms in the
+  broadcast processor), raised-cosine enable fade of 10 ms over a constant
+  delay, control path stopped while off.
+- **Tests:** `tests/bass_clipper.rs` (harmonics with a rectified-envelope
+  guard, IM sidebands with and without feedback against a stand-in upper
+  clipper, band alignment, click-free changes, no allocation) and
+  `tests/rtsan_multiband_expander_bass.rs`.
 
 ### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`)
 

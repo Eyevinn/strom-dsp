@@ -237,20 +237,20 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
-    // Spike guard (4× interpolator 24 + its 0.5 ms standard lookahead),
-    // then the limiter lookahead plus the true-peak detector delay (24 + 8
-    // frames).
+    // Spike guard (4× interpolator 24 + its 0.5 ms standard lookahead), the
+    // bass clipper's 3 ms lookahead, then the limiter lookahead plus the
+    // true-peak detector delay (24 + 8 frames).
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
-        (24 + 24) + 240 + 32
+        (24 + 24) + 144 + 240 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
-        (24 + 22) + 221 + 32
+        (24 + 22) + 132 + 221 + 32
     );
     assert_eq!(
         BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
-        (24 + 48) + 480 + 32
+        (24 + 48) + 288 + 480 + 32
     );
     // The spike guard lookahead is structural too (0 = low latency).
     let low = BroadcastParams {
@@ -259,13 +259,13 @@ fn latency_formula() {
     };
     assert_eq!(
         BroadcastProcessor::latency_frames_for_params(48_000.0, &low),
-        24 + 240 + 32
+        24 + 144 + 240 + 32
     );
     let mut bp = processor(48_000.0, 2, &BroadcastParams::default());
     bp.set_params(&low);
-    assert_eq!(bp.latency_frames(), 48 + 240 + 32);
+    assert_eq!(bp.latency_frames(), 48 + 144 + 240 + 32);
     bp.configure(48_000.0, 2);
-    assert_eq!(bp.latency_frames(), 24 + 240 + 32);
+    assert_eq!(bp.latency_frames(), 24 + 144 + 240 + 32);
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),

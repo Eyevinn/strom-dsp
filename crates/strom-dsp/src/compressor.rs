@@ -73,6 +73,21 @@
 //!
 //! Ratio 1 gives `S = 0`, hence `r = 0` and exactly unity gain apart from makeup.
 //!
+//! # Downward expansion
+//!
+//! [`Compressor::set_expander`] adds a downward expander below its own
+//! threshold to the same gain computer (see [`crate::dynamics::expander`]):
+//! the static attenuation `e(x)` of the held detector level `x` (dB) is
+//! added to `r(x)`, so the static curve is compression above the threshold,
+//! unity between the two thresholds and expansion below the expander
+//! threshold, with a soft knee at each. `e` has its own hold and its own
+//! open/close smoothing; the gain is `10^(−(y + y_e)/20) · makeup`. While the
+//! expander is off (ratio 1, and fully open) it is skipped, so the output is
+//! bit-identical to the compressor without it. While it is on, the
+//! below-the-knee shortcut (see "Efficiency") is not taken, since the
+//! expander needs the level in dB. The automatic makeup does not count the
+//! expander's attenuation.
+//!
 //! # Sidechain (key input)
 //!
 //! [`Compressor::process_with_key`] feeds the level detector (step 1) from a
@@ -213,8 +228,8 @@
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{
-    vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, MeanSquareEnvelope, OnePole,
-    SegmentedMin,
+    vmath, AttackRelease, ExpanderParams, ExpanderStage, GainComputer, KeyDetector, KeyFilter,
+    MeanSquareEnvelope, OnePole, SegmentedMin,
 };
 use crate::simd::{detect, Level};
 use crate::util::db_to_lin;
@@ -705,6 +720,8 @@ pub struct Compressor {
     key: KeyDetector,
     /// Key channel count set by `set_key_channels` (0 = follow `channels`).
     key_channels: usize,
+    /// Downward expander below its own threshold (off by default).
+    expander: ExpanderStage,
 }
 
 impl Default for Compressor {
@@ -749,6 +766,7 @@ impl Compressor {
             level_forced: false,
             key: KeyDetector::new(),
             key_channels: 0,
+            expander: ExpanderStage::new(),
         };
         c.estimator.reset(c.sample_rate);
         c.update_coefficients();
@@ -804,6 +822,23 @@ impl Compressor {
     /// Current (clamped) parameters.
     pub fn params(&self) -> &CompressorParams {
         &self.params
+    }
+
+    /// Set the downward expander (see "Downward expansion" in the module
+    /// docs). Ratio 1 switches it off. Never allocates; changes glide.
+    pub fn set_expander(&mut self, params: &ExpanderParams) {
+        self.expander.set_params(params, self.fresh);
+    }
+
+    /// Current (clamped) expander parameters.
+    pub fn expander(&self) -> &ExpanderParams {
+        self.expander.params()
+    }
+
+    /// Smoothed attenuation of the expander (dB, ≥ 0) after the most
+    /// recently processed frame.
+    pub fn expander_reduction_db(&self) -> f64 {
+        self.expander.reduction_db()
     }
 
     /// Select the level detector (see "Detector modes" in the module docs).
@@ -934,6 +969,7 @@ impl Compressor {
         let mut peaks = [0.0f32; BLOCK_FRAMES];
         let mut level = [0.0f64; BLOCK_FRAMES];
         let mut makeup = [0.0f64; BLOCK_FRAMES];
+        let mut exp_level = [0.0f64; BLOCK_FRAMES];
         let mut auto_scratch = AutoScratch::new();
         for (b, block) in samples.chunks_mut(BLOCK_FRAMES * ch).enumerate() {
             let frames = block.len() / ch;
@@ -997,7 +1033,8 @@ impl Compressor {
             } else {
                 self.knee_start_lin
             };
-            let quiet = !self.gliding && block_max <= knee_start;
+            let expand = self.expander.active();
+            let quiet = !self.gliding && block_max <= knee_start && !expand;
             if quiet {
                 level[..frames].fill(0.0);
             } else {
@@ -1007,6 +1044,9 @@ impl Compressor {
                 for v in level[..lanes].chunks_exact_mut(n) {
                     (vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)) * rms_scale)
                         .store_slice(v);
+                }
+                if expand {
+                    exp_level[..frames].copy_from_slice(&level[..frames]);
                 }
             }
 
@@ -1036,6 +1076,12 @@ impl Compressor {
             self.reduction.step_block(&mut level[..frames]);
             if measure {
                 auto_scratch.applied_power[..lanes].copy_from_slice(&level[..lanes]);
+            }
+            if expand {
+                // The expander's own hold and open/close smoothing, added.
+                for (y, &x) in level[..frames].iter_mut().zip(&exp_level[..frames]) {
+                    *y += self.expander.step(x);
+                }
             }
 
             // Gain 10^(−y/20)·makeup; exactly `makeup` at zero reduction
@@ -1136,6 +1182,7 @@ impl Compressor {
         self.knee_start_lin = self.current.computer().knee_start_lin();
         self.auto_gain.set_time(PARAM_SMOOTHING_MS, fs);
         self.estimator.set_rate(fs);
+        self.expander.set_rate(fs);
         self.update_auto_target();
     }
 }
@@ -1193,6 +1240,7 @@ impl Processor for Compressor {
         let h = hold_frames(self.params.release_ms as f64, self.sample_rate);
         self.hold.reset(h);
         self.estimator.reset(self.sample_rate);
+        self.expander.reset();
         self.update_coefficients();
     }
 }

@@ -31,6 +31,33 @@
 //! compressor's detector reading of the **band** signal: the peak level of a
 //! steady sine (both detector modes are sine-calibrated).
 //!
+//! # Downward expander per band
+//!
+//! [`MultibandCompressor::set_expanders`] gives each band a downward
+//! expander below its own threshold, in the band compressor's gain computer
+//! ([`Compressor::set_expander`], [`crate::dynamics::expander`]): compression
+//! above the band threshold, unity between the two thresholds, expansion
+//! below the expander threshold, a soft knee at each, and a floor. The
+//! expander threshold is against the same sine-calibrated band level as the
+//! band threshold. Against chatter it uses a hold and a slower close time
+//! (no hysteresis); the hold stops it from chopping word endings. Ratio 1
+//! (the default) leaves the band bit-identical to a band without it. With
+//! one band it is a wideband expander.
+//!
+//! # Bass clipper on band 0
+//!
+//! [`MultibandCompressor::set_bass_clipper`] enables the
+//! [`crate::bassclip::BassClipper`] on band 0 (after its
+//! compressor): lookahead gain control from the band's analytic envelope.
+//! Its lookahead is structural ([`MultibandCompressor::set_bass_lookahead_ms`],
+//! default 0, applied at the next `configure`): band 0 is delayed by it, and
+//! the sum of the other bands by the same amount, so the bands stay aligned
+//! and the multiband reports that latency ([`Processor::latency_frames`]).
+//! The clipper needs a separate bass band, so it is inactive with one band.
+//! [`MultibandCompressor::set_upper_clip_activity`] feeds its IM feedback.
+//! With a lookahead of 0 and the clipper off, the multiband is exactly the
+//! one without it.
+//!
 //! # Drive
 //!
 //! `drive_db` is one gain applied to the input before the crossover. The
@@ -65,8 +92,9 @@
 //! allocate; `process` works through the input in chunks of
 //! [`CHUNK_FRAMES`] frames.
 
+use crate::bassclip::{BassClipper, BassClipperParams};
 use crate::compressor::{CompressorDetector, CompressorParams};
-use crate::dynamics::OnePole;
+use crate::dynamics::{DelayLine, ExpanderParams, OnePole};
 use crate::filter::{Crossover, CrossoverParams, LrOrder, MAX_CROSSOVER_BANDS, MAX_SPLITS};
 use crate::simd::Level;
 use crate::util::db_to_lin;
@@ -100,6 +128,9 @@ pub const DEFAULT_FREQUENCIES_HZ: [f32; MAX_SPLITS] = [120.0, 800.0, 4000.0, 10_
 
 /// Default number of bands (1 … 5).
 pub const DEFAULT_NUM_BANDS: usize = 4;
+
+/// Largest bass-clipper lookahead (ms).
+pub const MAX_BASS_LOOKAHEAD_MS: f32 = 10.0;
 
 /// Snap distance (dB) of the drive glide.
 const DRIVE_SNAP_DB: f64 = 1e-6;
@@ -279,6 +310,14 @@ pub struct MultibandCompressor {
     drive: DriveGlide,
     /// Drive snaps on the first `process` after configure/reset.
     fresh: bool,
+    /// Bass clipper on band 0 (delays band 0 by its lookahead).
+    bass: BassClipper,
+    /// Lookahead (ms) applied at the next `configure`.
+    bass_lookahead_ms: f32,
+    /// Lookahead in force (frames) = latency.
+    latency: usize,
+    /// Delay of the sum of bands 1 … n−1 by `latency`.
+    upper_delay: DelayLine,
 }
 
 impl Default for MultibandCompressor {
@@ -299,6 +338,10 @@ impl MultibandCompressor {
             bands: Vec::new(),
             drive: DriveGlide::default(),
             fresh: true,
+            bass: BassClipper::new(),
+            bass_lookahead_ms: 0.0,
+            latency: 0,
+            upper_delay: DelayLine::default(),
         };
         let p = m.params;
         m.set_params(&p);
@@ -334,6 +377,61 @@ impl MultibandCompressor {
             c.set_params(&b.compressor_params());
         }
         self.drive.retarget(p.drive_db as f64);
+        self.bass.set_allowed(p.num_bands >= 2);
+    }
+
+    /// Set the bass clipper on band 0 (see "Bass clipper on band 0" in the
+    /// module docs). Never allocates; `enabled` crossfades.
+    pub fn set_bass_clipper(&mut self, params: &BassClipperParams) {
+        self.bass.set_params(params);
+    }
+
+    /// Current (clamped) bass-clipper parameters.
+    pub fn bass_clipper(&self) -> &BassClipperParams {
+        self.bass.params()
+    }
+
+    /// Set the bass clipper's lookahead (ms, 0 … [`MAX_BASS_LOOKAHEAD_MS`]).
+    /// Structural: it sets the latency and takes effect at the next
+    /// [`Processor::configure`].
+    pub fn set_bass_lookahead_ms(&mut self, ms: f32) {
+        self.bass_lookahead_ms = if ms.is_finite() {
+            ms.clamp(0.0, MAX_BASS_LOOKAHEAD_MS)
+        } else {
+            0.0
+        };
+    }
+
+    /// Latency (frames) of a bass lookahead of `ms` at `sample_rate`.
+    pub fn bass_lookahead_frames(ms: f32, sample_rate: f32) -> usize {
+        let ms = if ms.is_finite() {
+            ms.clamp(0.0, MAX_BASS_LOOKAHEAD_MS)
+        } else {
+            0.0
+        };
+        let fs = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate as f64
+        } else {
+            48_000.0
+        };
+        (ms as f64 * 0.001 * fs).round() as usize
+    }
+
+    /// Activity of the upper (final) clipper's most recent block (share of
+    /// samples touched, 0 … 1) for the bass clipper's IM feedback. Never
+    /// allocates.
+    pub fn set_upper_clip_activity(&mut self, activity: f32) {
+        self.bass.set_upper_activity(activity);
+    }
+
+    /// The bass clipper's current IM feedback (dB of threshold reduction).
+    pub fn bass_im_reduction_db(&self) -> f64 {
+        self.bass.im_reduction_db()
+    }
+
+    /// Largest bass-clipper gain reduction (dB, ≥ 0) since the previous call.
+    pub fn take_bass_clip_gain_reduction_db(&mut self) -> f64 {
+        self.bass.take_gain_reduction_db()
     }
 
     /// Current (clamped) parameters.
@@ -350,6 +448,31 @@ impl MultibandCompressor {
     /// `num_bands() − 1` are in use).
     pub fn frequencies_hz(&self) -> [f64; MAX_SPLITS] {
         self.crossover.frequencies_hz()
+    }
+
+    /// Set the downward expander of every band (index = band; see "Downward
+    /// expander per band" in the module docs). Inactive bands keep theirs
+    /// for when they become active. Never allocates; changes glide.
+    pub fn set_expanders(&mut self, expanders: &[ExpanderParams; MAX_CROSSOVER_BANDS]) {
+        for (c, e) in self.compressors.iter_mut().zip(expanders) {
+            c.set_expander(e);
+        }
+    }
+
+    /// Smoothed attenuation (dB, ≥ 0) of band `k`'s expander after the most
+    /// recently processed frame; 0 for an inactive band.
+    pub fn band_expander_reduction_db(&self, k: usize) -> f64 {
+        if k < self.num_bands() {
+            self.compressors[k].expander_reduction_db()
+        } else {
+            0.0
+        }
+    }
+
+    /// [`band_expander_reduction_db`](Self::band_expander_reduction_db) of
+    /// every band (inactive bands read 0), for metering.
+    pub fn expander_reduction_db(&self) -> [f64; MAX_CROSSOVER_BANDS] {
+        core::array::from_fn(|k| self.band_expander_reduction_db(k))
     }
 
     /// Smoothed gain reduction (dB, ≥ 0, excluding makeup) of band `k` after
@@ -387,6 +510,10 @@ impl Processor for MultibandCompressor {
             c.configure(sample_rate, channels);
         }
         self.bands = vec![vec![0.0; CHUNK_FRAMES * channels]; MAX_CROSSOVER_BANDS];
+        self.latency = Self::bass_lookahead_frames(self.bass_lookahead_ms, sample_rate);
+        self.bass.configure(sample_rate, channels, self.latency);
+        self.upper_delay
+            .allocate(self.latency + CHUNK_FRAMES, channels);
         let fs = if sample_rate.is_finite() && sample_rate > 0.0 {
             sample_rate as f64
         } else {
@@ -416,13 +543,38 @@ impl Processor for MultibandCompressor {
             for (c, b) in self.compressors.iter_mut().zip(&mut self.bands[..nb]) {
                 c.process(&mut b[..len]);
             }
-            chunk.copy_from_slice(&self.bands[0][..len]);
-            for b in &self.bands[1..nb] {
-                for (o, &v) in chunk.iter_mut().zip(&b[..len]) {
+            // Band 0 through the bass clipper (delayed by the lookahead).
+            self.bass.process(&mut self.bands[0][..len]);
+            if self.latency == 0 {
+                chunk.copy_from_slice(&self.bands[0][..len]);
+                for b in &self.bands[1..nb] {
+                    for (o, &v) in chunk.iter_mut().zip(&b[..len]) {
+                        *o += v;
+                    }
+                }
+            } else {
+                // The other bands, summed, get the same delay.
+                if nb > 1 {
+                    chunk.copy_from_slice(&self.bands[1][..len]);
+                    for b in &self.bands[2..nb] {
+                        for (o, &v) in chunk.iter_mut().zip(&b[..len]) {
+                            *o += v;
+                        }
+                    }
+                } else {
+                    chunk.fill(0.0);
+                }
+                self.upper_delay.write_frames(chunk);
+                self.upper_delay.read_frames(self.latency, chunk);
+                for (o, &v) in chunk.iter_mut().zip(&self.bands[0][..len]) {
                     *o += v;
                 }
             }
         }
+    }
+
+    fn latency_frames(&self) -> usize {
+        self.latency
     }
 
     fn reset(&mut self) {
@@ -430,6 +582,8 @@ impl Processor for MultibandCompressor {
         for c in &mut self.compressors {
             c.reset();
         }
+        self.bass.reset();
+        self.upper_delay.clear();
         self.fresh = true;
     }
 }

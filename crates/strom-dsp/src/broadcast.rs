@@ -1,6 +1,6 @@
 //! Broadcast final processor chain:
-//! input gain → spike guard → wideband AGC → multiband compressor →
-//! true-peak limiter.
+//! input gain → spike guard → wideband AGC → multiband compressor (per-band
+//! downward expander, bass clipper on band 0) → true-peak limiter.
 //!
 //! Units follow the element interface (`stromdsp-broadcastprocessor`): dB,
 //! LUFS, dBTP, dB/s, ms, Hz. Meter conventions follow the element's public
@@ -27,7 +27,15 @@
 //! - **AGC**: [`crate::agc::Agc`] (gated, rate-limited loudness rider; no
 //!   latency), with a slow output-referenced trim on its target (below).
 //! - **Multiband**: [`crate::multiband::MultibandCompressor`] (LR4
-//!   crossover, compressor per band; no latency, an all-pass at ratio 1).
+//!   crossover, compressor per band, an all-pass at ratio 1), with a
+//!   downward expander per band (`band_expanders`, `expander_hold_ms`;
+//!   knee [`EXPANDER_KNEE_DB`], open [`EXPANDER_OPEN_MS`], close
+//!   [`EXPANDER_CLOSE_MS`]) and the bass clipper on band 0
+//!   ([`crate::bassclip`]). The bass clipper's lookahead,
+//!   [`BASS_LOOKAHEAD_MS`], is the stage's latency (constant, also with the
+//!   clipper off). Its IM-feedback input
+//!   ([`crate::multiband::MultibandCompressor::set_upper_clip_activity`])
+//!   stays at "no activity" until a clipper after the multiband feeds it.
 //! - **Limiter**: [`crate::truepeak::TruePeakLimiter`] with ceiling
 //!   `true_peak_ceiling_dbtp` (dBTP, BS.1770 Annex 2 detector); its latency
 //!   (lookahead + 32 frames of detector delay) is the whole chain latency.
@@ -54,13 +62,14 @@
 //! Between `configure`/`reset` and the first processed frame, `set_params`
 //! applies bypass states and the input gain instantly (no fade).
 //!
-//! The latency is `spike guard latency + agc latency (0) + limiter
-//! latency`, i.e. `24 + round(spike lookahead · fs / 1000) + round(limiter
-//! lookahead · fs / 1000) + 32` frames (48 + 272 = 320 at 48 kHz with the
-//! default 0.5 ms and 5 ms), and depends only on the sample rate and the
-//! two lookaheads ([`BroadcastProcessor::latency_frames_for_params`]).
-//! `num_bands`, `spike_guard_lookahead_ms` and `limiter_lookahead_ms` are
-//! structural: they take effect at the next [`Processor::configure`].
+//! The latency is `spike guard + agc (0) + multiband + limiter`, i.e.
+//! `24 + round(spike lookahead · fs / 1000) + round(3 ms · fs / 1000) +
+//! round(limiter lookahead · fs / 1000) + 32` frames (48 + 144 + 240 + 32 =
+//! 464 at 48 kHz with the default 0.5 ms and 5 ms), and depends only on
+//! the sample rate and the lookaheads
+//! ([`BroadcastProcessor::latency_frames_for_params`]). `num_bands`,
+//! `spike_guard_lookahead_ms` and `limiter_lookahead_ms` are structural:
+//! they take effect at the next [`Processor::configure`].
 //!
 //! # Output-referenced trim
 //!
@@ -123,6 +132,8 @@
 //! | spike events | events of the spike guard since the last read | O(1) |
 //! | AGC gain | [`crate::agc::Agc::gain_db`] (the trim included: it is the applied gain) | O(1) |
 //! | band gain reduction | [`crate::multiband::MultibandCompressor::gain_reduction_db`] at read time | O(1) |
+//! | band expander gain reduction | [`crate::multiband::MultibandCompressor::expander_reduction_db`] at read time | O(1) |
+//! | bass-clip gain reduction | largest since the last read ([`crate::multiband::MultibandCompressor::take_bass_clip_gain_reduction_db`]) | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
 //!
 //! The input meters show what actually comes in: they are measured before
@@ -134,6 +145,12 @@
 //! once per buffer if needed.
 
 use crate::agc::{Agc, AgcParams, HOLD_BLOCK_SUB_BLOCKS, MIN_ACTIVE_MS};
+use crate::bassclip::{BassClipperParams, BASS_CLIP_THRESHOLD_RANGE_DB};
+use crate::dynamics::expander::{
+    EXPANDER_FLOOR_RANGE_DB, EXPANDER_HOLD_RANGE_MS, EXPANDER_RATIO_RANGE,
+    EXPANDER_THRESHOLD_RANGE_DB,
+};
+use crate::dynamics::ExpanderParams;
 use crate::dynamics::OnePole;
 use crate::meter::{
     lufs_from_mean_square, ChannelLayout, History, LoudnessConfig, LoudnessDetector, LoudnessMeter,
@@ -181,6 +198,68 @@ pub const SILENCE_DB: f64 = -200.0;
 
 /// Number of crossover frequencies (`MAX_BANDS − 1`).
 pub const MAX_CROSSOVERS: usize = MAX_BANDS - 1;
+
+/// Lookahead of the bass clipper (ms): the multiband stage's latency.
+/// 3 ms gives the gain ramp more than a quarter period of 60 Hz while
+/// keeping the chain's latency budget.
+pub const BASS_LOOKAHEAD_MS: f32 = 3.0;
+/// Soft-knee width of every band's expander (dB).
+pub const EXPANDER_KNEE_DB: f32 = 6.0;
+/// Open time of every band's expander (ms): faster than a consonant onset.
+pub const EXPANDER_OPEN_MS: f32 = 3.0;
+/// Close time of every band's expander (ms): the slower release in the
+/// expansion region, a natural decay rather than a cut.
+pub const EXPANDER_CLOSE_MS: f32 = 150.0;
+
+/// The downward expander of one band (see [`crate::dynamics::expander`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BandExpanderParams {
+    /// Expander threshold (dB, −80 … 0), against the band's sine-calibrated
+    /// level like the band threshold.
+    pub threshold_db: f32,
+    /// Ratio (1 … 10; 1 = off).
+    pub ratio: f32,
+    /// Largest attenuation (dB, 0 … 40).
+    pub floor_db: f32,
+}
+
+impl Default for BandExpanderParams {
+    /// Off (ratio 1), threshold −45 dB, floor 6 dB.
+    fn default() -> Self {
+        Self {
+            threshold_db: -45.0,
+            ratio: 1.0,
+            floor_db: 6.0,
+        }
+    }
+}
+
+impl BandExpanderParams {
+    /// Copy clamped to the ranges (NaN becomes the default).
+    pub fn clamped(&self) -> Self {
+        let d = Self::default();
+        Self {
+            threshold_db: clamp_or(
+                self.threshold_db,
+                EXPANDER_THRESHOLD_RANGE_DB.0,
+                EXPANDER_THRESHOLD_RANGE_DB.1,
+                d.threshold_db,
+            ),
+            ratio: clamp_or(
+                self.ratio,
+                EXPANDER_RATIO_RANGE.0,
+                EXPANDER_RATIO_RANGE.1,
+                d.ratio,
+            ),
+            floor_db: clamp_or(
+                self.floor_db,
+                EXPANDER_FLOOR_RANGE_DB.0,
+                EXPANDER_FLOOR_RANGE_DB.1,
+                d.floor_db,
+            ),
+        }
+    }
+}
 
 /// All parameters of the chain (the element's properties, minus `preset` and
 /// `meter-interval`, which belong to the element).
@@ -230,6 +309,15 @@ pub struct BroadcastParams {
     pub limiter_release_ms: f32,
     /// Limiter lookahead (ms, 0.5 … 20). Structural (READY-only on the element).
     pub limiter_lookahead_ms: f32,
+    /// Per-band downward expander; band 0 is the lowest.
+    pub band_expanders: [BandExpanderParams; MAX_BANDS],
+    /// Hold of every band's expander before it closes (ms, 0 … 1000).
+    pub expander_hold_ms: f32,
+    /// Bass clipper on band 0 active (crossfaded; its latency stays).
+    pub bass_clipper_enabled: bool,
+    /// Bass clip threshold (dB, −40 … 0), against band 0's analytic envelope
+    /// (a steady sine reads its peak).
+    pub bass_clip_threshold_db: f32,
 }
 
 impl Default for BroadcastParams {
@@ -261,6 +349,10 @@ impl Default for BroadcastParams {
             limiter_enabled: true,
             limiter_release_ms: 100.0,
             limiter_lookahead_ms: 5.0,
+            band_expanders: [BandExpanderParams::default(); MAX_BANDS],
+            expander_hold_ms: 100.0,
+            bass_clipper_enabled: false,
+            bass_clip_threshold_db: -12.0,
         }
     }
 }
@@ -294,6 +386,12 @@ pub struct BroadcastMeters {
     pub band_gain_reduction_db: [f64; MAX_BANDS],
     /// Limiter gain reduction (positive dB).
     pub limiter_gain_reduction_db: f64,
+    /// Expander gain reduction per band (positive dB); only the first
+    /// `num_bands` are meaningful.
+    pub band_expander_gain_reduction_db: [f64; MAX_BANDS],
+    /// Bass-clipper gain reduction (positive dB), largest since the last
+    /// [`BroadcastProcessor::take_meters`].
+    pub bass_clip_gain_reduction_db: f64,
 }
 
 impl Default for BroadcastMeters {
@@ -310,6 +408,8 @@ impl Default for BroadcastMeters {
             agc_gain_db: 0.0,
             band_gain_reduction_db: [0.0; MAX_BANDS],
             limiter_gain_reduction_db: 0.0,
+            band_expander_gain_reduction_db: [0.0; MAX_BANDS],
+            bass_clip_gain_reduction_db: 0.0,
         }
     }
 }
@@ -379,6 +479,20 @@ impl BroadcastParams {
                 d.limiter_release_ms,
             ),
             limiter_lookahead_ms: clamp_lookahead(self.limiter_lookahead_ms),
+            band_expanders: core::array::from_fn(|k| self.band_expanders[k].clamped()),
+            expander_hold_ms: clamp_or(
+                self.expander_hold_ms,
+                EXPANDER_HOLD_RANGE_MS.0,
+                EXPANDER_HOLD_RANGE_MS.1,
+                d.expander_hold_ms,
+            ),
+            bass_clipper_enabled: self.bass_clipper_enabled,
+            bass_clip_threshold_db: clamp_or(
+                self.bass_clip_threshold_db,
+                BASS_CLIP_THRESHOLD_RANGE_DB.0,
+                BASS_CLIP_THRESHOLD_RANGE_DB.1,
+                d.bass_clip_threshold_db,
+            ),
         }
     }
 }
@@ -934,6 +1048,20 @@ impl BroadcastProcessor {
             bands: p.bands,
             ..MultibandParams::default()
         });
+        self.multiband
+            .set_expanders(&core::array::from_fn(|k| ExpanderParams {
+                threshold_db: p.band_expanders[k].threshold_db,
+                ratio: p.band_expanders[k].ratio,
+                floor_db: p.band_expanders[k].floor_db,
+                knee_db: EXPANDER_KNEE_DB,
+                open_ms: EXPANDER_OPEN_MS,
+                close_ms: EXPANDER_CLOSE_MS,
+                hold_ms: p.expander_hold_ms,
+            }));
+        self.multiband.set_bass_clipper(&BassClipperParams {
+            enabled: p.bass_clipper_enabled,
+            threshold_db: p.bass_clip_threshold_db,
+        });
         self.limiter.set_params(&p, self.active_lookahead_ms);
         self.spike_fade.set(p.spike_guard_enabled, snap);
         self.agc_fade.set(p.agc_enabled, snap);
@@ -956,8 +1084,13 @@ impl BroadcastProcessor {
         let on = self.params.enabled;
         let input = &self.input_detector;
         let mut band_gain_reduction_db = [0.0; MAX_BANDS];
+        let mut band_expander_gain_reduction_db = [0.0; MAX_BANDS];
+        let mut bass_clip_gain_reduction_db = self.multiband.take_bass_clip_gain_reduction_db();
         if on && self.params.multiband_enabled {
             band_gain_reduction_db = self.multiband.gain_reduction_db();
+            band_expander_gain_reduction_db = self.multiband.expander_reduction_db();
+        } else {
+            bass_clip_gain_reduction_db = 0.0;
         }
         let m = BroadcastMeters {
             input_momentary_lufs: or_silence(input.momentary_lufs()),
@@ -987,6 +1120,8 @@ impl BroadcastProcessor {
             } else {
                 0.0
             },
+            band_expander_gain_reduction_db,
+            bass_clip_gain_reduction_db,
         };
         self.input_peak = 0.0;
         self.output_peak = 0.0;
@@ -1017,12 +1152,14 @@ impl BroadcastProcessor {
     }
 
     /// Total latency in frames for the structural fields of `p` (spike
-    /// guard and limiter lookaheads). Usable before `configure`.
+    /// guard and limiter lookaheads; the bass clipper's lookahead is fixed).
+    /// Usable before `configure`.
     pub fn latency_frames_for_params(sample_rate: f32, p: &BroadcastParams) -> usize {
         SpikeStage::latency_frames_for(
             sample_rate,
             spike_guard::clamp_lookahead_ms(p.spike_guard_lookahead_ms),
         ) + AgcStage::latency_frames_for(sample_rate)
+            + MultibandCompressor::bass_lookahead_frames(BASS_LOOKAHEAD_MS, sample_rate)
             + LimiterStage::latency_frames_for(sample_rate, clamp_lookahead(p.limiter_lookahead_ms))
     }
 
@@ -1140,6 +1277,7 @@ impl Processor for BroadcastProcessor {
             .configure(sample_rate, channels, self.active_spike_lookahead_ms);
         self.agc.configure(sample_rate, channels);
         self.trim.allocate();
+        self.multiband.set_bass_lookahead_ms(BASS_LOOKAHEAD_MS);
         self.multiband.configure(sample_rate, channels);
         self.limiter.configure(sample_rate, channels);
         // Apply the parameters (structural values included) before sizing
@@ -1147,12 +1285,13 @@ impl Processor for BroadcastProcessor {
         self.set_params(&p);
         let spike_latency = self.spike.inner.latency_frames();
         let agc_latency = AgcStage::latency_frames_for(sample_rate);
+        let multiband_latency = self.multiband.latency_frames();
         let limiter_latency = self.limiter.latency_frames();
-        let total = spike_latency + agc_latency + limiter_latency;
+        let total = spike_latency + agc_latency + multiband_latency + limiter_latency;
         debug_assert_eq!(total, self.latency_frames());
         self.spike_delay.allocate(spike_latency, channels);
         self.agc_delay.allocate(agc_latency, channels);
-        self.multiband_delay.allocate(0, channels);
+        self.multiband_delay.allocate(multiband_latency, channels);
         self.limiter_delay.allocate(limiter_latency, channels);
         self.chain_delay.allocate(total, channels);
 

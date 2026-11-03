@@ -597,6 +597,52 @@ fn cases() -> Vec<Case> {
         &[("crossover-frequencies", "<20.0, 21.0, 22.0, 23.0>")],
     ));
     v.push(case(b, &[], &[("meter-interval", "0")]));
+    // Expander: a quiet tone (band 2 near −45 dB, below the AGC gate so the
+    // AGC holds) that the expander starts, deepens and stops attenuating.
+    let quiet = |c: Case| c.tone(1000.0, 0.0015);
+    v.push(quiet(case(b, &[], &[("band2-expander-threshold", "0")])));
+    v.push(quiet(case(
+        b,
+        &[("band2-expander-threshold", "0")],
+        &[("band2-expander-floor", "40")],
+    )));
+    v.push(quiet(case(
+        b,
+        &[
+            ("band2-expander-threshold", "0"),
+            ("band2-expander-floor", "40"),
+        ],
+        &[("band2-expander-ratio", "1")],
+    )));
+    v.push(quiet(case(
+        b,
+        &[
+            ("band2-expander-threshold", "0"),
+            ("band2-expander-floor", "40"),
+        ],
+        &[("band2-expander-threshold", "-80")],
+    )));
+    v.push(quiet(case(
+        b,
+        &[("band2-expander-threshold", "0")],
+        &[("band2-expander-ratio", "10")],
+    )));
+    v.push(quiet(case(b, &[], &[("expander-hold", "0")])));
+    // Bass clipper: a loud 60 Hz tone in band 0, clipped at −14 dB.
+    let bass = |c: Case| c.tone(60.0, 0.25);
+    v.push(bass(case(b, &[], &[("bass-clip-threshold", "-40")])));
+    v.push(bass(case(b, &[], &[("bass-clip-threshold", "0")])));
+    v.push(bass(case(
+        b,
+        &[("bass-clip-threshold", "-40")],
+        &[("bass-clip-threshold", "0")],
+    )));
+    v.push(bass(case(b, &[], &[("bass-clipper-enabled", "false")])));
+    v.push(bass(case(
+        b,
+        &[("bass-clipper-enabled", "false")],
+        &[("bass-clipper-enabled", "true")],
+    )));
 
     v
 }

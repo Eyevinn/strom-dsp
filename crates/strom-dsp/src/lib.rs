@@ -9,8 +9,9 @@
 //! - [`Limiter`]: lookahead sample-peak limiter.
 //!
 //! Further processors live in their modules: [`deesser`], [`ducker`],
-//! [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`],
-//! [`truepeak`] (true-peak limiter), [`spike_guard`] and [`broadcast`] (the broadcast chain,
+//! [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`] (with its
+//! [`bassclip`]), [`truepeak`] (true-peak limiter), [`spike_guard`] and
+//! [`broadcast`] (the broadcast chain,
 //! with its [`presets`]). Measurement is in [`meter`]; the building blocks
 //! ([`biquad`], [`filter`], [`oversample`], [`resample`], [`stft`],
 //! [`dynamics`]) are public too.
@@ -30,6 +31,7 @@
 #![warn(missing_docs)]
 
 pub mod agc;
+pub mod bassclip;
 pub mod biquad;
 pub mod broadcast;
 pub mod cleanup;

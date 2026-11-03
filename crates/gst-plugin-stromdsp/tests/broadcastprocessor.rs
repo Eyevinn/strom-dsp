@@ -114,6 +114,10 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "agc-rate-down" => f(6.0),
         "agc-gate" => f(gate),
         "limiter-release" => f(lim_release),
+        // Expander and bass clipper: see the second preset table.
+        "expander-hold" => f(100.0),
+        "bass-clipper-enabled" => true.to_value(),
+        "bass-clip-threshold" => f(target + 9.0),
         _ => {
             if let Some(k) = name
                 .strip_prefix("crossover")
@@ -132,6 +136,12 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
                 "attack" => f(table_times(n)[k].0),
                 "release" => f(table_times(n)[k].1),
                 "makeup" => f(0.0),
+                "expander-threshold" if nick == "speech" => f(target - 22.0),
+                "expander-threshold" => f(target - 24.0),
+                "expander-ratio" if nick == "speech" => f(2.0),
+                "expander-ratio" => f(1.5),
+                "expander-floor" if nick == "speech" => f(6.0),
+                "expander-floor" => f(4.0),
                 _ => panic!("undocumented {name}"),
             }
         }
@@ -273,6 +283,9 @@ fn library_value(p: &BroadcastParams, name: &str) -> glib::Value {
         "multiband-drive" => p.multiband_drive_db.to_value(),
         "limiter-enabled" => p.limiter_enabled.to_value(),
         "limiter-release" => p.limiter_release_ms.to_value(),
+        "expander-hold" => p.expander_hold_ms.to_value(),
+        "bass-clipper-enabled" => p.bass_clipper_enabled.to_value(),
+        "bass-clip-threshold" => p.bass_clip_threshold_db.to_value(),
         _ => {
             if let Some(k) = name
                 .strip_prefix("crossover")
@@ -284,13 +297,18 @@ fn library_value(p: &BroadcastParams, name: &str) -> glib::Value {
                 .strip_prefix("band")
                 .and_then(|r| r.split_once('-'))
                 .unwrap_or_else(|| panic!("unknown {name}"));
-            let b = &p.bands[k.parse::<usize>().unwrap()];
+            let k = k.parse::<usize>().unwrap();
+            let b = &p.bands[k];
+            let e = &p.band_expanders[k];
             match field {
                 "threshold" => b.threshold_db.to_value(),
                 "ratio" => b.ratio.to_value(),
                 "attack" => b.attack_ms.to_value(),
                 "release" => b.release_ms.to_value(),
                 "makeup" => b.makeup_db.to_value(),
+                "expander-threshold" => e.threshold_db.to_value(),
+                "expander-ratio" => e.ratio.to_value(),
+                "expander-floor" => e.floor_db.to_value(),
                 _ => panic!("unknown {name}"),
             }
         }
@@ -963,7 +981,7 @@ fn reference_meters(
     out
 }
 
-const FIELDS: [&str; 13] = [
+const FIELDS: [&str; 15] = [
     "running-time",
     "stream-time",
     "input-momentary",
@@ -977,6 +995,8 @@ const FIELDS: [&str; 13] = [
     "agc-gain",
     "band-gain-reduction",
     "limiter-gain-reduction",
+    "band-expander-gain-reduction",
+    "bass-clip-gr",
 ];
 
 fn clean(x: f64) -> f64 {
@@ -1040,6 +1060,25 @@ fn check_message(r: &Received, m: &BroadcastMeters, num_bands: usize) {
             "{ctx}: band {k}"
         );
     }
+    let exp = s.get::<gst::Array>("band-expander-gain-reduction").unwrap();
+    assert_eq!(
+        exp.len(),
+        num_bands,
+        "{ctx}: one expander value per active band"
+    );
+    for (k, v) in exp.iter().enumerate() {
+        let v = v.get::<f64>().expect("gdouble entries");
+        assert!(v >= 0.0 && v.is_finite(), "{ctx}: expander {k} = {v}");
+        assert!(
+            (v - m.band_expander_gain_reduction_db[k].max(0.0)).abs() < 1e-9,
+            "{ctx}: expander {k}"
+        );
+    }
+    let bass = s.get::<f64>("bass-clip-gr").unwrap();
+    assert!(
+        bass >= 0.0 && (bass - m.bass_clip_gain_reduction_db.max(0.0)).abs() < 1e-9,
+        "{ctx}: bass-clip-gr {bass}"
+    );
 }
 
 #[test]

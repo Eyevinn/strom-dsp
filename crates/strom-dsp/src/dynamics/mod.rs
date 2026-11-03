@@ -15,6 +15,7 @@
 //! | [`PeakEnvelope`] | peak follower: instant attack, exponential release |
 //! | [`MeanSquareEnvelope`] | one-pole mean-square (RMS) average, sine-calibrated power |
 //! | [`GainComputer`] | static compressor curve with quadratic soft knee (dB in, dB out) |
+//! | [`ExpanderCurve`], [`ExpanderStage`] | downward expander below a threshold: static curve with soft knee and floor, hold, open/close smoothing |
 //! | [`GateStateMachine`] | open/close hysteresis with hold counter |
 //! | [`KeyDetector`] | sidechain front end: optional key filter (HPF/BPF) + linked key peak |
 //! | [`DelayLine`] | multichannel interleaved ring buffer with frame taps |
@@ -29,6 +30,7 @@
 //! ([`one_pole_coef`](crate::util::one_pole_coef)), and the step response covers
 //! `1 − 1/e` (≈ 63.2 %) of the step after `τ`.
 
+pub mod expander;
 pub mod frame;
 mod gain_computer;
 mod gate_state;
@@ -38,6 +40,7 @@ mod ring;
 mod smoother;
 pub(crate) mod vmath;
 
+pub use expander::{ExpanderCurve, ExpanderParams, ExpanderStage};
 pub use gain_computer::{GainComputer, MIN_KNEE};
 pub use gate_state::GateStateMachine;
 pub use key::{KeyDetector, KeyFilter, KEY_FILTER_MAX_HZ, KEY_FILTER_MIN_HZ, KEY_FILTER_Q_RANGE};

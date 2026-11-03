@@ -2,11 +2,16 @@
 //! at 120 / 800 / 4000 Hz, default band settings), 48 kHz stereo,
 //! 480-frame (10 ms) buffers. Throughput is in frames, so the share of one
 //! core is `48 000 frames/s ÷ measured frames/s`.
+//!
+//! A second case adds a downward expander on every band and the bass
+//! clipper on band 0 (3 ms lookahead), as the broadcast processor uses them.
 use std::f64::consts::PI;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use strom_dsp::multiband::{MultibandCompressor, MultibandParams};
+use strom_dsp::bassclip::BassClipperParams;
+use strom_dsp::dynamics::ExpanderParams;
+use strom_dsp::multiband::{MultibandCompressor, MultibandParams, MAX_BANDS};
 use strom_dsp::Processor;
 
 const FS: f32 = 48_000.0;
@@ -52,6 +57,37 @@ fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("multiband");
     group.throughput(Throughput::Elements(FRAMES as u64));
     group.bench_function("4_bands_48k_stereo_480", |b| {
+        b.iter(|| {
+            let len = buf.len();
+            if pos + len > src.len() {
+                pos = 0;
+            }
+            buf.copy_from_slice(&src[pos..pos + len]);
+            pos += len;
+            m.process(black_box(&mut buf));
+            black_box(&buf);
+        })
+    });
+    let mut m = MultibandCompressor::new();
+    m.set_params(&MultibandParams {
+        num_bands: 4,
+        ..MultibandParams::default()
+    });
+    m.set_expanders(
+        &[ExpanderParams {
+            threshold_db: -30.0,
+            ratio: 2.0,
+            floor_db: 6.0,
+            ..ExpanderParams::default()
+        }; MAX_BANDS],
+    );
+    m.set_bass_lookahead_ms(3.0);
+    m.set_bass_clipper(&BassClipperParams {
+        enabled: true,
+        threshold_db: -14.0,
+    });
+    m.configure(FS, 2);
+    group.bench_function("4_bands_expander_bass_clipper_48k_stereo_480", |b| {
         b.iter(|| {
             let len = buf.len();
             if pos + len > src.len() {
