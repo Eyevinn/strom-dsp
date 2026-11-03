@@ -17,7 +17,7 @@ use std::f64::consts::PI;
 
 use strom_dsp::meter::{
     ChannelLayout, ChannelRole, CorrelationMeter, LoudnessConfig, LoudnessMeter, MeterError,
-    MAX_LOUDNESS_CHANNELS,
+    MonoDetector, MonoDetectorParams, StereoState, MAX_LOUDNESS_CHANNELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -831,4 +831,180 @@ fn correlation_integration_time_and_side_mid_ratio() {
         1e-6,
     );
     assert_near("r", m.correlation(), 1.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Mono detector.
+
+/// Drive a detector frame by frame (in 480-frame blocks) and record every
+/// state change (frame index, new state).
+fn run_detector(
+    d: &mut MonoDetector,
+    frames: usize,
+    mut gen: impl FnMut(usize) -> (f32, f32),
+) -> Vec<(usize, StereoState)> {
+    let mut changes = Vec::new();
+    let mut buf = vec![0.0f32; 2 * BLOCK];
+    let mut last = d.state();
+    let mut n = 0;
+    while n < frames {
+        for f in buf.chunks_exact_mut(2) {
+            let (l, r) = gen(n);
+            f[0] = l;
+            f[1] = r;
+            n += 1;
+        }
+        d.process_interleaved(&buf, 2);
+        if d.state() != last {
+            last = d.state();
+            changes.push((n, last));
+        }
+    }
+    changes
+}
+
+#[test]
+fn mono_detector_classifies_mono_stereo_inverted() {
+    let p = MonoDetectorParams::default();
+    let mut d = MonoDetector::new(FS as f32, &p);
+    assert_eq!(d.state(), StereoState::Stereo);
+    let mut noise = Noise(3);
+    let mut noise2 = Noise(4);
+
+    // 2 s mono: switches once, after at least the hold time.
+    let ch = run_detector(&mut d, 96_000, |_| {
+        let v = noise.next() * 0.3;
+        (v, v)
+    });
+    assert_eq!(ch.len(), 1);
+    assert_eq!(ch[0].1, StereoState::Mono);
+    assert!(ch[0].0 as f64 >= p.hold_ms as f64 * 0.001 * FS);
+
+    // Silence afterwards: frozen.
+    assert!(run_detector(&mut d, 96_000, |_| (0.0, 0.0)).is_empty());
+    assert_eq!(d.state(), StereoState::Mono);
+
+    // Inverted.
+    let ch = run_detector(&mut d, 96_000, |_| {
+        let v = noise.next() * 0.3;
+        (v, -v)
+    });
+    assert_eq!(ch.last().map(|c| c.1), Some(StereoState::Inverted));
+    assert!(ch.len() <= 2, "{ch:?}");
+
+    // Independent noise: stereo.
+    let ch = run_detector(&mut d, 96_000, |_| {
+        (noise.next() * 0.3, noise2.next() * 0.3)
+    });
+    assert_eq!(ch.last().map(|c| c.1), Some(StereoState::Stereo));
+    assert_eq!(ch.len(), 1);
+
+    // A mono source panned off-centre (L = 2R) is not "mono".
+    let ch = run_detector(&mut d, 96_000, |_| {
+        let v = noise.next() * 0.3;
+        (v, 0.5 * v)
+    });
+    assert!(ch.is_empty());
+
+    d.reset();
+    assert_eq!(d.state(), StereoState::Stereo);
+}
+
+/// Mono content plus independent noise in each channel, with the noise level
+/// chosen so that ⟨S²⟩/⟨M²⟩ follows `ratio_db(t)` (σn² = 2ρσx²/(1−ρ)).
+fn near_threshold(ratio_db: impl Fn(f64) -> f64, polarity: f32) -> impl FnMut(usize) -> (f32, f32) {
+    let mut a = Noise(11);
+    let mut b = Noise(12);
+    let mut c = Noise(13);
+    move |n| {
+        let rho = 10f64.powf(ratio_db(n as f64 / FS) / 10.0);
+        let g = (2.0 * rho / (1.0 - rho)).sqrt() as f32;
+        let x = a.next() * 0.3;
+        (x + g * 0.3 * b.next(), polarity * (x + g * 0.3 * c.next()))
+    }
+}
+
+#[test]
+fn mono_detector_does_not_flap_near_thresholds() {
+    let p = MonoDetectorParams::default();
+    for polarity in [1.0f32, -1.0] {
+        let want = if polarity > 0.0 {
+            StereoState::Mono
+        } else {
+            StereoState::Inverted
+        };
+        // Hovering around the enter threshold (−25 dB ± 3 dB, 1.5 s period)
+        // with estimation noise on top: enters once, never leaves.
+        let mut d = MonoDetector::new(FS as f32, &p);
+        let ch = run_detector(
+            &mut d,
+            (30.0 * FS) as usize,
+            near_threshold(|t| -25.0 + 3.0 * (2.0 * PI * t / 1.5).sin(), polarity),
+        );
+        assert_eq!(ch.len(), 1, "enter threshold, {want:?}: {ch:?}");
+        assert_eq!(ch[0].1, want);
+
+        // Hovering around the exit threshold (−15 dB ± 3 dB) from stereo:
+        // never enters.
+        let mut d = MonoDetector::new(FS as f32, &p);
+        let ch = run_detector(
+            &mut d,
+            (30.0 * FS) as usize,
+            near_threshold(|t| -15.0 + 3.0 * (2.0 * PI * t / 1.5).sin(), polarity),
+        );
+        assert!(
+            ch.is_empty(),
+            "exit threshold from stereo, {want:?}: {ch:?}"
+        );
+
+        // Once in the state, hovering around the exit threshold flips at most
+        // a couple of times (the hold time suppresses the 1.5 s wobble),
+        // never every half period.
+        let mut d = MonoDetector::new(FS as f32, &p);
+        let ch = run_detector(
+            &mut d,
+            (30.0 * FS) as usize,
+            near_threshold(
+                |t| {
+                    if t < 3.0 {
+                        -40.0
+                    } else {
+                        -15.0 + 1.0 * (2.0 * PI * t / 0.4).sin()
+                    }
+                },
+                polarity,
+            ),
+        );
+        assert!(ch.len() <= 2, "exit threshold from {want:?}: {ch:?}");
+    }
+}
+
+#[test]
+fn correlation_and_detector_never_allocate() {
+    let mut m = CorrelationMeter::new(FS as f32, 300.0);
+    let mut d = MonoDetector::new(FS as f32, &MonoDetectorParams::default());
+    let mut noise = Noise(5);
+    let sig: Vec<f32> = (0..2 * 4096).map(|_| noise.next()).collect();
+    let (l, r): (Vec<f32>, Vec<f32>) = sig.chunks_exact(2).map(|f| (f[0], f[1])).unzip();
+    let before = alloc_count();
+    let mut sink = 0.0;
+    for i in 0..500 {
+        let n = [1usize, 480, 7, 4096][i % 4];
+        m.process_interleaved(&sig[..2 * n], 2);
+        m.process_pair(&l[..n], &r[..n]);
+        m.set_integration_ms(10.0 + i as f32);
+        d.process_interleaved(&sig[..2 * n], 2);
+        d.process_pair(&l[..n], &l[..n]);
+        d.set_params(&MonoDetectorParams {
+            hold_ms: (i % 50) as f32 * 10.0,
+            ..MonoDetectorParams::default()
+        });
+        sink += m.correlation() + m.side_mid_ratio_db() + d.meter().correlation();
+        if i % 97 == 0 {
+            m.reset();
+            d.reset();
+        }
+    }
+    assert_eq!(alloc_count() - before, 0);
+    assert!(sink.is_finite());
 }

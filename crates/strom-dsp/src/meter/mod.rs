@@ -7,8 +7,8 @@
 //!   [`ChannelRole`]s.
 //! - [`CorrelationMeter`]: phase correlation of any L/R pair (−1 … +1) with a
 //!   configurable integration time, plus the side/mid energy ratio.
-//! - `MonoDetector`: classifies a stereo pair as `StereoState::Mono`,
-//!   `StereoState::Stereo` or `StereoState::Inverted`, with hysteresis.
+//! - [`MonoDetector`]: classifies a stereo pair as [`StereoState::Mono`],
+//!   [`StereoState::Stereo`] or [`StereoState::Inverted`], with hysteresis.
 //!
 //! Meters never modify the audio: their `process` methods take `&[f32]`.
 //! Every `process`/`push`/reading method is real-time safe after construction
@@ -24,9 +24,11 @@
 
 mod correlation;
 mod loudness;
+mod mono;
 
 pub use correlation::{CorrelationMeter, DEFAULT_CORRELATION_MS};
 pub use loudness::{
     ChannelLayout, ChannelRole, LoudnessConfig, LoudnessMeter, LoudnessReading, MeterError,
     MAX_LOUDNESS_CHANNELS,
 };
+pub use mono::{MonoDetector, MonoDetectorParams, StereoState};
