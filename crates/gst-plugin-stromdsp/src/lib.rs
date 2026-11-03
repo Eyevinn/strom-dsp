@@ -10,10 +10,12 @@
 use gst::glib;
 
 mod common;
+pub mod compressor;
 pub mod gate;
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gate::register(plugin)?;
+    compressor::register(plugin)?;
     Ok(())
 }
 
