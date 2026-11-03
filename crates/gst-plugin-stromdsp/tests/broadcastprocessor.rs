@@ -101,9 +101,13 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
         "agc-enabled" | "multiband-enabled" | "limiter-enabled" => true.to_value(),
-        "agc-max-gain" | "agc-max-cut" => f(12.0),
-        "agc-rate-up" => f(1.0),
-        "agc-rate-down" => f(3.0),
+        // ebu-r128 keeps the spec §3.1 defaults; the others are wider/faster.
+        "agc-max-gain" | "agc-max-cut" if nick == "ebu-r128" => f(12.0),
+        "agc-max-gain" | "agc-max-cut" => f(24.0),
+        "agc-rate-up" if nick == "ebu-r128" => f(1.0),
+        "agc-rate-up" => f(3.0),
+        "agc-rate-down" if nick == "ebu-r128" => f(3.0),
+        "agc-rate-down" => f(6.0),
         "agc-gate" => f(gate),
         "limiter-release" => f(lim_release),
         _ => {

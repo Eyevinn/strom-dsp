@@ -146,8 +146,6 @@ impl LimiterParams {
 /// |---|---|---|
 /// | `input_gain_db` | 0 dB | the AGC does the levelling; the input is not touched |
 /// | `agc_enabled` | true | the AGC is what makes the output land on the target |
-/// | `agc_max_gain_db` / `agc_max_cut_db` | 12 / 12 dB | covers programme delivered anywhere between −35 and −11 LUFS for a −23 LUFS target, without lifting near-silence by more than 12 dB |
-/// | `agc_rate_up_db_s` / `agc_rate_down_db_s` | 1 / 3 dB/s | slow enough to be a "fader", not a compressor (well below the syllable rate); cutting faster than boosting, so a sudden loud item is brought down within a few seconds while a quiet one is raised gently |
 /// | `multiband_enabled` | true | |
 /// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
 /// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
@@ -156,17 +154,31 @@ impl LimiterParams {
 ///
 /// # Values per preset
 ///
-/// | Preset | target | ceiling | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` |
-/// |---|---|---|---|---|---|---|
-/// | `EbuR128` | −23 LUFS | −1 dBTP | −50 | −18 dB | 2 | 200 |
-/// | `AtscA85` | −24 LKFS | −2 dBTP | −50 | −19 dB | 2 | 200 |
-/// | `Streaming` | −16 LUFS | −1 dBTP | −50 | −11 dB | 2 | 200 |
-/// | `Speech` | −18 LUFS | −1 dBTP | −40 | −11 dB | 1.5 | 150 |
+/// | Preset | target | ceiling | AGC max gain / cut | AGC rate up / down | `agc_gate_lufs` | band threshold | band ratio | `limiter_release_ms` |
+/// |---|---|---|---|---|---|---|---|---|
+/// | `EbuR128` | −23 LUFS | −1 dBTP | 12 / 12 dB | 1 / 3 dB/s | −50 | −18 dB | 2 | 200 |
+/// | `AtscA85` | −24 LKFS | −2 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −19 dB | 2 | 200 |
+/// | `Streaming` | −16 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −50 | −11 dB | 2 | 200 |
+/// | `Speech` | −18 LUFS | −1 dBTP | 24 / 24 dB | 3 / 6 dB/s | −40 | −11 dB | 1.5 | 150 |
 ///
 /// - **Target and ceiling** are those of the standard: EBU R 128 (−23 LUFS,
 ///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
 ///   TD1008 range for streaming (−16 LUFS, −1 dBTP) and the phase 2 spec's
 ///   speech target (−18 LUFS, −1 dBTP).
+/// - **AGC range and rates.** `EbuR128` is the element's default, so it
+///   keeps the phase 2 spec §3.1 defaults: ±12 dB covers programme delivered
+///   between −35 and −11 LUFS for its −23 LUFS target, and 1 dB/s up,
+///   3 dB/s down is a slow "fader", not a compressor (well below the
+///   syllable rate), cutting faster than boosting so a sudden loud item comes
+///   down within seconds while a quiet one rises gently. The other presets
+///   sit further from typical delivery levels (streaming −16 LUFS is 7 LU
+///   above broadcast-level input; ATSC A/85 needs more than 12 dB of cut
+///   for −10 LUFS input), so they get ±24 dB and 3 / 6 dB/s: still a slow
+///   rider (a 12 dB correction takes 2 … 4 s), fast enough to land within
+///   the first 10 s of a programme at −35 … −10 LUFS input. All four pass
+///   the phase 2 spec §4 chain acceptance test (60 s programme at −35, −23
+///   and −10 LUFS input, integrated within ±1 LU of the target after 10 s;
+///   `tests/broadcast.rs`).
 /// - **AGC gate** −50 LUFS for programme: room tone and pauses sit below it,
 ///   while even quiet programme material delivered 12 LU under target
 ///   (−35 LUFS) stays well above it. **Speech: −40 LUFS** (the "faster AGC
@@ -252,6 +264,15 @@ impl BroadcastPreset {
 
     /// (target LUFS, ceiling dBTP, AGC gate LUFS, band threshold offset dB
     /// re target, band ratio, limiter release ms). See the type docs.
+    /// (agc max gain dB, agc max cut dB, rate up dB/s, rate down dB/s).
+    /// See the type docs.
+    fn agc_range(self) -> (f32, f32, f32, f32) {
+        match self {
+            Self::EbuR128 => (12.0, 12.0, 1.0, 3.0),
+            Self::AtscA85 | Self::Streaming | Self::Speech => (24.0, 24.0, 3.0, 6.0),
+        }
+    }
+
     fn row(self) -> (f32, f32, f32, f32, f32, f32) {
         match self {
             Self::EbuR128 => (-23.0, -1.0, -50.0, 5.0, 2.0, 200.0),
@@ -323,10 +344,11 @@ impl BroadcastParams {
         self.target_loudness_lufs = target;
         self.true_peak_ceiling_dbtp = ceiling;
         self.agc_enabled = true;
-        self.agc_max_gain_db = 12.0;
-        self.agc_max_cut_db = 12.0;
-        self.agc_rate_up_db_s = 1.0;
-        self.agc_rate_down_db_s = 3.0;
+        let (max_gain, max_cut, rate_up, rate_down) = preset.agc_range();
+        self.agc_max_gain_db = max_gain;
+        self.agc_max_cut_db = max_cut;
+        self.agc_rate_up_db_s = rate_up;
+        self.agc_rate_down_db_s = rate_down;
         self.agc_gate_lufs = gate;
         self.multiband_enabled = true;
         self.multiband_drive_db = 0.0;
