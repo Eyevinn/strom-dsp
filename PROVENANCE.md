@@ -302,6 +302,44 @@ basics from J. O. Smith III. No code listing was used.
     frames later.
   - **Guard test:** `tests/limiter_thd.rs`.
 
+### Loudness detector (`src/meter/kweighting.rs`, phase 2)
+
+- **K-weighting:** follows ITU-R BS.1770-4/-5 Annex 1 §2.1, i.e. the
+  pre-filter and RLB stages, with coefficients from tables 1 and 2 at 48 kHz.
+- **Other sample rates:** an analog second-order prototype is recovered from
+  the 48 kHz tables by inverting the pre-warped bilinear transform. It is then
+  transformed again at the target rate (Oppenheim & Schafer; J. O. Smith III).
+  - The closed-form inverse is our own derivation.
+  - At 48 kHz it reproduces the tables to < 1e-12.
+  - Up to 16 kHz, the response deviates from the 48 kHz response by ≤ 0.008 dB
+    at 44.1–192 kHz.
+- **Loudness:** BS.1770 eq. 2 (−0.691 offset, channel weights G). The
+  momentary (400 ms) and short-term (3 s) windows follow EBU Tech 3341.
+- **Running sums (own design):** 10 ms sub-block running sums, with periodic
+  exact re-summation and re-summation triggered by a rounding-error bound.
+  Readings are O(1).
+- **Verification:** against the `ebur128` crate in tests only, within
+  0.022 LU on noise.
+- **Why not `meter::LoudnessMeter`:** fed and read every block, it costs about
+  231 µs (2.3 % of a core). This detector costs about 1.3 µs.
+
+### Wideband AGC (`src/agc.rs`, phase 2)
+
+A feed-forward loudness rider, per phase 2 spec §2.3.
+- **Target gain:** `clamp(target − measured, −max_cut, +max_gain)`, updated
+  every 10 ms. The applied gain ramps linearly in dB at separate up and down
+  rates and stops exactly at the target, so it never overshoots.
+- **Measurement:** BS.1770-4 Annex 1 §5.1 absolute gating on 400 ms blocks,
+  with the AGC gate as the threshold.
+- **Own choices:**
+  - Freeze when the newest 100 ms is below the gate, or when there is less
+    than 400 ms of gated programme.
+  - A documented convergence bound.
+- **Tests:**
+  - Pink noise from −40 to −6 LUFS converges to target ±1 dB within the bound.
+  - 10 s pauses move the gain by ≤ 0.1 dB, with no overshoot afterwards.
+- No commercial processor material was used.
+
 ### Multiband compressor (`src/multiband.rs`, phase 2)
 
 This is our own composition of existing parts, not a new algorithm. The
