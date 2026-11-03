@@ -55,7 +55,7 @@ fn compressor_1b_is_realtime_safe() {
             let block = &mut buf[..len];
             let _rt = ScopedSanitizeRealtime::default();
             block.copy_from_slice(&input[pos..pos + len]);
-            c.set_detector(if i % 3 == 0 {
+            c.set_detector(if i.is_multiple_of(3) {
                 CompressorDetector::Rms
             } else {
                 CompressorDetector::Peak
@@ -70,7 +70,7 @@ fn compressor_1b_is_realtime_safe() {
                 makeup_gain: rng.range(0.0, 100.0),
                 knee: rng.range(0.0, 1.0),
             });
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 c.process(block);
             } else {
                 c.process_with_key(block, &key[pos..pos + len], ch);

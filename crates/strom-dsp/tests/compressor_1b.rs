@@ -243,11 +243,11 @@ fn detector_switch_on_sine_is_continuous() {
     c.configure(FS, 1);
     let amp = 0.5;
     let input = sine_1k(amp, ms(2000.0));
-    let mut prev_red = None;
+    let mut prev_red: Option<f64> = None;
     let mut max_step: f64 = 0.0;
     for (k, chunk) in input.chunks(ms(100.0)).enumerate() {
         if k > 2 {
-            c.set_detector(if k % 2 == 0 {
+            c.set_detector(if k.is_multiple_of(2) {
                 CompressorDetector::Peak
             } else {
                 CompressorDetector::Rms
@@ -258,7 +258,7 @@ fn detector_switch_on_sine_is_continuous() {
             let r = c.gain_reduction_db();
             if let Some(pr) = prev_red {
                 if k > 2 {
-                    max_step = max_step.max((r - pr as f64).abs());
+                    max_step = max_step.max((r - pr).abs());
                 }
             }
             prev_red = Some(r);
@@ -277,14 +277,14 @@ fn no_allocation_in_new_setters_and_process() {
         .map(|i| ((i as f32) * 0.37).sin() * 0.8)
         .collect();
     let before = alloc_count();
-    for i in 0..60 {
-        c.set_detector(if i % 3 == 0 {
+    for i in 0..60usize {
+        c.set_detector(if i.is_multiple_of(3) {
             CompressorDetector::Rms
         } else {
             CompressorDetector::Peak
         });
         c.set_rms_window(1.0 + i as f32);
-        c.set_auto_makeup(i % 2 == 0);
+        c.set_auto_makeup(i.is_multiple_of(2));
         c.set_params(&CompressorParams {
             threshold: 0.1,
             ratio: 4.0,

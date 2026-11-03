@@ -215,10 +215,10 @@ fn auto_makeup_changes_glide() {
     ];
     c.set_params(&sets[0]);
     c.process(&mut vec![level; 4800]);
-    let mut prev = None;
+    let mut prev: Option<f64> = None;
     let mut max_step: f64 = 0.0;
-    for k in 0..12 {
-        if k % 3 == 0 {
+    for k in 0..12usize {
+        if k.is_multiple_of(3) {
             c.set_auto_makeup(!c.auto_makeup());
         } else {
             c.set_params(&sets[k % 2]);
@@ -228,7 +228,7 @@ fn auto_makeup_changes_glide() {
         for o in buf {
             let g = lin_to_db(o as f64 / level as f64);
             if let Some(p) = prev {
-                max_step = max_step.max((g - p as f64).abs());
+                max_step = max_step.max((g - p).abs());
             }
             prev = Some(g);
         }

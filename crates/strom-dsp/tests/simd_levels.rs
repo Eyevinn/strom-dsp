@@ -197,7 +197,7 @@ fn compressor_detector_modes_are_bit_identical() {
         // (hold length) changes, and parameter glides.
         let change = |c: &mut Compressor, k: usize| {
             if k % 3 == 1 {
-                c.set_detector(if k % 2 == 0 {
+                c.set_detector(if k.is_multiple_of(2) {
                     CompressorDetector::Peak
                 } else {
                     CompressorDetector::Rms
