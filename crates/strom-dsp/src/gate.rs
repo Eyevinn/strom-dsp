@@ -31,16 +31,28 @@
 //!    `min(close_threshold_db, open_threshold_db − 1 dB)`, so open == close
 //!    (or close > open) still has 1 dB of hysteresis and a level hovering at
 //!    the threshold cannot toggle the gate every frame.
-//! 4. **Gain fade** ([`AttackRelease`] on the linear gain): the gain `g` follows its
-//!    target (1 when open, the linear `reduction` when closed) with a one-pole smoother,
-//!    `g[n] = g[n-1] + (1 - a)·(target - g[n-1])`, where `a = exp(-1 / (τ·fs))`,
-//!    `τ = attack_ms/1000` while the gain rises and `τ = release_ms/1000` while it
-//!    falls. So **attack/release is the time for the linear gain to cover
-//!    `1 - 1/e` (≈ 63.2 %) of the distance to its target** after a step.
+//! 4. **Gain fade** ([`GateFade`] on the linear gain): the gain `g` moves toward
+//!    its target (1 when open, the linear `reduction` when closed).
+//!    - **Attack** (gain rising) is a one-pole,
+//!      `g[n] = g[n-1] + (1 - a)·(target - g[n-1])`, `a = exp(-1 / (τ·fs))`,
+//!      `τ = attack_ms/1000`: the gain covers 63.2 % of the distance to its
+//!      target after `attack`.
+//!    - **Release** (gain falling) is a straight line in dB that covers the
+//!      gate's full range, from 0 dB to `reduction_db`, in exactly `release`
+//!      (at least [`GATE_FADE_MIN_RANGE_DB`](crate::dynamics::GATE_FADE_MIN_RANGE_DB)):
+//!      **release is the time to close**.
+//!      Listening tests showed that a one-pole release (the phase 1 definition)
+//!      needs ≈ 6.9 τ to reach −60 dB, so the gate faded audibly for most of a
+//!      second and never closed in short pauses.
+//!
+//!    After the key stops, the gate is therefore fully closed after
+//!    `t_detector + hold + release`. `t_detector` is the time for the detector
+//!    level to fall below the close threshold: about 2.3 ms per dB that the
+//!    signal was above it, because the level decays with 20 ms.
 //!
 //! Parameter changes are click-free: a changed `reduction` (or a state change from
 //! a changed threshold) only moves the gain target, and the gain always reaches it
-//! through the attack/release smoother. The exception is the time between
+//! through the attack/release fade. The exception is the time between
 //! `configure`/`reset` and the first processed frame: there `set_params` applies
 //! instantly, so the result does not depend on whether parameters were set before
 //! or after `configure`.
@@ -90,7 +102,7 @@
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
 use crate::dynamics::{
-    vmath, AttackRelease, GateStateMachine, KeyDetector, KeyFilter, MeanSquareEnvelope,
+    vmath, GateFade, GateStateMachine, KeyDetector, KeyFilter, MeanSquareEnvelope,
 };
 use crate::simd::{detect, Level};
 use crate::util::db_to_lin;
@@ -196,8 +208,9 @@ pub struct Gate {
     reduction_lin: f64,
     detector: MeanSquareEnvelope,
     state: GateStateMachine,
-    /// Linear gain: attack while rising (opening), release while falling.
-    fade: AttackRelease,
+    /// Linear gain: one-pole attack while rising (opening), full-range dB ramp
+    /// while falling (closing).
+    fade: GateFade,
     /// True from configure/reset until the first frame is processed: parameter
     /// changes apply instantly, including the initial (closed) gain.
     fresh: bool,
@@ -242,7 +255,7 @@ impl Gate {
             reduction_lin: 0.0,
             detector: MeanSquareEnvelope::default(),
             state: GateStateMachine::default(),
-            fade: AttackRelease::default().with_snap(GAIN_SNAP),
+            fade: GateFade::default().with_snap(GAIN_SNAP),
             fresh: true,
             level: Level::baseline(),
             level_forced: false,
@@ -378,8 +391,13 @@ impl Gate {
         self.state
             .set_hold_frames((p.hold_ms as f64 * 0.001 * fs).round() as u64);
         self.reduction_lin = db_to_lin(p.reduction_db as f64);
-        self.fade
-            .set_times(p.attack_ms as f64, p.release_ms as f64, fs);
+        // Release covers the full depth (0 dB → reduction) in `release_ms`.
+        self.fade.set_times(
+            p.attack_ms as f64,
+            p.release_ms as f64,
+            -(p.reduction_db as f64),
+            fs,
+        );
         self.detector.set_time(DETECTOR_RMS_MS, fs);
         self.expander = ExpanderCurve {
             threshold_db: p.open_threshold_db as f64,

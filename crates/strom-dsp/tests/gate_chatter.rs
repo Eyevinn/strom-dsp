@@ -157,3 +157,75 @@ fn speech_like_burst_above_threshold_opens_within_attack() {
     assert!((g_tau - red) / (1.0 - red) > 0.6, "gain {g_tau}");
     assert!(gains[pre + burst - 1] > 0.999);
 }
+
+/// Guard test for the listening-test bug "gate closes much more slowly than
+/// its release": after a burst stops (noise continues 11 dB below the
+/// threshold, open == close), the gain must reach `reduction` within
+/// `t_detector + hold + release`, and must not reopen on the noise.
+///
+/// `t_detector` is the time for the RMS detector to fall from the burst level
+/// to the close threshold: the level decays with 20 ms, i.e. about 2.3 ms per
+/// dB. The burst reads ≈ −17 dB (−20 dBFS RMS, sine-calibrated) and the
+/// effective close threshold is −41 dB, so ≈ 24 dB → ≈ 55 ms; allowed: 70 ms.
+/// The phase 1 one-pole release needed ≈ 6.9 · release to reach −60 dB and
+/// fails this test.
+#[test]
+fn gate_closes_within_hold_plus_release_after_burst() {
+    for (release_ms, hold_ms) in [(50.0f32, 20.0f32), (100.0, 50.0)] {
+        let p = GateParams {
+            release_ms,
+            hold_ms,
+            ..params()
+        };
+        let pre = FS as usize / 2;
+        let burst = (0.3 * FS) as usize;
+        let post = 2 * FS as usize;
+        let mut x = pink_noise(pre + burst + post, -51.0, 0xc105e);
+        let rms_target = db_to_lin(-20.0);
+        let tone: Vec<f64> = (0..burst)
+            .map(|i| (2.0 * std::f64::consts::PI * 300.0 * i as f64 / FS as f64).sin())
+            .collect();
+        let rms = (tone.iter().map(|v| v * v).sum::<f64>() / burst as f64).sqrt();
+        for (i, v) in tone.iter().enumerate() {
+            x[pre + i] += (v * rms_target / rms) as f32;
+        }
+
+        let mut g = Gate::new();
+        g.set_params(&p);
+        g.configure(FS, 1);
+        let mut gains = Vec::with_capacity(x.len());
+        let mut opens_after_burst = 0;
+        let mut was_open = false;
+        for (i, s) in x.iter().enumerate() {
+            g.process(&mut [*s]);
+            gains.push(g.current_gain());
+            if i >= pre + burst && g.is_open() && !was_open {
+                opens_after_burst += 1;
+            }
+            was_open = g.is_open();
+        }
+        let end = pre + burst;
+        let ms = |m: f64| (m * 0.001 * FS as f64) as usize;
+        let red = db_to_lin(p.reduction_db as f64);
+        assert!(
+            gains[end - 1] > 0.999,
+            "gate not open at the end of the burst"
+        );
+        // Still fully open through the hold time (the detector has not even
+        // fallen below the threshold yet).
+        assert!(gains[end + ms(hold_ms as f64)] > 0.999);
+        let closed_at = gains[end..]
+            .iter()
+            .position(|&v| v <= red)
+            .expect("gate never closed");
+        let budget = ms(70.0 + hold_ms as f64 + release_ms as f64);
+        assert!(
+            closed_at <= budget,
+            "release {release_ms}, hold {hold_ms}: closed after {:.1} ms, budget {:.1} ms",
+            closed_at as f64 * 1000.0 / FS as f64,
+            budget as f64 * 1000.0 / FS as f64
+        );
+        assert_eq!(opens_after_burst, 0, "reopened on noise after the burst");
+        assert!(gains[end + closed_at..].iter().all(|&v| v <= red));
+    }
+}

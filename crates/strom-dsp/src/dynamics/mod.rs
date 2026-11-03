@@ -43,4 +43,6 @@ pub use gate_state::GateStateMachine;
 pub use key::{KeyDetector, KeyFilter, KEY_FILTER_MAX_HZ, KEY_FILTER_MIN_HZ, KEY_FILTER_Q_RANGE};
 pub use ramp::{BoxAverage, RampSmoother, RAMP_FRAC_BITS};
 pub use ring::{DelayLine, SegmentedMin, SlidingMin};
-pub use smoother::{AttackRelease, MeanSquareEnvelope, OnePole, PeakEnvelope};
+pub use smoother::{
+    AttackRelease, GateFade, MeanSquareEnvelope, OnePole, PeakEnvelope, GATE_FADE_MIN_RANGE_DB,
+};

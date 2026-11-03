@@ -217,27 +217,44 @@ fn attack_time_constant() {
     }
 }
 
+/// Release is the time to close: once the gate starts falling, the gain is a
+/// straight line in dB from 0 dB to `reduction` and arrives after `release` ms
+/// (phase 1b fix after listening tests; it used to be a one-pole time constant).
 #[test]
-fn release_time_constant() {
-    for release in [1.0f32, 20.0, 100.0, 2000.0] {
+fn release_closes_over_full_range_in_release_time() {
+    for (release, red_db) in [
+        (1.0f32, -60.0f32),
+        (20.0, -60.0),
+        (100.0, -80.0),
+        (2000.0, -20.0),
+    ] {
         let p = GateParams {
             release_ms: release,
+            reduction_db: red_db,
             hold_ms: 0.0,
             ..GateParams::default()
         };
         let mut g = gate(FS, 2, p);
-        let red = db_to_lin(p.reduction_db as f64);
+        let red = db_to_lin(red_db as f64);
         run_with_probe(&mut g, &vec![0.5; ms(300.0)]);
         assert_eq!(g.current_gain(), 1.0);
         let gains = run_with_probe(&mut g, &vec![0.0; ms(release as f64 + 200.0)]);
         let start = gains.iter().position(|&x| x < 1.0).unwrap();
-        // gains[start] has had one release update; after τ·fs updates: 1/e of the way left.
-        let n = ms(release as f64);
-        let gain = gains[start + n - 1];
-        let frac_left = (gain - red) / (1.0 - red);
+        let n = ms(release as f64).max(1);
+        // Halfway in time: halfway in dB (linear ramp), for ramps of several samples.
+        if n >= 8 {
+            let mid = lin_to_db(gains[start + n / 2 - 1]);
+            assert!(
+                (mid - red_db as f64 / 2.0).abs() < 0.1,
+                "release {release}: {mid} dB at half time"
+            );
+        }
+        // Closed within release (+1 frame for rounding), not before release − 1 frame.
+        // The gain is measured through an f32 probe: compare with 1e-6 relative slack.
+        let closed_at = gains.iter().position(|&x| x <= red * (1.0 + 1e-6)).unwrap() - start;
         assert!(
-            (frac_left - (-1.0f64).exp()).abs() < 0.01,
-            "release {release}: {frac_left}"
+            closed_at + 1 >= n.saturating_sub(1) && closed_at <= n + 1,
+            "release {release}: closed after {closed_at} frames, expected {n}"
         );
     }
 }

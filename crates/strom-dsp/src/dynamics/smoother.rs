@@ -308,11 +308,144 @@ impl MeanSquareEnvelope {
     }
 }
 
+/// Smallest range (dB) a [`GateFade`] release is scaled to, so a 0 dB range
+/// (e.g. `reduction = 0`) still gives a finite, non-zero release rate.
+pub const GATE_FADE_MIN_RANGE_DB: f64 = 1.0;
+
+/// Linear-gain fade for gates and expanders: a one-pole **attack** while the
+/// gain rises, and a **release** that falls at a constant rate in dB.
+///
+/// Release is defined by range, not by a time constant (the usual operator
+/// meaning for a gate): the gain covers `range_db` (normally the gate's full
+/// depth, `−reduction_db`) in exactly `release_ms`. Each sample multiplies the
+/// gain by `10^(−range_db / (20·release_ms·fs/1000))`, i.e. a straight line in
+/// dB, and stops exactly at the target. A one-pole release would instead need
+/// `ln(1/r)·τ` to fall to a fraction `r` of the way (≈ 6.9 τ to −60 dB), so the
+/// gate would close audibly long after `release`.
+///
+/// Attack keeps the one-pole definition of [`AttackRelease`]: the gain covers
+/// 63.2 % of the distance to its target after `attack_ms`. Snapping as in
+/// [`OnePole`]. Targets must be positive (a gate's are ≥ its reduction).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GateFade {
+    k_attack: f64,
+    release_factor: f64,
+    value: f64,
+    snap: f64,
+}
+
+impl Default for GateFade {
+    fn default() -> Self {
+        Self {
+            k_attack: 1.0,
+            release_factor: 0.0,
+            value: 0.0,
+            snap: DENORMAL_FLUSH,
+        }
+    }
+}
+
+impl GateFade {
+    /// Builder: set the snap distance (≥ 0).
+    pub fn with_snap(mut self, snap: f64) -> Self {
+        self.snap = snap.max(0.0);
+        self
+    }
+
+    /// Set the attack time constant (ms), and the release time (ms) to cover
+    /// `range_db` (≥ [`GATE_FADE_MIN_RANGE_DB`]). The current value is kept.
+    pub fn set_times(&mut self, attack_ms: f64, release_ms: f64, range_db: f64, sample_rate: f64) {
+        self.k_attack = 1.0 - one_pole_coef(attack_ms, sample_rate);
+        let range = if range_db.is_finite() {
+            range_db.abs().max(GATE_FADE_MIN_RANGE_DB)
+        } else {
+            GATE_FADE_MIN_RANGE_DB
+        };
+        let samples = release_ms * 0.001 * sample_rate;
+        self.release_factor = if samples > 1.0 {
+            10f64.powf(-range / (20.0 * samples))
+        } else {
+            // Release within one sample: drop straight to the target.
+            0.0
+        };
+    }
+
+    /// Current value.
+    #[inline]
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// Jump to `value` (used on reset).
+    pub fn set_value(&mut self, value: f64) {
+        self.value = value;
+    }
+
+    /// Advance one sample toward `target` and return the new value.
+    #[inline]
+    pub fn step(&mut self, target: f64) -> f64 {
+        let d = target - self.value;
+        if d.abs() < self.snap {
+            self.value = target;
+        } else if d > 0.0 {
+            self.value += self.k_attack * d;
+        } else {
+            self.value = (self.value * self.release_factor).max(target);
+        }
+        self.value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FS: f64 = 48_000.0;
+
+    #[test]
+    fn gate_fade_release_is_linear_in_db_over_range() {
+        // 60 dB in 100 ms at 48 kHz: 4800 samples, 0.0125 dB per sample.
+        let floor = 10f64.powf(-60.0 / 20.0);
+        let mut f = GateFade::default().with_snap(1e-12);
+        f.set_times(5.0, 100.0, 60.0, FS);
+        f.set_value(1.0);
+        let mut v = 1.0;
+        for _ in 0..2400 {
+            v = f.step(floor);
+        }
+        // Half the time: half the range in dB.
+        assert!(
+            (20.0 * v.log10() + 30.0).abs() < 1e-6,
+            "{}",
+            20.0 * v.log10()
+        );
+        for _ in 0..2399 {
+            v = f.step(floor);
+        }
+        assert!(v > floor);
+        // Reaches the floor exactly at 4800 samples (one more for rounding).
+        f.step(floor);
+        assert_eq!(f.step(floor), floor);
+        // Attack is the one-pole: 63.2 % after 5 ms.
+        for _ in 0..240 {
+            v = f.step(1.0);
+        }
+        let frac = (v - floor) / (1.0 - floor);
+        assert!((frac - (1.0 - (-1.0f64).exp())).abs() < 1e-3, "{frac}");
+    }
+
+    #[test]
+    fn gate_fade_degenerate_settings_stay_finite() {
+        let mut f = GateFade::default();
+        for (range, rel) in [(0.0, 1.0), (f64::NAN, 2000.0), (80.0, 0.0), (1e9, 1e-9)] {
+            f.set_times(0.01, rel, range, FS);
+            f.set_value(1.0);
+            for _ in 0..1000 {
+                let v = f.step(1e-4);
+                assert!(v.is_finite() && v >= 1e-4);
+            }
+        }
+    }
 
     #[test]
     fn mean_square_reads_sine_peak_and_decays_with_two_tau() {
