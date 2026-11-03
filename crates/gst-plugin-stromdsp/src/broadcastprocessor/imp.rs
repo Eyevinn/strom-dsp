@@ -18,7 +18,12 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
+use strom_dsp::bassclip::BASS_CLIP_THRESHOLD_RANGE_DB;
 use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, MAX_CROSSOVERS};
+use strom_dsp::dynamics::expander::{
+    EXPANDER_FLOOR_RANGE_DB, EXPANDER_HOLD_RANGE_MS, EXPANDER_RATIO_RANGE,
+    EXPANDER_THRESHOLD_RANGE_DB,
+};
 use strom_dsp::multiband::{
     ATTACK_RANGE_MS, MAKEUP_RANGE_DB, MAX_BANDS, RATIO_RANGE, RELEASE_RANGE_MS, THRESHOLD_RANGE_DB,
 };
@@ -85,6 +90,11 @@ enum FloatField {
     BandAttack(usize),
     BandRelease(usize),
     BandMakeup(usize),
+    BandExpanderThreshold(usize),
+    BandExpanderRatio(usize),
+    BandExpanderFloor(usize),
+    ExpanderHold,
+    BassClipThreshold,
     LimiterRelease,
     Lookahead,
 }
@@ -107,6 +117,11 @@ impl FloatField {
             Self::BandAttack(k) => &mut p.bands[k].attack_ms,
             Self::BandRelease(k) => &mut p.bands[k].release_ms,
             Self::BandMakeup(k) => &mut p.bands[k].makeup_db,
+            Self::BandExpanderThreshold(k) => &mut p.band_expanders[k].threshold_db,
+            Self::BandExpanderRatio(k) => &mut p.band_expanders[k].ratio,
+            Self::BandExpanderFloor(k) => &mut p.band_expanders[k].floor_db,
+            Self::ExpanderHold => &mut p.expander_hold_ms,
+            Self::BassClipThreshold => &mut p.bass_clip_threshold_db,
             Self::LimiterRelease => &mut p.limiter_release_ms,
             Self::Lookahead => &mut p.limiter_lookahead_ms,
         }
@@ -124,6 +139,7 @@ enum BoolField {
     Enabled,
     Agc,
     Multiband,
+    BassClipper,
     Limiter,
 }
 
@@ -133,6 +149,7 @@ impl BoolField {
             Self::Enabled => &mut p.enabled,
             Self::Agc => &mut p.agc_enabled,
             Self::Multiband => &mut p.multiband_enabled,
+            Self::BassClipper => &mut p.bass_clipper_enabled,
             Self::Limiter => &mut p.limiter_enabled,
         }
     }
@@ -286,7 +303,50 @@ fn float_specs() -> &'static [FloatSpec] {
                 MAKEUP_RANGE_DB,
                 FloatField::BandMakeup(k),
             ));
+            v.push(s(
+                &format!("band{k}-expander-threshold"),
+                &format!("Band {k} expander threshold"),
+                &format!(
+                    "Downward expander threshold of band {k} (dB, sine-calibrated band level \
+                     like the band threshold); below it the band is attenuated"
+                ),
+                EXPANDER_THRESHOLD_RANGE_DB,
+                FloatField::BandExpanderThreshold(k),
+            ));
+            v.push(s(
+                &format!("band{k}-expander-ratio"),
+                &format!("Band {k} expander ratio"),
+                &format!(
+                    "Downward expander ratio of band {k}: 1 dB below the threshold gives this \
+                     many dB below it at the output (1 = off)"
+                ),
+                EXPANDER_RATIO_RANGE,
+                FloatField::BandExpanderRatio(k),
+            ));
+            v.push(s(
+                &format!("band{k}-expander-floor"),
+                &format!("Band {k} expander floor"),
+                &format!("Largest attenuation of band {k}'s downward expander (dB)"),
+                EXPANDER_FLOOR_RANGE_DB,
+                FloatField::BandExpanderFloor(k),
+            ));
         }
+        v.push(s(
+            "expander-hold",
+            "Expander hold",
+            "Time the level must stay low before a band's expander starts to close (ms); \
+             keeps word endings and short gaps intact",
+            EXPANDER_HOLD_RANGE_MS,
+            FloatField::ExpanderHold,
+        ));
+        v.push(s(
+            "bass-clip-threshold",
+            "Bass clip threshold",
+            "Threshold of the bass clipper on band 0 (dB, analytic envelope: a steady sine \
+             reads its peak)",
+            BASS_CLIP_THRESHOLD_RANGE_DB,
+            FloatField::BassClipThreshold,
+        ));
         v.push(s(
             "limiter-release",
             "Limiter release",
@@ -300,9 +360,10 @@ fn float_specs() -> &'static [FloatSpec] {
 }
 
 /// Names of the boolean properties a preset sets.
-const PRESET_BOOLS: [(&str, BoolField); 3] = [
+const PRESET_BOOLS: [(&str, BoolField); 4] = [
     ("agc-enabled", BoolField::Agc),
     ("multiband-enabled", BoolField::Multiband),
+    ("bass-clipper-enabled", BoolField::BassClipper),
     ("limiter-enabled", BoolField::Limiter),
 ];
 
@@ -347,8 +408,22 @@ fn preset_props() -> &'static [(String, Prop)] {
                     | FloatField::BandAttack(_)
                     | FloatField::BandRelease(_)
                     | FloatField::BandMakeup(_)
+                    | FloatField::BandExpanderThreshold(_)
+                    | FloatField::BandExpanderRatio(_)
+                    | FloatField::BandExpanderFloor(_)
+                    | FloatField::ExpanderHold
             )
         }) {
+            push_float(&mut v, f);
+        }
+        v.push((
+            "bass-clipper-enabled".into(),
+            Prop::Bool(BoolField::BassClipper),
+        ));
+        for f in floats
+            .iter()
+            .filter(|f| f.field == FloatField::BassClipThreshold)
+        {
             push_float(&mut v, f);
         }
         v.push(("limiter-enabled".into(), Prop::Bool(BoolField::Limiter)));
@@ -518,7 +593,9 @@ fn meter_structure(
     stream_time: Option<gst::ClockTime>,
 ) -> gst::Structure {
     let ns = |t: Option<gst::ClockTime>| t.map_or(u64::MAX, gst::ClockTime::nseconds);
-    let bands = &m.band_gain_reduction_db[..num_bands.clamp(1, MAX_BANDS)];
+    let n = num_bands.clamp(1, MAX_BANDS);
+    let bands = &m.band_gain_reduction_db[..n];
+    let expanders = &m.band_expander_gain_reduction_db[..n];
     gst::Structure::builder(MESSAGE_NAME)
         .field("running-time", ns(running_time))
         .field("stream-time", ns(stream_time))
@@ -545,6 +622,11 @@ fn meter_structure(
             "limiter-gain-reduction",
             reduction(m.limiter_gain_reduction_db),
         )
+        .field(
+            "band-expander-gain-reduction",
+            gst::Array::new(expanders.iter().map(|&v| reduction(v))),
+        )
+        .field("bass-clip-gr", reduction(m.bass_clip_gain_reduction_db))
         .build()
 }
 
@@ -718,10 +800,28 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     .build(),
             );
             for k in 0..MAX_BANDS {
-                for f in ["threshold", "ratio", "attack", "release", "makeup"] {
+                for f in [
+                    "threshold",
+                    "ratio",
+                    "attack",
+                    "release",
+                    "makeup",
+                    "expander-threshold",
+                    "expander-ratio",
+                    "expander-floor",
+                ] {
                     v.push(float(&format!("band{k}-{f}")));
                 }
             }
+            v.push(float("expander-hold"));
+            v.push(common::bool_prop(
+                "bass-clipper-enabled",
+                "Bass clipper enabled",
+                "Run the bass clipper on band 0 (needs 2 or more bands; off: band 0 only \
+                 delayed, same latency), crossfaded click-free",
+                d.bass_clipper_enabled,
+            ));
+            v.push(float("bass-clip-threshold"));
             v.push(common::bool_prop(
                 "limiter-enabled",
                 "Limiter enabled",
@@ -979,10 +1079,12 @@ impl ElementImpl for StromDspBroadcastProcessor {
                 "strom-dsp broadcast processor",
                 "Filter/Effect/Audio",
                 "Broadcast/streaming final processor: input gain, loudness-targeting AGC, \
-                 multiband compressor (1-5 bands, LR4) and true-peak limiter, with presets \
-                 for EBU R 128, ATSC A/85, streaming and speech. Reports its latency \
-                 (lookahead + oversampling filter); enabled=false keeps the delay. Posts \
-                 'stromdsp-broadcastprocessor' meter messages every meter-interval ms.",
+                 multiband compressor (1-5 bands, LR4) with a downward expander per band \
+                 and a bass clipper on band 0, and true-peak limiter, with presets for \
+                 EBU R 128, ATSC A/85, streaming and speech. Reports its latency (bass \
+                 lookahead + limiter lookahead + oversampling filter); enabled=false \
+                 keeps the delay. Posts 'stromdsp-broadcastprocessor' meter messages \
+                 every meter-interval ms.",
                 "Eyevinn Technology",
             )
         });
@@ -1203,13 +1305,21 @@ mod tests {
         assert_eq!(s.get::<f64>("limiter-gain-reduction").unwrap(), 0.0);
         assert_eq!(s.get::<u64>("running-time").unwrap(), u64::MAX);
         assert_eq!(s.get::<gst::Array>("band-gain-reduction").unwrap().len(), 3);
+        assert_eq!(
+            s.get::<gst::Array>("band-expander-gain-reduction")
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(s.get::<f64>("bass-clip-gr").unwrap(), 0.0);
     }
 
     #[test]
     fn preset_props_cover_every_preset_field() {
         let names: Vec<&str> = preset_props().iter().map(|(n, _)| n.as_str()).collect();
-        // 9 scalars + 4 crossovers + 25 band values + limiter-release + 3 booleans.
-        assert_eq!(names.len(), 9 + 4 + 25 + 1 + 3);
+        // 9 scalars + 4 crossovers + 40 band values (5 x 8) + expander-hold +
+        // bass-clip-threshold + limiter-release + 4 booleans.
+        assert_eq!(names.len(), 9 + 4 + 40 + 1 + 1 + 1 + 4);
         for excluded in [
             "enabled",
             "preset",

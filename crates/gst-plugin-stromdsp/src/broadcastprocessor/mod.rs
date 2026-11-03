@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! input gain → wideband AGC → multiband compressor → true-peak limiter
+//!                              (expander per band, bass clipper on band 0)
 //! ```
 //!
 //! An in-place `BaseTransform` on interleaved F32LE, any rate and channel
@@ -35,6 +36,12 @@
 //! | `bandN-attack` | Float | ms | 0.1 … 500 | 30, 15, 8, 5, 3 | PLAYING |
 //! | `bandN-release` | Float | ms | 5 … 5000 | 300, 200, 150, 100, 80 | PLAYING |
 //! | `bandN-makeup` | Float | dB | −12 … 24 | 0 | PLAYING |
+//! | `bandN-expander-threshold` | Float | dB | −80 … 0 | −47 | PLAYING |
+//! | `bandN-expander-ratio` | Float | | 1 … 10 (1 = off) | 1.5 | PLAYING |
+//! | `bandN-expander-floor` | Float | dB | 0 … 40 | 4 | PLAYING |
+//! | `expander-hold` | Float | ms | 0 … 1000 | 100 | PLAYING |
+//! | `bass-clipper-enabled` | Boolean | | | `true` | PLAYING |
+//! | `bass-clip-threshold` | Float | dB | −40 … 0 | −14 | PLAYING |
 //! | `limiter-enabled` | Boolean | | | `true` | PLAYING |
 //! | `limiter-release` | Float | ms | 1 … 2000 | 200 | PLAYING |
 //! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 5 | READY (not controllable) |
@@ -125,6 +132,8 @@
 //! | `agc-gain` | `gdouble` | dB | AGC gain, signed (+ = boost) |
 //! | `band-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of reduction, one per active band, lowest first |
 //! | `limiter-gain-reduction` | `gdouble` | dB | positive dB of reduction |
+//! | `band-expander-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of expander attenuation, one per active band, lowest first |
+//! | `bass-clip-gr` | `gdouble` | dB | positive dB of bass-clipper reduction, largest since the last message |
 //!
 //! Silence (and anything not yet measured) reads [`SILENCE_DB`] (−200),
 //! never NaN or −∞.
@@ -133,7 +142,8 @@
 //!
 //! The `LATENCY` query adds
 //! `BroadcastProcessor::latency_frames_for(rate, limiter-lookahead)` frames
-//! (lookahead plus the oversampling filter delay), as time rounded up to
+//! (the bass clipper's 3 ms lookahead, the limiter lookahead and the
+//! oversampling filter delay), as time rounded up to
 //! whole nanoseconds. Before caps are negotiated it assumes 48 kHz. It does
 //! not depend on `enabled` or on stage bypass. A `Latency` message is posted
 //! when it changes, which only happens at a caps negotiation (both

@@ -82,6 +82,17 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
             READY,
         ),
         ("meter-interval".into(), Kind::UInt(0, 10_000, 100), LIVE),
+        (
+            "expander-hold".into(),
+            Kind::Float(0.0, 1000.0, 100.0),
+            LIVE,
+        ),
+        ("bass-clipper-enabled".into(), Kind::Bool(true), LIVE),
+        (
+            "bass-clip-threshold".into(),
+            Kind::Float(-40.0, 0.0, -14.0),
+            LIVE,
+        ),
     ];
     for (k, d) in [120.0, 800.0, 4000.0, 10_000.0].into_iter().enumerate() {
         v.push((
@@ -100,6 +111,9 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
             ("attack", Kind::Float(0.1, 500.0, attack[k])),
             ("release", Kind::Float(5.0, 5000.0, release[k])),
             ("makeup", Kind::Float(-12.0, 24.0, 0.0)),
+            ("expander-threshold", Kind::Float(-80.0, 0.0, -47.0)),
+            ("expander-ratio", Kind::Float(1.0, 10.0, 1.5)),
+            ("expander-floor", Kind::Float(0.0, 40.0, 4.0)),
         ] {
             v.push((format!("band{k}-{f}"), kind, LIVE));
         }
@@ -141,7 +155,7 @@ fn property_set_is_exact() {
     let mut want: Vec<String> = spec().into_iter().map(|(n, _, _)| n).collect();
     want.sort();
     assert_eq!(own, want);
-    assert_eq!(want.len(), 19 + 4 + 25);
+    assert_eq!(want.len(), 19 + 3 + 4 + 40);
 }
 
 #[test]

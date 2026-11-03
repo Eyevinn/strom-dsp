@@ -34,7 +34,7 @@ cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 | `channel_tools` | delay and stereo |
 | `cleanup` | input cleanup |
 | `agc` | loudness detector and wideband AGC |
-| `multiband` | multiband compressor (4 bands) |
+| `multiband` | multiband compressor (4 bands); with per-band expander and bass clipper |
 | `truepeak` | true-peak limiter |
 | `broadcast` | full broadcast chain with all meters |
 
@@ -58,6 +58,7 @@ compare runs only on the same, otherwise idle, machine.
 | `broadcast` | full chain, 4 bands, with meters | 78.3 µs |
 | `truepeak` | 5 ms lookahead | 18.8 µs |
 | `multiband` | 4 bands | 46.7 µs |
+| `multiband` | 4 bands, plain / with expander on every band and bass clipper (3 ms lookahead) | 18.2 / 33.3 µs (separate run, machine not idle: other builds ran in parallel) |
 | `agc` | detector / AGC / ebur128 read every block | 1.55 / 1.95 / 263 µs |
 | `filters` | Butterworth 4 / 8, LR4 crossover 3 / 5 bands | 1.46 / 2.18 / 7.37 / 13.6 µs |
 | `sampling` | oversampler 4× up+down, 4× peaks; STFT 1024/256 | 17.6 / 9.44 / 13.3 µs |
