@@ -27,8 +27,6 @@ fearless_simd = "1.2"
 ebur128 = "0.1"
 # Real FFT for the STFT framework (pulls in rustfft).
 realfft = "3.5"
-# Arbitrary-ratio resampling (ducker key at a different rate than the programme).
-rubato = "5"
 # Optional so they can be gated by features (dev-dependencies cannot be
 # optional). Neither is used by the library code itself.
 rtsan-standalone = { version = "0.3", optional = true }
