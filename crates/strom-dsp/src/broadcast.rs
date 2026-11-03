@@ -218,6 +218,11 @@ pub const CLIPPER_KNEE_DB: f32 = 2.0;
 pub const CLIPPER_BANDWIDTH_RANGE_HZ: (f32, f32) = crate::clipper::BANDWIDTH_RANGE_HZ;
 /// Range of `clip_budget_db` (dB).
 pub const CLIP_BUDGET_RANGE_DB: (f32, f32) = crate::governor::BUDGET_RANGE_DB;
+/// Largest change of the limiter's ceiling per internal chunk (dB). A
+/// ceiling jump becomes steps of at most this size, each ramped over the
+/// limiter's lookahead, so a short lookahead does not turn a 6 dB jump into
+/// an audible step (6 dB takes about 64 ms at 48 kHz).
+const CEILING_STEP_DB: f32 = 1.0;
 /// Smallest density change (dB) passed on to the multiband thresholds.
 const DENSITY_STEP_DB: f64 = 0.01;
 
@@ -679,10 +684,10 @@ impl LimiterStage {
         self.inner.configure(sample_rate, channels);
     }
 
-    fn set_params(&mut self, p: &BroadcastParams, lookahead_ms: f32) {
+    fn set_params(&mut self, p: &BroadcastParams, ceiling_dbtp: f32, lookahead_ms: f32) {
         self.inner.set_params(&TruePeakLimiterParams {
             enabled: true,
-            ceiling_dbtp: p.true_peak_ceiling_dbtp,
+            ceiling_dbtp,
             release_ms: p.limiter_release_ms,
             lookahead_ms,
         });
@@ -904,6 +909,8 @@ pub struct BroadcastProcessor {
     /// Structural values in force since the last `configure`.
     active_lookahead_ms: f32,
     active_clipper_latency: ClipperLatency,
+    /// Limiter ceiling in force (dBTP), gliding toward the parameter.
+    ceiling_db: f32,
     active_bands: usize,
     /// True from configure/reset until the first processed frame.
     fresh: bool,
@@ -968,6 +975,7 @@ impl BroadcastProcessor {
             channels: 0,
             active_lookahead_ms: params.limiter_lookahead_ms,
             active_clipper_latency: params.clipper_latency,
+            ceiling_db: params.true_peak_ceiling_dbtp,
             active_bands: params.num_bands,
             fresh: true,
             input_gain: GainGlide::default(),
@@ -1031,7 +1039,11 @@ impl BroadcastProcessor {
         self.applied_density_db = self.governor.density_db();
         self.apply_multiband_params();
         self.clipper.set_params(&p);
-        self.limiter.set_params(&p, self.active_lookahead_ms);
+        if snap {
+            self.ceiling_db = p.true_peak_ceiling_dbtp;
+        }
+        self.limiter
+            .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
         self.agc_fade.set(p.agc_enabled, snap);
         self.multiband_fade.set(p.multiband_enabled, snap);
         self.clipper_fade.set(p.clipper_enabled, snap);
@@ -1151,6 +1163,19 @@ impl BroadcastProcessor {
 
     /// Process one chunk (at most `CHUNK` frames).
     fn process_chunk(&mut self, chunk: &mut [f32]) {
+        // The limiter's ceiling moves at most CEILING_STEP_DB per chunk.
+        let target = self.params.true_peak_ceiling_dbtp;
+        if self.ceiling_db != target {
+            let d = (target - self.ceiling_db).clamp(-CEILING_STEP_DB, CEILING_STEP_DB);
+            self.ceiling_db = if (target - self.ceiling_db).abs() <= CEILING_STEP_DB {
+                target
+            } else {
+                self.ceiling_db + d
+            };
+            let p = self.params;
+            self.limiter
+                .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
+        }
         let ch = self.channels;
         let len = chunk.len();
         let frames = len / ch;
@@ -1390,6 +1415,10 @@ impl Processor for BroadcastProcessor {
         self.agc.reset();
         self.multiband.reset();
         self.trim.reset();
+        self.ceiling_db = self.params.true_peak_ceiling_dbtp;
+        let p = self.params;
+        self.limiter
+            .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
         self.clipper.reset();
         self.governor.reset();
         if self.applied_density_db != 0.0 {
