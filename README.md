@@ -26,7 +26,9 @@ dependency with its licence.
 ## Elements
 
 **Bypass.** Every processing element has an `enabled` property, mutable while
-PLAYING. Toggling `enabled` fades over a few ms, then the output is bit-exact,
+PLAYING. Toggling `enabled` crossfades between processed and dry (20 ms for
+most elements, 10 ms for the limiter, stereo and broadcast processor), then
+the output is bit-exact,
 delayed by the element's reported latency (zero for most elements; the
 limiter and the broadcast processor keep their lookahead delay).
 
@@ -301,7 +303,7 @@ reads as silence, so the programme holds and then fades back to unity.
 **Non-live pipelines.** Request `sidechain` only if it will be fed or reach
 EOS.
 
-Toggling `enabled` fades over a few ms, then the programme passes bit-exact.
+Toggling `enabled` crossfades over 20 ms, then the programme passes bit-exact.
 The key is still consumed while disabled.
 
 | Property | Type | Unit | Range | Default |
@@ -374,7 +376,7 @@ A linked-channel de-esser.
   crossover. With no reduction the bands sum to a flat all-pass.
 - `wideband` reduces the whole signal. It goes through the same all-pass
   split, so mode changes glide.
-- No latency. Toggling `enabled` fades over a few ms, then the output is
+- No latency. Toggling `enabled` crossfades over 20 ms, then the output is
   bit-exact.
 
 | Property | Type | Unit | Range | Default |
@@ -425,7 +427,7 @@ order:
 
 Every stage is off by default, so the default element is a bit-exact
 passthrough. Switching a stage on or off crossfades over 10 ms. No latency.
-Toggling `enabled` fades over a few ms, then the output is bit-exact.
+Toggling `enabled` crossfades over 20 ms, then the output is bit-exact.
 
 | Property | Type | Unit | Range | Default |
 |---|---|---|---|---|
