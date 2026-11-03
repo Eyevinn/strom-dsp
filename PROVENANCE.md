@@ -1034,6 +1034,34 @@ and are shared with the harness.
     −10/−25 dB per Bark and a 10 dB offset. **The masking model is a test
     metric only**; nothing in the processing or control path uses it.
 
+### Listening kit and test corpus (`crates/strom-dsp-harness/src/listen/`, `scripts/`, `corpus/`)
+
+Test and listening support only, never linked into the plugin.
+
+- **Corpus.** Real recordings and generated test signals under CC0, public
+  domain, CC BY 3.0 or CC BY 4.0 only. The audio ships as a release asset,
+  never in git. `corpus/manifest.tsv` is the provenance record of every clip
+  (source URL, licence and licence URL, attribution, extract, processing,
+  SHA-256) and `corpus/ATTRIBUTION.md` the attribution the licences require;
+  `scripts/make-corpus-manifest.sh` generates both from the curated corpus
+  and refuses any other licence. Material whose terms forbid redistribution
+  or commercial use (e.g. the EBU SQAM and loudness test sets) is not in the
+  corpus. The corpus is data for listening and measurement: nothing in the
+  processing is tuned to it, and it is never compared with another
+  product's output.
+- **Archive format** (own choice): 24-bit FLAC, lossless from the curated
+  24-bit clips (checked by comparing decoded samples); the few clips with
+  sample peaks above 0 dBFS stay 32-bit float WAV, because FLAC holds only
+  integers and a gain to fit them would change the level the processors see.
+- **Render and page** (own design): every configuration processes the clip
+  as stereo at −23 LUFS (broadcast configurations at their preset target, as
+  in the harness), outputs are time-aligned by removing the reported latency,
+  and each set shares one listening gain. The numbers come from the harness
+  metrics above. The page uses the Web Audio API (W3C) with all versions of
+  a set playing in sync and a short gain ramp to switch between them.
+  Encoding and decoding go through the `ffmpeg` command-line tool, run as a
+  separate program (not linked).
+
 ### Performance and real-time-safety tooling
 
 The `tests/rtsan*.rs` files use RealtimeSanitizer through `rtsan-standalone`, written
@@ -1120,7 +1148,8 @@ verified with the counting allocator and RTSan.
 
 External developer/CI tools, not linked or distributed: `gungraun-runner`
 (MIT OR Apache-2.0), Valgrind (GPL-2.0, run as a separate program by the
-gungraun CI job only) and `cargo-show-asm` (MIT OR Apache-2.0).
+gungraun CI job only), `ffmpeg` (LGPL/GPL, run as a separate program by the listening
+kit scripts and render tool only) and `cargo-show-asm` (MIT OR Apache-2.0).
 
 Transitive dependencies are checked against the allowlist in `deny.toml` by
 `cargo deny check licenses`. The GStreamer C libraries (LGPL) are system

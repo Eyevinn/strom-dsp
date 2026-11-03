@@ -83,6 +83,11 @@ through every broadcast preset, reduced to loudness, true-peak,
 gain-reduction, clip-depth, aliasing, intermodulation and noise-to-mask
 numbers, and checked against `crates/strom-dsp-harness/baseline.json`.
 
+To hear the processors before and after on freely licensed real material,
+with the harness numbers next to each version, run
+`scripts/listen.sh OUT_DIR` and open `OUT_DIR/index.html`: see the
+[listening kit](docs/listening-kit.md).
+
 To link statically into an application, depend on the crate and call:
 
 ```rust
