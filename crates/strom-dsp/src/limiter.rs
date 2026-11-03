@@ -76,9 +76,10 @@
 //!
 //! # Efficiency
 //!
-//! Outside a lookahead cross-fade, processing runs in blocks of
-//! [`BLOCK_FRAMES`]: per-frame peaks for the block, the serial gain pipeline,
-//! then a delay/gain/clip pass.
+//! The limiter is dominated by its serial per-frame gain pipeline, so unlike the
+//! gate and compressor it runs one fused loop per frame (peak, gain pipeline,
+//! delay, gain, clip); this measured faster than a block split for 1–8
+//! channels. The cross-fade path is kept out of line.
 //!
 //! # Denormals
 //!
@@ -86,7 +87,7 @@
 //! from below; once the gap is under 1e-15 it snaps to the target, so it never
 //! decays through the subnormal range. The box stage is integer arithmetic.
 
-use crate::dynamics::frame::{frame_peak, frame_peaks, BLOCK_FRAMES};
+use crate::dynamics::frame::frame_peak;
 use crate::dynamics::{DelayLine, RampSmoother, SlidingMin};
 use crate::util::{db_to_lin, one_pole_coef, DENORMAL_FLUSH};
 use crate::Processor;
@@ -409,9 +410,25 @@ impl Limiter {
         self.gain
     }
 
-    /// One frame, frame by frame (used around lookahead cross-fades, where the
-    /// tap geometry can change between frames).
+    /// One frame with a single delay tap (no cross-fade running).
+    #[inline(always)]
     fn process_frame(&mut self, frame: &mut [f32], enabled: bool, rise: f64) {
+        let peak = frame_peak(frame) as f64;
+        let g = self.gain_step(peak, enabled, rise);
+        self.delay.write(frame);
+        let la = self.lookahead;
+        let lim = self.ceil_hist[(self.now - la as u64) as usize & self.hist_mask];
+        let mut clips = 0;
+        for (y, &x) in frame.iter_mut().zip(self.delay.read(la)) {
+            *y = safety((g * x as f64) as f32, lim, &mut clips);
+        }
+        self.safety_clips += clips;
+        self.now += 1;
+    }
+
+    /// One frame during a lookahead cross-fade (two delay taps).
+    #[inline(never)]
+    fn process_frame_xfade(&mut self, frame: &mut [f32], enabled: bool, rise: f64) {
         let peak = frame_peak(frame) as f64;
         let g = self.gain_step(peak, enabled, rise);
         self.delay.write(frame);
@@ -419,12 +436,6 @@ impl Limiter {
         let hmask = self.hist_mask;
         let mut clips = 0;
         let Some(xf) = self.xfade.as_mut() else {
-            let lim = self.ceil_hist[(m - self.lookahead as u64) as usize & hmask];
-            for (y, &x) in frame.iter_mut().zip(self.delay.read(self.lookahead)) {
-                *y = safety((g * x as f64) as f32, lim, &mut clips);
-            }
-            self.safety_clips += clips;
-            self.now += 1;
             return;
         };
         xf.pos += 1;
@@ -551,40 +562,27 @@ impl Processor for Limiter {
 
         let enabled = self.params.enabled;
         let rise = 1.0 - self.release_coef;
-        let hmask = self.hist_mask;
-        let mut peaks = [0.0f32; BLOCK_FRAMES];
-        let mut gains = [0.0f64; BLOCK_FRAMES];
+        // Mono/stereo get their own monomorphised loop (frame length known at
+        // compile time, so the per-channel loops are unrolled).
+        match ch {
+            1 => self.run_frames::<1>(samples, enabled, rise),
+            2 => self.run_frames::<2>(samples, enabled, rise),
+            _ => self.run_frames::<0>(samples, enabled, rise),
+        }
+    }
+}
 
-        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
-            if self.xfade.is_some() {
-                for frame in block.chunks_exact_mut(ch) {
-                    self.process_frame(frame, enabled, rise);
-                }
-                continue;
+impl Limiter {
+    /// Frame loop; `N` is the channel count, or 0 for "use `self.channels`".
+    #[inline(always)]
+    fn run_frames<const N: usize>(&mut self, samples: &mut [f32], enabled: bool, rise: f64) {
+        let ch = if N == 0 { self.channels } else { N };
+        for frame in samples.chunks_exact_mut(ch) {
+            if self.xfade.is_none() {
+                self.process_frame(frame, enabled, rise);
+            } else {
+                self.process_frame_xfade(frame, enabled, rise);
             }
-            // No cross-fade can start inside a block, so the tap is fixed here.
-            let n = block.len() / ch;
-            let (peaks, gains) = (&mut peaks[..n], &mut gains[..n]);
-            let m0 = self.now;
-            frame_peaks(block, ch, peaks);
-            for (g, &p) in gains.iter_mut().zip(peaks.iter()) {
-                *g = self.gain_step(p as f64, enabled, rise);
-                self.now += 1;
-            }
-
-            // Delay, gain and safety clip.
-            let la = self.lookahead;
-            let mut clips = 0;
-            let mut tap = m0.wrapping_sub(la as u64);
-            for (frame, &g) in block.chunks_exact_mut(ch).zip(gains.iter()) {
-                self.delay.write(frame);
-                let lim = self.ceil_hist[tap as usize & hmask];
-                for (y, &x) in frame.iter_mut().zip(self.delay.read(la)) {
-                    *y = safety((g * x as f64) as f32, lim, &mut clips);
-                }
-                tap = tap.wrapping_add(1);
-            }
-            self.safety_clips += clips;
         }
     }
 }

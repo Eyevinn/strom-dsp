@@ -89,8 +89,9 @@ pub struct RampSmoother {
 /// Quantise a value in `[0, 1]` down to fixed point (NaN → 0).
 #[inline]
 fn quantize(x: f64) -> u64 {
-    // `as` truncates toward zero (floor for x ≥ 0) and maps NaN to 0.
-    (x.clamp(0.0, 1.0) * SCALE) as u64
+    // `as` truncates toward zero (floor for x ≥ 0), saturates (negative → 0)
+    // and maps NaN to 0; `min` caps values above 1.
+    ((x * SCALE) as u64).min(ONE)
 }
 
 impl RampSmoother {
