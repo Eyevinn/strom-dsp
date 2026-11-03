@@ -385,9 +385,21 @@ fn cases() -> Vec<Case> {
     ));
     v.push(case(e, &[], &[("band0-frequency", "24000")]));
     v.push(case(e, &[], &[("band0-frequency", "20")]));
-    v.push(case(e, &[("band0-q", "0.5")], &[("band0-q", "8")]));
-    v.push(case(e, &[], &[("band0-q", "100")]));
-    v.push(case(e, &[], &[("band0-q", "0.01")]));
+    v.push(case(
+        e,
+        &[("band0-frequency", "1500"), ("band0-q", "0.5")],
+        &[("band0-q", "8")],
+    ));
+    v.push(case(
+        e,
+        &[("band0-frequency", "1500")],
+        &[("band0-q", "100")],
+    ));
+    v.push(case(
+        e,
+        &[("band0-frequency", "1500")],
+        &[("band0-q", "0.01")],
+    ));
     v.push(case(e, &[], &[("band0-enabled", "false")]));
     v.push(case(e, &[], &[("band0-type", "0")]));
     v.push(case(e, &[], &[("band0-type", "8")]));
