@@ -10,9 +10,10 @@
 //! 1. **Level detector**: `x_dB = 20·log10(max_c |x_c|)` over all channels (linked;
 //!    floored at −200 dB). For a steady sine this is a peak detector, so levels and
 //!    the threshold refer to **peak amplitude**.
-//! 2. **Gain computer** (static curve), with threshold `T = 20·log10(threshold)`,
-//!    knee width `W = −40·log10(k)` dB (`k` = `knee` clamped to `[0.001, 1]`) and
-//!    slope `S = 1 − 1/ratio`, the gain reduction `r ≥ 0` (dB) is
+//! 2. **Gain computer** ([`GainComputer`], static curve), with threshold
+//!    `T = 20·log10(threshold)`, knee width `W = −40·log10(k)` dB (`k` = `knee`
+//!    clamped to `[0.001, 1]`) and slope `S = 1 − 1/ratio`, the gain reduction
+//!    `r ≥ 0` (dB) is
 //!    - `r = 0` for `x < T − W/2`,
 //!    - `r = S·(x − T + W/2)² / (2W)` for `T − W/2 ≤ x ≤ T + W/2` (quadratic soft knee),
 //!    - `r = S·(x − T)` for `x > T + W/2`.
@@ -20,7 +21,7 @@
 //!    The output level is `x − r`, i.e. above the knee `T + (x − T)/ratio`.
 //!    The knee region in linear terms spans `threshold·k … threshold/k`. `W = 0`
 //!    (`k = 1`) is a hard knee.
-//! 3. **Smoothing** (branching one-pole in the dB domain):
+//! 3. **Smoothing** ([`AttackRelease`], branching one-pole in the dB domain):
 //!    `y[n] = a·y[n−1] + (1−a)·r[n]` with `a = a_A` when `r[n] > y[n−1]` (gain
 //!    reduction increasing) and `a = a_R` otherwise, where
 //!    `a_A = exp(−1/(τ_A·fs))`, `τ_A = attack_ms/1000` (and likewise for release).
@@ -36,22 +37,37 @@
 //! glide through `S` and `W`. Before the first `process` call after
 //! `configure`/`reset`, parameters are applied immediately (no glide).
 //!
+//! # Efficiency
+//!
+//! Processing runs in blocks of [`BLOCK_FRAMES`]: per-frame peaks, the serial
+//! detector/smoother chain, then gain application. While the parameters are not
+//! gliding, a frame whose peak is below the knee's lower edge (compared in the
+//! linear domain) skips the `log10`, and a frame with zero smoothed reduction
+//! skips the `exp`; the result is the same as evaluating the full formula.
+//!
 //! # Denormals
 //!
-//! The smoothed reduction `y` is passed through
-//! [`flush_denormal`](crate::util::flush_denormal); parameter smoothers snap to
-//! their target when within `1e-9`.
+//! The smoothed reduction `y` snaps to its target when within
+//! [`DENORMAL_FLUSH`](crate::util::DENORMAL_FLUSH) (so it decays to exactly 0);
+//! parameter smoothers snap to their target when within `1e-9`.
 //!
 //! Ratio 1 gives `S = 0`, hence `r = 0` and exactly unity gain apart from makeup.
 
-use crate::util::{db_to_lin, flush_denormal, lin_to_db, one_pole_coef};
+use crate::dynamics::frame::{apply_gains, frame_peaks, BLOCK_FRAMES};
+use crate::dynamics::{AttackRelease, GainComputer, OnePole};
+use crate::util::lin_to_db;
 use crate::Processor;
+
+pub use crate::dynamics::MIN_KNEE;
 
 /// Time constant (ms) of the one-pole glide applied to threshold, ratio, knee and makeup.
 pub const PARAM_SMOOTHING_MS: f64 = 10.0;
 
-/// Smallest effective knee factor; smaller values (including 0) are treated as this.
-pub const MIN_KNEE: f64 = 0.001;
+/// Snap distance of the parameter glides.
+const GLIDE_SNAP: f64 = 1e-9;
+
+/// `ln(10)/20`: `10^(−y/20) = exp(−y·LN10_OVER_20)`.
+const LN10_OVER_20: f64 = std::f64::consts::LN_10 / 20.0;
 
 /// Compressor parameters (units as in the GStreamer interface).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,29 +127,14 @@ impl CompressorParams {
 
 /// Static gain reduction in dB (≥ 0) of the gain computer for input level `x_db`,
 /// threshold `t_db`, knee width `w_db` and slope `s = 1 − 1/ratio`.
-#[inline]
+#[cfg(test)]
 fn gain_reduction(x_db: f64, t_db: f64, w_db: f64, s: f64) -> f64 {
-    let over = x_db - t_db;
-    let half = 0.5 * w_db;
-    if over <= -half {
-        0.0
-    } else if over < half {
-        let d = over + half;
-        s * d * d / (2.0 * w_db)
-    } else {
-        s * over
+    GainComputer {
+        threshold_db: t_db,
+        knee_db: w_db,
+        slope: s,
     }
-}
-
-/// One-pole glide toward `target`, snapping when close.
-#[inline]
-fn glide(cur: &mut f64, target: f64, k: f64) {
-    let d = target - *cur;
-    if d.abs() < 1e-9 {
-        *cur = target;
-    } else {
-        *cur += k * d;
-    }
+    .reduction_db(x_db)
 }
 
 /// The gain-computer quantities that glide on parameter changes.
@@ -147,12 +148,59 @@ struct Curve {
 
 impl Curve {
     fn from_params(p: &CompressorParams) -> Self {
-        let k = (p.knee as f64).clamp(MIN_KNEE, 1.0);
+        let gc = GainComputer::from_linear(p.threshold as f64, p.ratio as f64, p.knee as f64);
         Self {
-            threshold_db: lin_to_db(p.threshold as f64),
-            slope: 1.0 - 1.0 / p.ratio as f64,
-            knee_db: (-40.0 * k.log10()).max(0.0),
+            threshold_db: gc.threshold_db,
+            slope: gc.slope,
+            knee_db: gc.knee_db,
             makeup: p.makeup_gain as f64,
+        }
+    }
+
+    fn computer(&self) -> GainComputer {
+        GainComputer {
+            threshold_db: self.threshold_db,
+            knee_db: self.knee_db,
+            slope: self.slope,
+        }
+    }
+}
+
+/// One-pole glides for each [`Curve`] field.
+#[derive(Debug, Clone, Copy)]
+struct CurveGlide {
+    threshold_db: OnePole,
+    slope: OnePole,
+    knee_db: OnePole,
+    makeup: OnePole,
+}
+
+impl CurveGlide {
+    fn set_time(&mut self, fs: f64) {
+        for g in [
+            &mut self.threshold_db,
+            &mut self.slope,
+            &mut self.knee_db,
+            &mut self.makeup,
+        ] {
+            g.set_time(PARAM_SMOOTHING_MS, fs);
+        }
+    }
+
+    fn jump(&mut self, c: &Curve) {
+        self.threshold_db.set_value(c.threshold_db);
+        self.slope.set_value(c.slope);
+        self.knee_db.set_value(c.knee_db);
+        self.makeup.set_value(c.makeup);
+    }
+
+    #[inline]
+    fn step(&mut self, c: &Curve) -> Curve {
+        Curve {
+            threshold_db: self.threshold_db.step(c.threshold_db),
+            slope: self.slope.step(c.slope),
+            knee_db: self.knee_db.step(c.knee_db),
+            makeup: self.makeup.step(c.makeup),
         }
     }
 }
@@ -166,15 +214,16 @@ pub struct Compressor {
     /// 0 = not configured.
     channels: usize,
 
-    coef_attack: f64,
-    coef_release: f64,
-    /// `1 − a` of the parameter glide.
-    glide_k: f64,
     target: Curve,
+    /// Curve in force (equal to `target` when not gliding).
     current: Curve,
+    glide: CurveGlide,
+    gliding: bool,
+    /// Linear level at or below which the settled curve gives exactly 0 dB reduction.
+    knee_start_lin: f64,
 
     /// Smoothed gain reduction (dB, ≥ 0).
-    reduction_db: f64,
+    reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
     fresh: bool,
 }
@@ -190,16 +239,22 @@ impl Compressor {
     pub fn new() -> Self {
         let params = CompressorParams::default();
         let curve = Curve::from_params(&params);
+        let glide = OnePole::default().with_snap(GLIDE_SNAP);
         let mut c = Self {
             params,
             sample_rate: 48_000.0,
             channels: 0,
-            coef_attack: 0.0,
-            coef_release: 0.0,
-            glide_k: 1.0,
             target: curve,
             current: curve,
-            reduction_db: 0.0,
+            glide: CurveGlide {
+                threshold_db: glide,
+                slope: glide,
+                knee_db: glide,
+                makeup: glide,
+            },
+            gliding: false,
+            knee_start_lin: curve.computer().knee_start_lin(),
+            reduction: AttackRelease::default(),
             fresh: true,
         };
         c.update_coefficients();
@@ -220,18 +275,24 @@ impl Compressor {
     /// Smoothed gain reduction (dB, ≥ 0) after the most recently processed frame,
     /// excluding makeup gain.
     pub fn gain_reduction_db(&self) -> f64 {
-        self.reduction_db
+        self.reduction.value()
     }
 
     fn update_coefficients(&mut self) {
         let fs = self.sample_rate;
-        self.coef_attack = one_pole_coef(self.params.attack_ms as f64, fs);
-        self.coef_release = one_pole_coef(self.params.release_ms as f64, fs);
-        self.glide_k = 1.0 - one_pole_coef(PARAM_SMOOTHING_MS, fs);
+        self.reduction.set_times(
+            self.params.attack_ms as f64,
+            self.params.release_ms as f64,
+            fs,
+        );
+        self.glide.set_time(fs);
         self.target = Curve::from_params(&self.params);
         if self.fresh {
+            self.glide.jump(&self.target);
             self.current = self.target;
         }
+        self.gliding = self.current != self.target;
+        self.knee_start_lin = self.current.computer().knee_start_lin();
     }
 }
 
@@ -243,45 +304,44 @@ impl Processor for Compressor {
     }
 
     fn process(&mut self, samples: &mut [f32]) {
-        if self.channels == 0 || samples.len() < self.channels {
+        let ch = self.channels;
+        if ch == 0 || samples.len() < ch {
             return;
         }
         self.fresh = false;
-        let k = self.glide_k;
-        for frame in samples.chunks_exact_mut(self.channels) {
-            let c = &mut self.current;
-            glide(&mut c.threshold_db, self.target.threshold_db, k);
-            glide(&mut c.slope, self.target.slope, k);
-            glide(&mut c.knee_db, self.target.knee_db, k);
-            glide(&mut c.makeup, self.target.makeup, k);
-
-            let mut peak = 0.0f32;
-            for s in frame.iter() {
-                peak = peak.max(s.abs());
+        let mut gains = [0.0f32; BLOCK_FRAMES];
+        for block in samples.chunks_mut(BLOCK_FRAMES * ch) {
+            let gains = &mut gains[..block.len() / ch];
+            frame_peaks(block, ch, gains);
+            for v in gains.iter_mut() {
+                let peak = *v as f64;
+                let r = if self.gliding {
+                    self.current = self.glide.step(&self.target);
+                    if self.current == self.target {
+                        self.gliding = false;
+                        self.knee_start_lin = self.current.computer().knee_start_lin();
+                    }
+                    self.current.computer().reduction_db(lin_to_db(peak))
+                } else if peak > self.knee_start_lin {
+                    self.current.computer().reduction_db(lin_to_db(peak))
+                } else {
+                    0.0
+                };
+                let y = self.reduction.step(r);
+                let makeup = self.current.makeup;
+                let g = if y > 0.0 {
+                    (-y * LN10_OVER_20).exp() * makeup
+                } else {
+                    makeup
+                };
+                *v = g as f32;
             }
-            let x_db = lin_to_db(peak as f64);
-            let r = gain_reduction(x_db, c.threshold_db, c.knee_db, c.slope);
-
-            let a = if r > self.reduction_db {
-                self.coef_attack
-            } else {
-                self.coef_release
-            };
-            self.reduction_db = flush_denormal(a * self.reduction_db + (1.0 - a) * r);
-
-            let g = if self.reduction_db > 0.0 {
-                db_to_lin(-self.reduction_db) * c.makeup
-            } else {
-                c.makeup
-            };
-            for s in frame.iter_mut() {
-                *s = (*s as f64 * g) as f32;
-            }
+            apply_gains(block, ch, gains);
         }
     }
 
     fn reset(&mut self) {
-        self.reduction_db = 0.0;
+        self.reduction.set_value(0.0);
         self.fresh = true;
         self.update_coefficients();
     }
@@ -316,5 +376,29 @@ mod tests {
             ..Default::default()
         };
         assert!((Curve::from_params(&p0).knee_db - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fast_path_matches_full_formula() {
+        // Settled curve: skipping log10 below the knee must not change the gain.
+        let p = CompressorParams {
+            threshold: 0.25,
+            ratio: 4.0,
+            knee: 0.5,
+            attack_ms: 0.01,
+            release_ms: 0.01,
+            ..Default::default()
+        };
+        let gc = Curve::from_params(&p.clamped()).computer();
+        let edge = gc.knee_start_lin();
+        for x in [0.0, 1e-6, edge * 0.999, edge, edge * 1.000_001, 0.2, 0.9] {
+            let mut c = Compressor::new();
+            c.set_params(&p);
+            c.configure(48_000.0, 1);
+            let mut buf = [x as f32; 64];
+            c.process(&mut buf);
+            let want = gc.reduction_db(lin_to_db(x as f32 as f64));
+            assert!((c.gain_reduction_db() - want).abs() < 1e-9, "x={x}");
+        }
     }
 }

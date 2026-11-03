@@ -23,6 +23,7 @@
 
 pub mod biquad;
 pub mod compressor;
+pub mod dynamics;
 pub mod equalizer;
 pub mod gate;
 pub mod limiter;
