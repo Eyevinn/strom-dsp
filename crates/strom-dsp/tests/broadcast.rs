@@ -12,7 +12,9 @@
 //!   `meter::LoudnessMeter` (`ebur128`) on the same signal.
 //! - Robustness and zero allocations.
 //! - Acceptance (60 s programme per preset at −35/−23/−10 LUFS): see
-//!   [`acceptance`], using the presets of `strom_dsp::presets`.
+//!   [`acceptance`], using the presets of `strom_dsp::presets`: integrated
+//!   loudness (from 10 s) within ±1 LU of the target, true peak ≤ ceiling +
+//!   0.1 dB, both measured with `ebur128`.
 
 mod agc_support;
 
@@ -224,6 +226,19 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
+    // Lookahead plus the true-peak detector delay (24 + 8 frames).
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
+        240 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
+        221 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
+        480 + 32
+    );
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),
@@ -805,10 +820,9 @@ fn no_allocation() {
 /// (BS.1770, `ebur128`) stays at or below the ceiling + 0.1 dB.
 ///
 /// With these gentle presets this programme's output true peak stays 2 …
-/// 9 dB below the ceiling, so the true-peak part passes with the interim
-/// sample-peak limiter too; it does not stress the limiter (the limiter's
-/// own tests do). TODO(true-peak limiter): add a hot, peaky programme here
-/// once the true-peak limiter is in the chain.
+/// 9 dB below the ceiling, so it does not stress the true-peak limiter (its
+/// own tests in `tests/truepeak.rs` do). TODO: add a hot, peaky programme
+/// through the full chain.
 mod acceptance {
     use super::*;
     use strom_dsp::presets::BroadcastPreset;

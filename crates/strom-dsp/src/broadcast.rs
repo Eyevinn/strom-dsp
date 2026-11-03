@@ -22,10 +22,9 @@
 //!   latency).
 //! - **Multiband**: [`crate::multiband::MultibandCompressor`] (LR4
 //!   crossover, compressor per band; no latency, an all-pass at ratio 1).
-//! - **Limiter**: lookahead limiter with ceiling `true_peak_ceiling_dbtp`;
-//!   its latency is the whole chain latency. Until the true-peak limiter
-//!   lands this is the phase 1 sample-peak [`crate::Limiter`] (attack = the
-//!   lookahead), behind the private `LimiterStage` adapter.
+//! - **Limiter**: [`crate::truepeak::TruePeakLimiter`] with ceiling
+//!   `true_peak_ceiling_dbtp` (dBTP, BS.1770 Annex 2 detector); its latency
+//!   (lookahead + 32 frames of detector delay) is the whole chain latency.
 //!
 //! # Bypass and latency
 //!
@@ -49,8 +48,9 @@
 //! Between `configure`/`reset` and the first processed frame, `set_params`
 //! applies bypass states and the input gain instantly (no fade).
 //!
-//! The latency is `agc latency (0) + limiter latency` and depends only on
-//! the sample rate and the lookahead ([`BroadcastProcessor::latency_frames_for`]).
+//! The latency is `agc latency (0) + limiter latency`, i.e.
+//! `round(lookahead · fs / 1000) + 32` frames (272 at 48 kHz with the
+//! default 5 ms), and depends only on the sample rate and the lookahead ([`BroadcastProcessor::latency_frames_for`]).
 //! `num_bands` and `limiter_lookahead_ms` are structural: they take effect
 //! at the next [`Processor::configure`].
 //!
@@ -73,10 +73,10 @@
 
 use crate::agc::{Agc, AgcParams};
 use crate::dynamics::OnePole;
-use crate::limiter::{self, Limiter, LimiterParams};
 use crate::meter::{ChannelLayout, LoudnessConfig, LoudnessDetector, LoudnessMeter};
 use crate::multiband::{MultibandBandParams, MultibandCompressor, MultibandParams, MAX_BANDS};
 use crate::oversample::{OversampleFactor, Oversampler};
+use crate::truepeak::{self, TruePeakLimiter, TruePeakLimiterParams};
 use crate::util::{db_to_lin, lin_to_db};
 use crate::Processor;
 
@@ -341,19 +341,19 @@ impl AgcStage {
     }
 }
 
-/// Limiter stage. STAND-IN: the phase 1 sample-peak [`Limiter`] (attack =
-/// lookahead), until the true-peak limiter is available. Latency = the
-/// lookahead in frames.
+/// Limiter stage: [`TruePeakLimiter`] (BS.1770 Annex 2 detector). Its own
+/// `enabled` stays on: the chain does the bypass. Latency = lookahead +
+/// detector delay.
 #[derive(Debug, Default)]
 struct LimiterStage {
-    inner: Limiter,
+    inner: TruePeakLimiter,
 }
 
 impl LimiterStage {
     /// Latency of the stage (frames) for a sample rate and a lookahead
     /// (already clamped to the element range).
     fn latency_frames_for(sample_rate: f32, lookahead_ms: f32) -> usize {
-        limiter::lookahead_frames(lookahead_ms, sample_rate)
+        truepeak::latency_frames_for(lookahead_ms, sample_rate)
     }
 
     fn configure(&mut self, sample_rate: f32, channels: usize) {
@@ -361,10 +361,9 @@ impl LimiterStage {
     }
 
     fn set_params(&mut self, p: &BroadcastParams, lookahead_ms: f32) {
-        self.inner.set_params(&LimiterParams {
+        self.inner.set_params(&TruePeakLimiterParams {
             enabled: true,
-            threshold_db: p.true_peak_ceiling_dbtp,
-            attack_ms: lookahead_ms,
+            ceiling_dbtp: p.true_peak_ceiling_dbtp,
             release_ms: p.limiter_release_ms,
             lookahead_ms,
         });
@@ -380,7 +379,7 @@ impl LimiterStage {
 
     /// Current gain reduction (positive dB).
     fn gain_reduction_db(&self) -> f64 {
-        (-lin_to_db(self.inner.current_gain())).max(0.0)
+        self.inner.gain_reduction_db()
     }
 
     fn latency_frames(&self) -> usize {
