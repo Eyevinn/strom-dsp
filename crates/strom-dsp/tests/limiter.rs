@@ -5,6 +5,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use proptest::prelude::*;
+use strom_dsp::limiter::GAIN_HOLD_MS;
 use strom_dsp::{Limiter, LimiterParams, Processor, MAX_LOOKAHEAD_MS};
 
 // ---------------------------------------------------------------------------
@@ -530,8 +531,16 @@ fn release_follows_documented_time_constant() {
             .map(|n| out[n] as f64 / input[n - d] as f64)
             .collect();
         let g0 = db(-20.0);
-        // First frame of release.
+        // First frame of release. The gain is held for
+        // H = min(GAIN_HOLD_MS, release) frames after the last loud frame
+        // (listening-test THD fix); the time constant applies from there.
         let start = gains.iter().position(|&g| g > g0 * 1.0001).unwrap();
+        let hold = (f64::from(rel).min(GAIN_HOLD_MS) * 0.001 * fs as f64).round() as usize;
+        assert_eq!(
+            start,
+            loud + hold,
+            "rel={rel}: release starts after the hold"
+        );
         assert!((gains[start - 1] - g0).abs() < 1e-6);
         let tau = (rel as f64 * 0.001 * fs as f64).round() as usize;
         let gap0 = 1.0 - g0;
@@ -546,6 +555,35 @@ fn release_follows_documented_time_constant() {
             assert!(w[1] >= w[0] - 1e-6 && w[1] <= 1.0 + 1e-6);
         }
     }
+}
+
+#[test]
+fn longer_hold_does_not_drop_a_releasing_gain() {
+    // Release 5 ms (hold 5 ms) → 100 ms (hold 20 ms) while the gain is
+    // releasing after a loud passage: the longer hold must not reach back to
+    // the loud frames and pull the gain down again. It grows frame by frame.
+    let fs = 48_000.0;
+    let mut l = make(fs, 1, &params(-20.0, 1.0, 5.0, 2.0));
+    let d = l.latency_frames();
+    let loud = 4800;
+    let mut input = vec![1.0f32; loud];
+    input.extend(std::iter::repeat_n(0.01f32, 4800));
+    let mut out = input.clone();
+    // Switch 10 ms after the loud part has left the output: hold (5 ms)
+    // over, release under way.
+    let split = loud + d + 480;
+    l.process(&mut out[..split]);
+    let g_before = out[split - 1] as f64 / input[split - 1 - d] as f64;
+    assert!(g_before > db(-20.0) * 1.01, "release under way: {g_before}");
+    l.set_params(&params(-20.0, 1.0, 100.0, 2.0));
+    l.process(&mut out[split..]);
+    let gains: Vec<f64> = (split - 1..out.len())
+        .map(|n| out[n] as f64 / input[n - d] as f64)
+        .collect();
+    for w in gains.windows(2) {
+        assert!(w[1] >= w[0] - 1e-9, "gain fell {} → {}", w[0], w[1]);
+    }
+    assert_eq!(l.safety_clip_count(), 0);
 }
 
 #[test]

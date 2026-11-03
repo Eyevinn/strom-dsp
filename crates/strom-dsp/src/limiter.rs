@@ -14,12 +14,21 @@
 //!
 //! # Gain computation (derived from the requirement above)
 //!
-//! With attack length `A ≤ L` frames, split as `A = A1 + A2`:
+//! With attack length `A ≤ L` frames, split as `A = A1 + A2`, and hold
+//! `H = min(`[`GAIN_HOLD_MS`]`, release)` frames:
 //!
 //! 1. **Sliding minimum** ([`SegmentedMin`])
-//!    `h[m] = min { r[j] : m − L ≤ j ≤ m − L + A }`
-//!    (a window of `A + 1` required gains, ending `L − A` frames in the past, so
-//!    it is causal). Computed with the van Herk / Gil–Werman segment algorithm
+//!    `h[m] = min { r[j] : m − L − H ≤ j ≤ m − L + A }`
+//!    (a window of `A + H + 1` required gains, ending `L − A` frames in the
+//!    past, so it is causal). The *base* part `[m − L, m − L + A]` makes the
+//!    gain reach the required gain in time; the *hold* part `[m − L − H, m − L)`
+//!    keeps it down for `H` frames after a peak has been output, so on a
+//!    steady low-frequency tone the gain does not release between waveform
+//!    peaks (a window of at least half a period always contains a peak of
+//!    `|x|`). Without it the gain rippled with every half-cycle: 3.4 % THD at
+//!    50 Hz with attack 1 ms / release 50 ms. The release therefore starts `H`
+//!    frames after the last frame that required the reduction.
+//!    Computed with the van Herk / Gil–Werman segment algorithm
 //!    (prefix and suffix minima of fixed-length segments): a constant number of
 //!    comparisons per frame, independent of the material. It uses comparisons
 //!    only, so `h[m]` is the *exact* minimum of the window, which is all the
@@ -33,12 +42,17 @@
 //!
 //! *Why the ceiling is guaranteed*: the box output at `n` is a weighted mean
 //! (non-negative weights summing to 1) of `h[n − k]` for `0 ≤ k ≤ A`. The window
-//! of `h[n − k]` is `[n − k − L, n − k − L + A]`, which contains `n − L` for every
-//! such `k`. Since each `h` is the exact window minimum (including right after
-//! a rebuild, which pre-fills the segment minimum with the full window from the
-//! stored history), each `h[n − k] ≤ r[n − L]`, so the mean is `≤ r[n − L]`, and the
-//! release stage never exceeds the box output. The gain reaches its target
-//! exactly when the peak is output, starting `A` frames earlier.
+//! of `h[n − k]` is `[n − k − L − H, n − k − L + A]`. It contains `n − L` for
+//! every such `k`: its start `n − k − L − H ≤ n − L` because `k, H ≥ 0` (the hold
+//! only moves the start further back), and its end `n − k − L + A ≥ n − L`
+//! because `k ≤ A`. In fact the *base* part `[n − k − L, n − k − L + A]` alone
+//! contains `n − L`. Each `h` is the exact minimum over a set that includes its
+//! whole base window (right after a rebuild, the segment minimum is pre-filled
+//! from the stored history; only values in the hold part may be replaced by 1,
+//! which is `≥` every `r`, see the rebuild rule below), so each
+//! `h[n − k] ≤ r[n − L]`, the mean is `≤ r[n − L]`, and the release stage never
+//! exceeds the box output. The gain reaches its target exactly when the peak
+//! is output, starting `A` frames earlier.
 //!
 //! To make this hold *exactly* in floating point the box stage works on
 //! integers: `h` is quantised downwards to a fixed-point value with
@@ -48,7 +62,7 @@
 //! final `f64 → f32` rounding of `g · x` cannot cross it.
 //!
 //! With lookahead 0 the windows degenerate to `A = 0`: the gain drops instantly
-//! to `r[n]` (a hard limiter with smooth release).
+//! to `r[n]` (a hard limiter with hold and smooth release).
 //!
 //! # Parameter changes
 //!
@@ -59,14 +73,23 @@
 //!   When disabled, incoming frames require unity gain; the gain returns to
 //!   exactly 1.0 by a linear ramp of 10 ms (full scale) after the frames that
 //!   were limited have left, after which the output is a bit-exact delay.
-//! - Attack changes rebuild the min/box pipeline from the stored history of
-//!   required gains *as if* the new attack had always been in force (O(lookahead),
-//!   no allocation), so the guarantee holds immediately.
+//! - Attack changes, and release changes that change the hold `H`, rebuild the
+//!   min/box pipeline from the stored history of required gains (O(lookahead +
+//!   hold), no allocation). The base window is replayed *as if* the new attack
+//!   had always been in force, so the guarantee holds immediately. The hold
+//!   part never reaches further back than the previous pipeline did: required
+//!   gains older than that count as 1. A longer hold therefore grows one frame
+//!   per frame instead of pulling in old, lower required gains and dropping a
+//!   releasing gain at once; a shorter hold lets the release start earlier,
+//!   smoothly.
 //! - Lookahead changes cross-fade (raised cosine, 5 ms) from the old to the new
 //!   delay tap. During the cross-fade the sliding-minimum window is widened to
-//!   cover both taps (`[m − Lhi, m − Llo + A]`), so the gain is at most the required
-//!   gain of *both* samples being mixed and the guarantee still holds. A further
-//!   change during a cross-fade is queued until it completes.
+//!   cover both taps (`[m − Lhi − H, m − Llo + A]`, base part
+//!   `[m − Lhi, m − Llo + A]`), so the gain is at most the required gain of
+//!   *both* samples being mixed and the guarantee still holds: for
+//!   `0 ≤ k ≤ A` the base window of `h[n − k]` contains both `n − Lhi` and
+//!   `n − Llo`. A further change during a cross-fade is queued until it
+//!   completes.
 //! - Between `configure`/`reset` and the first processed frame, `set_params`
 //!   applies instantly (no cross-fade from the previous lookahead), so the
 //!   result does not depend on whether parameters were set before or after
@@ -105,6 +128,12 @@ use fearless_simd::prelude::*;
 /// `configure` time so lookahead changes never allocate.
 pub const MAX_LOOKAHEAD_MS: f32 = 20.0;
 
+/// Longest gain hold (ms): the hold is `H = min(GAIN_HOLD_MS, release)`
+/// frames, and the release starts `H` frames after the last frame that
+/// required the reduction. 20 ms is half a period of 25 Hz, so the gain on a
+/// steady sine at or above 25 Hz does not ripple (see the module docs).
+pub const GAIN_HOLD_MS: f64 = 20.0;
+
 /// Length of the cross-fade between delay taps on a lookahead change (ms).
 const XFADE_MS: f64 = 5.0;
 /// Time for the gain to ramp from 0 to 1 when the limiter is disabled (ms).
@@ -123,7 +152,8 @@ pub struct LimiterParams {
     pub threshold_db: f32,
     /// Attack time (ms, 0.01 … 50).
     pub attack_ms: f32,
-    /// Release time (ms, 1 … 2000).
+    /// Release time (ms, 1 … 2000): one-pole time constant of the gain's rise.
+    /// The rise starts after a hold of `min(`[`GAIN_HOLD_MS`]`, release)`.
     pub release_ms: f32,
     /// Lookahead (ms, 0 … 20). Latency = round(lookahead · fs / 1000) frames.
     pub lookahead_ms: f32,
@@ -208,8 +238,11 @@ pub struct Limiter {
     bypass_step: f64,
     target_lookahead: usize,
     attack_frames: usize,
+    hold_frames: usize,
+    max_hold_frames: usize,
     xfade_frames: usize,
-    attack_dirty: bool,
+    /// Attack or hold changed: the min/ramp pipeline needs a rebuild.
+    shape_dirty: bool,
 
     delay: DelayLine,
     // Per-input-frame history: required gain and ceiling, indexed by frame time.
@@ -220,6 +253,11 @@ pub struct Limiter {
     // Gain pipeline.
     window_min: SegmentedMin,
     win_push_delay: u64,
+    /// Oldest frame time (exclusive bound) the hold part of the window may
+    /// reach back to after a rebuild; see [`Limiter::rebuild`].
+    hold_from: u64,
+    /// Window reach `hi + hold` of the last rebuild.
+    built_reach: u64,
     ramp: RampSmoother,
     gain: f64,
 
@@ -255,14 +293,18 @@ impl Limiter {
             bypass_step: 1.0,
             target_lookahead: 0,
             attack_frames: 0,
+            hold_frames: 0,
+            max_hold_frames: 0,
             xfade_frames: 1,
-            attack_dirty: false,
+            shape_dirty: false,
             delay: DelayLine::default(),
             req_hist: Vec::new(),
             ceil_hist: Vec::new(),
             hist_mask: 0,
             window_min: SegmentedMin::default(),
             win_push_delay: 0,
+            hold_from: 0,
+            built_reach: 0,
             ramp: RampSmoother::default(),
             gain: 1.0,
             now: TIME_ORIGIN,
@@ -344,7 +386,13 @@ impl Limiter {
         let attack = ms_to_frames(p.attack_ms as f64, fs).min(self.max_frames);
         if attack != self.attack_frames {
             self.attack_frames = attack;
-            self.attack_dirty = true;
+            self.shape_dirty = true;
+        }
+        let hold =
+            ms_to_frames((p.release_ms as f64).min(GAIN_HOLD_MS), fs).min(self.max_hold_frames);
+        if hold != self.hold_frames {
+            self.hold_frames = hold;
+            self.shape_dirty = true;
         }
     }
 
@@ -356,28 +404,54 @@ impl Limiter {
         }
     }
 
-    /// Rebuild the min/box pipeline for the current geometry from the stored
-    /// required-gain history, as if the geometry had always been in force.
-    /// O(lookahead), no allocation.
+    /// Rebuild the min/box pipeline for the current geometry (taps, attack,
+    /// hold) from the stored required-gain history. O(lookahead + hold), no
+    /// allocation.
+    ///
+    /// The *base* part of each window, `[t − hi, t − d]`, is always replayed
+    /// from the history exactly: the ceiling proof rests on it. The *hold*
+    /// part, `[t − hi − H, t − hi)`, never reaches further back than the
+    /// previous pipeline did (frames before `hold_from` count as 1, the
+    /// neutral value), so a longer hold or a longer window does not pull in
+    /// old, lower required gains at once and drop the gain: the hold grows
+    /// one frame per frame instead. On a fresh start the history is all 1
+    /// and nothing is masked.
     fn rebuild(&mut self) {
-        self.attack_dirty = false;
+        self.shape_dirty = false;
         let (lo, hi) = self.taps();
         let a = self.attack_frames.min(lo);
         let d = (lo - a) as u64;
         let hi = hi as u64;
+        let hold = self.hold_frames as u64;
         let mask = self.hist_mask;
         let m = self.now;
         self.win_push_delay = d;
 
         // Replay h for t in [m-1-a, m-1]: the ramp's output depends only on
         // its last a+1 inputs, so this restores its exact state. The window
-        // of h[t] is [t − hi, t − d] (hi − d + 1 values); pre-fill the
-        // minimum with the w − 1 values before the first window's end.
+        // of h[t] is [t − hi − hold, t − d] (hi + hold − d + 1 values);
+        // pre-fill the minimum with the w − 1 values before the first
+        // window's end.
         let start = m - 1 - a as u64;
-        self.window_min.reset((hi - d + 1) as usize);
+        self.hold_from = if self.fresh {
+            0
+        } else {
+            self.hold_from.max(start - self.built_reach)
+        };
+        self.built_reach = hi + hold;
+        self.window_min.reset((hi + hold - d + 1) as usize);
         self.ramp.reset(a, 1.0);
-        for e in start - hi..start - d {
-            self.window_min.push(self.req_hist[e as usize & mask]);
+        // Only values before `start − hi` can be masked: they lie in the hold
+        // part of every window replayed or pushed from here on, never in a
+        // base part (base windows start at t − hi ≥ start − hi).
+        let mask_end = self.hold_from.min(start - hi);
+        for e in start - hi - hold..start - d {
+            let r = if e < mask_end {
+                1.0
+            } else {
+                self.req_hist[e as usize & mask]
+            };
+            self.window_min.push(r);
         }
         for t in start..m {
             let h = self.window_min.push(self.req_hist[(t - d) as usize & mask]);
@@ -553,6 +627,7 @@ impl Processor for Limiter {
             return;
         }
         self.max_frames = ms_to_frames(MAX_LOOKAHEAD_MS as f64, fs);
+        self.max_hold_frames = ms_to_frames(GAIN_HOLD_MS, fs);
         self.xfade_frames = ms_to_frames(XFADE_MS, fs).max(1);
 
         // Room for a whole block on top of the longest delay: a block is
@@ -560,8 +635,10 @@ impl Processor for Limiter {
         self.delay
             .allocate(self.max_frames + BLOCK_FRAMES, channels);
 
-        // History must reach back 2·Lmax + 1 frames for a rebuild.
-        let hist = (2 * self.max_frames + 2).next_power_of_two();
+        // History must reach back a + hi + H + 1 ≤ 2·Lmax + Hmax + 1 frames
+        // for a rebuild, besides the frame being written. The window minimum
+        // (at most Lmax + Hmax + 1 values) fits in the same size.
+        let hist = (2 * self.max_frames + self.max_hold_frames + 2).next_power_of_two();
         self.req_hist = vec![1.0; hist];
         self.ceil_hist = vec![f32::INFINITY; hist];
         self.hist_mask = hist - 1;
@@ -600,7 +677,7 @@ impl Processor for Limiter {
             return;
         }
         self.fresh = false;
-        if self.attack_dirty {
+        if self.shape_dirty {
             self.rebuild();
         }
         self.start_crossfade_if_needed();
