@@ -21,11 +21,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod biquad;
 pub mod compressor;
 pub mod equalizer;
 pub mod gate;
 pub mod limiter;
 pub mod util;
+
+mod lanes;
 
 pub use compressor::{Compressor, CompressorParams};
 pub use equalizer::{BandParams, BandType, Equalizer, EqualizerParams, MAX_BANDS};

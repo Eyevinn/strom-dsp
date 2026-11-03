@@ -34,19 +34,31 @@
 //! - **Initial parameters**: after [`Processor::configure`] or
 //!   [`Processor::reset`], the first `process` call takes the current
 //!   parameters immediately (no smoothing or crossfade from stale values).
-//! - **Denormals**: each biquad output (the only recursive state) is flushed
-//!   to zero below 1e-15 with [`flush_denormal`]. Inputs are `f32` samples
-//!   promoted to `f64`, which can never be `f64` subnormals.
+//! - **Processing order**: built on the [`crate::biquad`] kernels. All active
+//!   bands run in series *sample by sample* (not band by band over the whole
+//!   buffer), with the channels of a frame as SIMD lanes, and the signal stays
+//!   in `f64` between bands. The steady state (no band changing) is a plain
+//!   loop with fixed coefficients; per-sample coefficient interpolation and
+//!   crossfading only run in segments where a band is actually changing.
+//! - **Denormals**: filter states are flushed to zero below 1e-15 (every 32
+//!   frames in the steady state, every sample while changing; see
+//!   [`crate::biquad`]). Inputs are `f32` samples promoted to `f64`, which can
+//!   never be `f64` subnormals.
 //! - **Robustness**: samples written back are clamped to the finite `f32`
 //!   range, so even eight +60 dB bands in series cannot produce `Inf`. If a
 //!   non-finite input poisons a band state, that state is cleared at the end of
 //!   the `process` call.
 
-use crate::util::{flush_denormal, one_pole_coef};
+use crate::biquad::{
+    run_changing, run_steady, sanitize_bank, ChangingStage, FadeOut, SteadyStage, MAX_STAGES,
+    STATE_PER_CHANNEL,
+};
+use crate::util::one_pole_coef;
 use crate::Processor;
 
 /// Maximum number of bands.
 pub const MAX_BANDS: usize = 8;
+const _: () = assert!(MAX_BANDS <= MAX_STAGES);
 
 /// Lowest centre/corner frequency (Hz).
 pub const MIN_FREQUENCY_HZ: f32 = 1.0;
@@ -164,54 +176,7 @@ impl Default for EqualizerParams {
     }
 }
 
-/// Normalised biquad coefficients (`a0 = 1`):
-/// `H(z) = (b0 + b1·z⁻¹ + b2·z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct BiquadCoefficients {
-    /// Feed-forward coefficient of `x[n]`.
-    pub b0: f64,
-    /// Feed-forward coefficient of `x[n−1]`.
-    pub b1: f64,
-    /// Feed-forward coefficient of `x[n−2]`.
-    pub b2: f64,
-    /// Feedback coefficient of `y[n−1]` (sign as in the denominator above).
-    pub a1: f64,
-    /// Feedback coefficient of `y[n−2]` (sign as in the denominator above).
-    pub a2: f64,
-}
-
-impl BiquadCoefficients {
-    /// Magnitude `|H(e^{jω})|` at normalised angular frequency `w` (rad/sample).
-    pub fn magnitude(&self, w: f64) -> f64 {
-        // e^{-jw} = cos w − j sin w ; e^{-2jw} = cos 2w − j sin 2w
-        let (s1, c1) = w.sin_cos();
-        let (s2, c2) = (2.0 * w).sin_cos();
-        let nr = self.b0 + self.b1 * c1 + self.b2 * c2;
-        let ni = -(self.b1 * s1 + self.b2 * s2);
-        let dr = 1.0 + self.a1 * c1 + self.a2 * c2;
-        let di = -(self.a1 * s1 + self.a2 * s2);
-        ((nr * nr + ni * ni) / (dr * dr + di * di)).sqrt()
-    }
-
-    fn lerp_step(&self, to: &Self, inv_n: f64) -> Self {
-        Self {
-            b0: (to.b0 - self.b0) * inv_n,
-            b1: (to.b1 - self.b1) * inv_n,
-            b2: (to.b2 - self.b2) * inv_n,
-            a1: (to.a1 - self.a1) * inv_n,
-            a2: (to.a2 - self.a2) * inv_n,
-        }
-    }
-
-    #[inline(always)]
-    fn add(&mut self, d: &Self) {
-        self.b0 += d.b0;
-        self.b1 += d.b1;
-        self.b2 += d.b2;
-        self.a1 += d.a1;
-        self.a2 += d.a2;
-    }
-}
+pub use crate::biquad::BiquadCoefficients;
 
 /// Clamp a frequency (Hz) to the range the equalizer realises at `sample_rate`.
 pub fn clamp_frequency(freq_hz: f64, sample_rate: f64) -> f64 {
@@ -239,78 +204,18 @@ fn clamp_q(q: f64) -> f64 {
 /// Cookbook coefficients for an already-clamped frequency/gain/Q.
 /// Returns `None` for [`BandType::Off`].
 fn cookbook(ty: BandType, f0: f64, gain_db: f64, q: f64, fs: f64) -> Option<BiquadCoefficients> {
-    let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
-    let (sin_w, cos_w) = w0.sin_cos();
-    let half_sin = (0.5 * w0).sin();
-    let half_cos = (0.5 * w0).cos();
-    // 1 − cos w0 and 1 + cos w0 without cancellation.
-    let one_minus_cos = 2.0 * half_sin * half_sin;
-    let one_plus_cos = 2.0 * half_cos * half_cos;
-    let alpha = sin_w / (2.0 * q);
-
-    // Common denominator of the non-gain types: 1 + α, −2 cos w0, 1 − α.
-    let plain_den = (1.0 + alpha, -2.0 * cos_w, 1.0 - alpha);
-
-    let (b0, b1, b2, (a0, a1, a2)) = match ty {
+    type C = BiquadCoefficients;
+    Some(match ty {
         BandType::Off => return None,
-        BandType::LowPass => (
-            0.5 * one_minus_cos,
-            one_minus_cos,
-            0.5 * one_minus_cos,
-            plain_den,
-        ),
-        BandType::HighPass => (
-            0.5 * one_plus_cos,
-            -one_plus_cos,
-            0.5 * one_plus_cos,
-            plain_den,
-        ),
-        BandType::BandPassSkirt => (0.5 * sin_w, 0.0, -0.5 * sin_w, plain_den),
-        BandType::BandPassPeak => (alpha, 0.0, -alpha, plain_den),
-        BandType::Notch => (1.0, -2.0 * cos_w, 1.0, plain_den),
-        BandType::AllPass => (1.0 - alpha, -2.0 * cos_w, 1.0 + alpha, plain_den),
-        BandType::Peaking => {
-            let a = 10f64.powf(gain_db / 40.0);
-            (
-                1.0 + alpha * a,
-                -2.0 * cos_w,
-                1.0 - alpha * a,
-                (1.0 + alpha / a, -2.0 * cos_w, 1.0 - alpha / a),
-            )
-        }
-        BandType::LowShelf | BandType::HighShelf => {
-            let a = 10f64.powf(gain_db / 40.0);
-            let sa = 2.0 * a.sqrt() * alpha;
-            // (A+1) − (A−1)cos w0, (A+1) + (A−1)cos w0, and the two b1/a1 terms,
-            // rewritten in terms of 1 − cos w0 for low-frequency precision.
-            let p = 2.0 + (a - 1.0) * one_minus_cos;
-            let m = 2.0 * a - (a - 1.0) * one_minus_cos;
-            let am1_minus = -2.0 + (a + 1.0) * one_minus_cos; // (A−1) − (A+1)cos w0
-            let am1_plus = 2.0 * a - (a + 1.0) * one_minus_cos; // (A−1) + (A+1)cos w0
-            if ty == BandType::LowShelf {
-                (
-                    a * (p + sa),
-                    2.0 * a * am1_minus,
-                    a * (p - sa),
-                    (m + sa, -2.0 * am1_plus, m - sa),
-                )
-            } else {
-                (
-                    a * (m + sa),
-                    -2.0 * a * am1_plus,
-                    a * (m - sa),
-                    (p + sa, 2.0 * am1_minus, p - sa),
-                )
-            }
-        }
-    };
-    let inv = 1.0 / a0;
-    Some(BiquadCoefficients {
-        b0: b0 * inv,
-        b1: b1 * inv,
-        b2: b2 * inv,
-        a1: a1 * inv,
-        a2: a2 * inv,
+        BandType::LowPass => C::low_pass(f0, q, fs),
+        BandType::HighPass => C::high_pass(f0, q, fs),
+        BandType::BandPassSkirt => C::band_pass_skirt(f0, q, fs),
+        BandType::BandPassPeak => C::band_pass_peak(f0, q, fs),
+        BandType::Notch => C::notch(f0, q, fs),
+        BandType::AllPass => C::all_pass(f0, q, fs),
+        BandType::Peaking => C::peaking(f0, gain_db, q, fs),
+        BandType::LowShelf => C::low_shelf(f0, gain_db, q, fs),
+        BandType::HighShelf => C::high_shelf(f0, gain_db, q, fs),
     })
 }
 
@@ -379,8 +284,9 @@ pub struct Equalizer {
     channels: usize,
     targets: [Target; MAX_BANDS],
     slots: [BandSlot; MAX_BANDS],
-    /// DF-I state `[x1, x2, y1, y2]`, layout `[band][bank][channel]`.
-    states: Vec<[f64; 4]>,
+    /// DF-I state, `[band][bank]` regions of `STATE_PER_CHANNEL · channels`
+    /// values each (lane-group layout, see [`crate::biquad`]).
+    states: Vec<f64>,
     /// Smoother pole for one full ramp block.
     smooth_block_coef: f64,
     fade_len: usize,
@@ -454,21 +360,26 @@ impl Equalizer {
             s.fade_left = 0;
             s.prev_kind = BandType::Off;
         }
-        self.states.iter_mut().for_each(|s| *s = [0.0; 4]);
+        self.states.iter_mut().for_each(|v| *v = 0.0);
+    }
+
+    /// Offset of the state region of band `b`, bank `bank`.
+    fn bank_offset(&self, b: usize, bank: usize) -> usize {
+        (b * 2 + bank) * STATE_PER_CHANNEL * self.channels
     }
 
     /// Start a crossfade of slot `b` from its current realisation to its target type.
     fn begin_fade(&mut self, b: usize) {
-        let ch = self.channels;
+        let len = STATE_PER_CHANNEL * self.channels;
         let s = &mut self.slots[b];
         s.prev_kind = s.kind;
         s.prev_coefs = s.coefs;
         s.bank ^= 1;
         s.fade_left = self.fade_len;
-        let start = (b * 2 + s.bank) * ch;
-        self.states[start..start + ch]
+        let start = self.bank_offset(b, self.slots[b].bank);
+        self.states[start..start + len]
             .iter_mut()
-            .for_each(|st| *st = [0.0; 4]);
+            .for_each(|v| *v = 0.0);
         self.snap_slot_params(b);
     }
 
@@ -497,170 +408,85 @@ impl Equalizer {
         self.coefs_for(kind, f, g, q)
     }
 
-    fn process_band(&mut self, b: usize, samples: &mut [f32], frames: usize) {
-        let ch = self.channels;
-        let mut pos = 0;
-        while pos < frames {
-            let t = self.targets[b];
-            let s = &mut self.slots[b];
-            if s.fade_left == 0 && t.kind != s.kind {
-                self.begin_fade(b);
-            } else if s.kind == t.kind
-                && s.kind != BandType::Off
-                && (s.ln_f != t.ln_f || s.gain_db != t.gain_db || s.ln_q != t.ln_q)
-            {
-                // Same type, new frequency/gain/Q: (re)start smoothing.
-                s.settled = false;
-            }
+    /// At a segment boundary: start a pending type change of band `b`, or
+    /// (re)start smoothing if its frequency/gain/Q target moved.
+    fn update_band(&mut self, b: usize) {
+        let t = self.targets[b];
+        let s = &mut self.slots[b];
+        if s.fade_left == 0 && t.kind != s.kind {
+            self.begin_fade(b);
+        } else if s.kind == t.kind
+            && s.kind != BandType::Off
+            && (s.ln_f != t.ln_f || s.gain_db != t.gain_db || s.ln_q != t.ln_q)
+        {
+            s.settled = false;
+        }
+    }
 
+    /// Process one segment of `n` frames starting at frame `pos`, during which
+    /// no band starts or ends a crossfade and ramping bands advance by at most
+    /// one ramp block. Returns false if every band was idle.
+    fn process_segment(&mut self, data: &mut [f32], n: usize) -> bool {
+        let mut steady = [SteadyStage {
+            coefs: BiquadCoefficients::IDENTITY,
+            state: 0,
+        }; MAX_STAGES];
+        let mut changing = [ChangingStage {
+            new: None,
+            delta: None,
+            fade: None,
+        }; MAX_STAGES];
+        let mut count = 0;
+        let mut any_changing = false;
+        let inv_fade = 1.0 / self.fade_len as f64;
+        for b in 0..MAX_BANDS {
             let slot = self.slots[b];
             if slot.kind == BandType::Off && slot.fade_left == 0 {
-                // Idle band: nothing changes for the rest of this buffer.
-                return;
+                continue;
             }
-
-            let remaining = frames - pos;
-            let ramping = slot.kind != BandType::Off && !slot.settled;
-            let mut n = remaining;
-            if ramping {
-                n = n.min(RAMP_BLOCK);
-            }
-            if slot.fade_left > 0 {
-                n = n.min(slot.fade_left);
-            }
-
-            let delta = if ramping {
+            let delta = if slot.kind != BandType::Off && !slot.settled {
                 let next = self.advance_smoother(b, n);
-                let d = slot.coefs.lerp_step(&next, 1.0 / n as f64);
-                // Store the exact end point to avoid accumulated drift.
+                // Store the exact end point, so the interpolation never drifts.
                 self.slots[b].coefs = next;
-                Some(d)
+                Some(slot.coefs.ramp_step(&next, n))
             } else {
                 None
             };
-
-            let chunk = &mut samples[pos * ch..(pos + n) * ch];
-            let band_states = &mut self.states[b * 2 * ch..(b + 1) * 2 * ch];
-            let (bank0, bank1) = band_states.split_at_mut(ch);
-            let (cur_st, prev_st) = if slot.bank == 0 {
-                (bank0, bank1)
-            } else {
-                (bank1, bank0)
+            let cur = SteadyStage {
+                coefs: slot.coefs,
+                state: self.bank_offset(b, slot.bank),
             };
-
-            let mut coefs = slot.coefs;
-            let mut prev_coefs = slot.prev_coefs;
-            if slot.fade_left == 0 {
-                run_steady(chunk, ch, &mut coefs, delta.as_ref(), cur_st);
-            } else {
-                let fade_len = self.fade_len;
-                let done = fade_len - slot.fade_left;
-                run_fade(
-                    chunk,
-                    ch,
-                    FadeSide {
-                        active: slot.kind != BandType::Off,
-                        coefs: &mut coefs,
-                        delta: delta.as_ref(),
-                        states: cur_st,
-                    },
-                    FadeSide {
-                        active: slot.prev_kind != BandType::Off,
-                        coefs: &mut prev_coefs,
-                        delta: None,
-                        states: prev_st,
-                    },
-                    done,
-                    1.0 / fade_len as f64,
-                );
-                self.slots[b].fade_left -= n;
-                if self.slots[b].fade_left == 0 {
-                    self.slots[b].prev_kind = BandType::Off;
-                }
-            }
-            pos += n;
+            let fade = (slot.fade_left > 0).then(|| FadeOut {
+                old: (slot.prev_kind != BandType::Off).then(|| SteadyStage {
+                    coefs: slot.prev_coefs,
+                    state: self.bank_offset(b, slot.bank ^ 1),
+                }),
+                done: self.fade_len - slot.fade_left,
+                inv_len: inv_fade,
+            });
+            any_changing |= delta.is_some() || fade.is_some();
+            steady[count] = cur;
+            changing[count] = ChangingStage {
+                new: (slot.kind != BandType::Off).then_some(cur),
+                delta,
+                fade,
+            };
+            count += 1;
         }
+        if count == 0 {
+            return false;
+        }
+        if any_changing {
+            run_changing(data, self.channels, &changing[..count], &mut self.states);
+        } else {
+            run_steady(data, self.channels, &steady[..count], &mut self.states);
+        }
+        true
     }
 
     fn sanitize_states(&mut self) {
-        let ch = self.channels;
-        for b in 0..MAX_BANDS {
-            let region = &mut self.states[b * 2 * ch..(b + 1) * 2 * ch];
-            if region.iter().any(|s| s.iter().any(|v| !v.is_finite())) {
-                region.iter_mut().for_each(|s| *s = [0.0; 4]);
-            }
-        }
-    }
-}
-
-/// One DF-I step: `y = b0·x + b1·x1 + b2·x2 − a1·y1 − a2·y2`.
-#[inline(always)]
-fn df1_tick(c: &BiquadCoefficients, st: &mut [f64; 4], x: f64) -> f64 {
-    let y = c.b0 * x + c.b1 * st[0] + c.b2 * st[1] - c.a1 * st[2] - c.a2 * st[3];
-    let y = flush_denormal(y);
-    st[1] = st[0];
-    st[0] = x;
-    st[3] = st[2];
-    st[2] = y;
-    y
-}
-
-#[inline(always)]
-fn to_sample(y: f64) -> f32 {
-    y.clamp(-(f32::MAX as f64), f32::MAX as f64) as f32
-}
-
-fn run_steady(
-    chunk: &mut [f32],
-    ch: usize,
-    coefs: &mut BiquadCoefficients,
-    delta: Option<&BiquadCoefficients>,
-    states: &mut [[f64; 4]],
-) {
-    for frame in chunk.chunks_exact_mut(ch) {
-        if let Some(d) = delta {
-            coefs.add(d);
-        }
-        for (s, st) in frame.iter_mut().zip(states.iter_mut()) {
-            *s = to_sample(df1_tick(coefs, st, *s as f64));
-        }
-    }
-}
-
-struct FadeSide<'a> {
-    active: bool,
-    coefs: &'a mut BiquadCoefficients,
-    delta: Option<&'a BiquadCoefficients>,
-    states: &'a mut [[f64; 4]],
-}
-
-fn run_fade(
-    chunk: &mut [f32],
-    ch: usize,
-    new: FadeSide<'_>,
-    old: FadeSide<'_>,
-    done: usize,
-    inv_len: f64,
-) {
-    for (i, frame) in chunk.chunks_exact_mut(ch).enumerate() {
-        if let Some(d) = new.delta {
-            new.coefs.add(d);
-        }
-        let g = ((done + i + 1) as f64 * inv_len).min(1.0);
-        for (c, s) in frame.iter_mut().enumerate() {
-            let x = *s as f64;
-            let y_new = if new.active {
-                df1_tick(new.coefs, &mut new.states[c], x)
-            } else {
-                x
-            };
-            let y_old = if old.active {
-                df1_tick(old.coefs, &mut old.states[c], x)
-            } else {
-                x
-            };
-            *s = to_sample(y_old + (y_new - y_old) * g);
-        }
+        let len = 2 * STATE_PER_CHANNEL * self.channels;
+        self.states.chunks_exact_mut(len).for_each(sanitize_bank);
     }
 }
 
@@ -673,7 +499,7 @@ impl Processor for Equalizer {
         };
         self.sample_rate = fs;
         self.channels = channels;
-        self.states = vec![[0.0; 4]; MAX_BANDS * 2 * channels];
+        self.states = vec![0.0; MAX_BANDS * 2 * STATE_PER_CHANNEL * channels];
         self.smooth_block_coef = one_pole_coef(SMOOTHING_MS, fs).powi(RAMP_BLOCK as i32);
         self.fade_len = ((CROSSFADE_MS * 0.001 * fs).round() as usize).max(1);
         self.slots = [BandSlot::default(); MAX_BANDS];
@@ -689,19 +515,40 @@ impl Processor for Equalizer {
             self.snap_all();
             self.snap_pending = false;
         }
-        let frames = samples.len() / self.channels;
-        if frames == 0 {
+        let ch = self.channels;
+        let frames = samples.len() / ch;
+        let idle = (0..MAX_BANDS).all(|b| {
+            let s = &self.slots[b];
+            s.kind == BandType::Off && s.fade_left == 0 && self.targets[b].kind == BandType::Off
+        });
+        if frames == 0 || idle {
             return;
         }
         let mut touched = false;
-        for b in 0..MAX_BANDS {
-            let s = &self.slots[b];
-            if s.kind == BandType::Off && s.fade_left == 0 && self.targets[b].kind == BandType::Off
-            {
-                continue;
+        let mut pos = 0;
+        while pos < frames {
+            for b in 0..MAX_BANDS {
+                self.update_band(b);
             }
-            touched = true;
-            self.process_band(b, samples, frames);
+            // Segment: up to the next ramp-block or crossfade boundary of any
+            // band; the whole rest of the buffer when everything is steady.
+            let mut n = frames - pos;
+            for s in &self.slots {
+                if s.kind != BandType::Off && !s.settled {
+                    n = n.min(RAMP_BLOCK);
+                }
+                if s.fade_left > 0 {
+                    n = n.min(s.fade_left);
+                }
+            }
+            touched |= self.process_segment(&mut samples[pos * ch..(pos + n) * ch], n);
+            for s in self.slots.iter_mut().filter(|s| s.fade_left > 0) {
+                s.fade_left -= n;
+                if s.fade_left == 0 {
+                    s.prev_kind = BandType::Off;
+                }
+            }
+            pos += n;
         }
         if touched {
             self.sanitize_states();
@@ -709,7 +556,7 @@ impl Processor for Equalizer {
     }
 
     fn reset(&mut self) {
-        self.states.iter_mut().for_each(|s| *s = [0.0; 4]);
+        self.states.iter_mut().for_each(|v| *v = 0.0);
         self.snap_pending = true;
     }
 }
