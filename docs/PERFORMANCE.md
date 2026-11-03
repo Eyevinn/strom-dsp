@@ -37,6 +37,7 @@ cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 | `multiband` | multiband compressor (4 bands) |
 | `truepeak` | true-peak limiter |
 | `broadcast` | full broadcast chain with all meters |
+| `spike_guard` | spike guard, without events and with a click every 50 ms |
 
 All benches use 48 kHz. Most use 480-frame (10 ms) buffers; some also run
 1024 frames.
@@ -58,6 +59,8 @@ compare runs only on the same, otherwise idle, machine.
 | `broadcast` | full chain, 4 bands, with meters | 78.3 µs |
 | `truepeak` | 5 ms lookahead | 18.8 µs |
 | `multiband` | 4 bands | 46.7 µs |
+| `spike_guard` | no events / a click every 50 ms (separate run, load average about 4) | 12.1 / 13.9 µs |
+| `broadcast` | full chain with the spike guard, defaults (same run) | 64.7 µs |
 | `agc` | detector / AGC / ebur128 read every block | 1.55 / 1.95 / 263 µs |
 | `filters` | Butterworth 4 / 8, LR4 crossover 3 / 5 bands | 1.46 / 2.18 / 7.37 / 13.6 µs |
 | `sampling` | oversampler 4× up+down, 4× peaks; STFT 1024/256 | 17.6 / 9.44 / 13.3 µs |

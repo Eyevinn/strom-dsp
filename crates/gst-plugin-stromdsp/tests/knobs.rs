@@ -559,7 +559,12 @@ fn cases() -> Vec<Case> {
     v.push(case(b, &[], &[("preset", "atsc-a85")]));
     v.push(case(b, &[], &[("preset", "custom")]));
     // Stage bypass, both ways.
-    for stage in ["agc-enabled", "multiband-enabled", "limiter-enabled"] {
+    for stage in [
+        "spike-guard-enabled",
+        "agc-enabled",
+        "multiband-enabled",
+        "limiter-enabled",
+    ] {
         v.push(case(b, &[], &[(stage, "false")]));
         v.push(case(b, &[(stage, "false")], &[(stage, "true")]));
     }
@@ -572,6 +577,8 @@ fn cases() -> Vec<Case> {
     v.push(case(b, &[], &[("true-peak-ceiling", "-12")]));
     v.push(case(b, &[], &[("target-loudness", "-5")]));
     v.push(case(b, &[], &[("target-loudness", "-40")]));
+    v.push(case(b, &[], &[("spike-threshold", "6")]));
+    v.push(case(b, &[], &[("spike-threshold", "30")]));
     // Crossovers sweeping across the tone (band 2 → band 1, and back).
     v.push(case(b, &[], &[("crossover1-frequency", "3000")]));
     v.push(case(

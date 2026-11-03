@@ -52,6 +52,8 @@ fn spec() -> Vec<(String, Kind, glib::ParamFlags)> {
             Kind::Float(-12.0, 0.0, -1.0),
             LIVE,
         ),
+        ("spike-guard-enabled".into(), Kind::Bool(true), LIVE),
+        ("spike-threshold".into(), Kind::Float(6.0, 30.0, 8.0), LIVE),
         ("agc-enabled".into(), Kind::Bool(true), LIVE),
         ("agc-max-gain".into(), Kind::Float(0.0, 30.0, 24.0), LIVE),
         ("agc-max-cut".into(), Kind::Float(0.0, 30.0, 24.0), LIVE),
@@ -141,7 +143,7 @@ fn property_set_is_exact() {
     let mut want: Vec<String> = spec().into_iter().map(|(n, _, _)| n).collect();
     want.sort();
     assert_eq!(own, want);
-    assert_eq!(want.len(), 19 + 4 + 25);
+    assert_eq!(want.len(), 21 + 4 + 25);
 }
 
 #[test]
