@@ -1,5 +1,4 @@
-//! `stromdsp-broadcastprocessor`: broadcast/streaming final processor
-//! (phase 2 spec §3).
+//! `stromdsp-broadcastprocessor`: broadcast/streaming final processor.
 //!
 //! ```text
 //! input gain → wideband AGC → multiband compressor → true-peak limiter
@@ -74,8 +73,7 @@
 //! Setting `preset` to anything but `custom` sets every property except
 //! `enabled`, `meter-interval`, `num-bands` and `limiter-lookahead`, for the
 //! current `num-bands` (band settings and crossovers depend on the band
-//! count). Leaving out `limiter-lookahead` is a documented deviation from
-//! phase 2 spec §3.2: it is READY-only.
+//! count). `limiter-lookahead` is left out because it is READY-only.
 //!
 //! - Writing any other property afterwards changes only that property, and
 //!   `preset` then reads `custom`. A write that leaves the value as it was
@@ -111,12 +109,12 @@
 //! |---|---|---|---|
 //! | `running-time` | `guint64` | ns | running time of the end of the buffer (`GST_CLOCK_TIME_NONE` without timestamps) |
 //! | `stream-time` | `guint64` | ns | stream time of the end of the buffer (likewise) |
-//! | `input-momentary` | `gdouble` | LUFS | input loudness, 400 ms |
-//! | `input-short-term` | `gdouble` | LUFS | input loudness, 3 s |
+//! | `input-momentary` | `gdouble` | LUFS | input loudness, 400 ms, before `input-gain` |
+//! | `input-short-term` | `gdouble` | LUFS | input loudness, 3 s, before `input-gain` |
 //! | `output-momentary` | `gdouble` | LUFS | output loudness, 400 ms |
 //! | `output-short-term` | `gdouble` | LUFS | output loudness, 3 s |
 //! | `output-integrated` | `gdouble` | LUFS | gated output integrated loudness since start, flush or `reset` |
-//! | `input-true-peak` | `gdouble` | dBTP | max input true peak since the last message |
+//! | `input-true-peak` | `gdouble` | dBTP | max input true peak since the last message, before `input-gain` |
 //! | `output-true-peak` | `gdouble` | dBTP | max output true peak since the last message |
 //! | `agc-gain` | `gdouble` | dB | AGC gain, signed (+ = boost) |
 //! | `band-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of reduction, one per active band, lowest first |

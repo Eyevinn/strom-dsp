@@ -1,10 +1,10 @@
-//! Interface test of the compressor additions after the listening tests:
+//! Interface test of the compressor properties added after the first release:
 //! `detector` (GLib enum `StromDspCompressorDetector`, `peak` = 0,
 //! `rms` = 1 default), `rms-window` (Float, ms, 1 … 100, default 10) and
 //! `auto-makeup` (Boolean, default false). The defaults are the broadcast
 //! preset (`strom_dsp::presets`). All readable, writable,
-//! controllable and mutable in PLAYING. The phase 1 properties are checked
-//! by `tests/interface.rs`.
+//! controllable and mutable in PLAYING. The original properties are
+//! checked by `tests/interface.rs`.
 
 mod util;
 
@@ -37,7 +37,7 @@ fn check_flags(ps: &glib::ParamSpec) {
 }
 
 #[test]
-fn compressor_has_exactly_phase1_plus_additions() {
+fn compressor_has_exactly_original_plus_additions() {
     let e = make();
     let mut own: Vec<String> = e
         .list_properties()

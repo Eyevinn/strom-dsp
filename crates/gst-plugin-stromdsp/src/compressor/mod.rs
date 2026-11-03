@@ -1,6 +1,6 @@
 //! `stromdsp-compressor`: compressor element.
 //!
-//! Additions after the listening tests (additive; every phase 1 property,
+//! Properties added after the first release (additive; every original property,
 //! default and the static curve are unchanged):
 //!
 //! | Property | Type | Range | Default | Mutable |
@@ -23,7 +23,7 @@ mod imp;
 #[repr(i32)]
 #[enum_type(name = "StromDspCompressorDetector")]
 pub enum StromDspCompressorDetector {
-    /// Linked sample peak with a short hold (phase 1 calibration).
+    /// Linked sample peak with a short hold (the original calibration).
     #[default]
     #[enum_value(name = "Peak: linked sample peak", nick = "peak")]
     Peak = 0,

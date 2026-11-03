@@ -1,4 +1,4 @@
-//! Guard tests for the gate's detector (listening-test bug "chatter on noise
+//! Guard tests for the gate's detector (a bug found by ear, "chatter on noise
 //! peaks"): steady noise below the threshold must keep the gate closed even
 //! when its peaks exceed the threshold and open == close, while a
 //! speech-like burst above the threshold still opens it promptly.
@@ -158,7 +158,7 @@ fn speech_like_burst_above_threshold_opens_within_attack() {
     assert!(gains[pre + burst - 1] > 0.999);
 }
 
-/// Guard test for the listening-test bug "gate closes much more slowly than
+/// Guard test for a bug found by ear, "gate closes much more slowly than
 /// its release": after a burst stops (noise continues 11 dB below the
 /// threshold, open == close), the gain must reach `reduction` within
 /// `t_detector + hold + release`, and must not reopen on the noise.
@@ -167,7 +167,7 @@ fn speech_like_burst_above_threshold_opens_within_attack() {
 /// to the close threshold: the level decays with 20 ms, i.e. about 2.3 ms per
 /// dB. The burst reads ≈ −17 dB (−20 dBFS RMS, sine-calibrated) and the
 /// effective close threshold is −41 dB, so ≈ 24 dB → ≈ 55 ms; allowed: 70 ms.
-/// The phase 1 one-pole release needed ≈ 6.9 · release to reach −60 dB and
+/// The original one-pole release needed ≈ 6.9 · release to reach −60 dB and
 /// fails this test.
 #[test]
 fn gate_closes_within_hold_plus_release_after_burst() {

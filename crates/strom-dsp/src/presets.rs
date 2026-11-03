@@ -129,11 +129,11 @@ impl LimiterParams {
 }
 
 // ---------------------------------------------------------------------------
-// Broadcast final processor presets (phase 2 spec §3.2)
+// Broadcast final processor presets
 // ---------------------------------------------------------------------------
 
 /// A preset of the broadcast final processor (`stromdsp-broadcastprocessor`,
-/// phase 2 spec §3.2). Every value is strom-dsp's own, derived from the
+/// its `preset` property). Every value is strom-dsp's own, derived from the
 /// loudness standards (EBU R 128, ATSC A/85, AES TD1004/TD1008) and textbook
 /// dynamics practice (Giannoulis, Massberg & Reiss, JAES 2012; Zölzer,
 /// *DAFX*). The presets are deliberately **gentle** (low ratios, no drive):
@@ -163,10 +163,10 @@ impl LimiterParams {
 ///
 /// - **Target and ceiling** are those of the standard: EBU R 128 (−23 LUFS,
 ///   max true peak −1 dBTP), ATSC A/85 (−24 LKFS, −2 dBTP), the AES TD1004/
-///   TD1008 range for streaming (−16 LUFS, −1 dBTP) and the phase 2 spec's
+///   TD1008 range for streaming (−16 LUFS, −1 dBTP) and strom-dsp's own
 ///   speech target (−18 LUFS, −1 dBTP).
 /// - **AGC range and rates.** `EbuR128` is the element's default, so it
-///   keeps the phase 2 spec §3.1 defaults: ±12 dB covers programme delivered
+///   keeps the element's documented defaults: ±12 dB covers programme delivered
 ///   between −35 and −11 LUFS for its −23 LUFS target, and 1 dB/s up,
 ///   3 dB/s down is a slow "fader", not a compressor (well below the
 ///   syllable rate), cutting faster than boosting so a sudden loud item comes
@@ -176,7 +176,7 @@ impl LimiterParams {
 ///   for −10 LUFS input), so they get ±24 dB and 3 / 6 dB/s: still a slow
 ///   rider (a 12 dB correction takes 2 … 4 s), fast enough to land within
 ///   the first 10 s of a programme at −35 … −10 LUFS input. All four pass
-///   the phase 2 spec §4 chain acceptance test (60 s programme at −35, −23
+///   the chain acceptance test (60 s programme at −35, −23
 ///   and −10 LUFS input, integrated within ±1 LU of the target after 10 s;
 ///   `tests/broadcast.rs`).
 /// - **AGC gate** −50 LUFS for programme: room tone and pauses sit below it,
@@ -226,8 +226,8 @@ impl LimiterParams {
 /// longer pump everything else); 3 bands add 3 kHz, the region where the
 /// ear is most sensitive (ISO 226 equal-loudness contours), so presence and
 /// sibilance are controlled apart from the body; 4 and 5 bands use the
-/// phase 2 spec's defaults (120, 800, 4000, 10000 Hz). Crossovers that a
-/// band count does not use keep ascending placeholder values. Bands at or
+/// element's defaults (120, 800, 4000, 10000 Hz). Crossovers that a
+/// band count does not use keep ascending filler values. Bands at or
 /// above the band count are inactive; they get the 5-band values of their
 /// index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -421,7 +421,7 @@ mod tests {
     }
 
     /// Every broadcast preset, at every band count, is in the element's
-    /// ranges (phase 2 spec §3.1), has strictly ascending crossovers (≥ 1 Hz
+    /// ranges, has strictly ascending crossovers (≥ 1 Hz
     /// apart, the element's rule), and is gentle.
     #[test]
     fn broadcast_presets_are_in_range_and_gentle() {
@@ -463,7 +463,7 @@ mod tests {
         assert!(s.agc_gate_lufs > e.agc_gate_lufs, "faster AGC gate");
     }
 
-    /// Targets and ceilings are those of the standards (phase 2 spec §3.2).
+    /// Targets and ceilings are those of the standards.
     #[test]
     fn broadcast_preset_targets() {
         for (preset, t, c) in [
@@ -477,10 +477,10 @@ mod tests {
         }
     }
 
-    /// The default preset (`ebu-r128`, 4 bands) matches the spec §3.1
-    /// defaults of every property the spec fixes.
+    /// The default preset (`ebu-r128`, 4 bands) matches the element's
+    /// documented default of every top-level property.
     #[test]
-    fn ebu_r128_matches_spec_defaults() {
+    fn ebu_r128_matches_element_defaults() {
         let p = BroadcastParams::preset(BroadcastPreset::EbuR128, 4);
         assert_eq!(p.input_gain_db, 0.0);
         assert_eq!(p.target_loudness_lufs, -23.0);

@@ -1,12 +1,12 @@
-//! Interface test: the drop-in contract of phase 1 spec §4.
+//! Interface test: the property contract of the four channel-strip elements
+//! (names, GLib types, ranges, defaults, flags, no extra properties). If
+//! anything drifts, this test fails.
 //!
-//! The tables below are a verbatim transcription of section 4, except the
-//! defaults, which are strom-dsp's own broadcast choice (§4, revised
-//! 2026-11-03; `strom_dsp::presets`, README "Why these defaults"). Every property
-//! of every element is checked for name, GLib value type, range, default,
-//! flags (readable, writable, controllable, mutable in PLAYING vs READY), and
-//! that no extra properties exist. If anything drifts from section 4, this
-//! test fails.
+//! Every property of every element is checked for name, GLib value type,
+//! range, default, flags (readable, writable, controllable, mutable in
+//! PLAYING vs READY), and that no extra properties exist. The defaults are
+//! strom-dsp's own broadcast choice (`strom_dsp::presets`, README "Why these
+//! defaults").
 
 mod util;
 
@@ -45,8 +45,8 @@ fn p(name: &str, kind: Kind) -> Prop {
     }
 }
 
-/// Section 4.1.
-fn gate_spec() -> Vec<Prop> {
+/// `stromdsp-gate`.
+fn gate_props() -> Vec<Prop> {
     vec![
         p("enabled", Bool(true)),
         p("open-threshold", Float(-80.0, 0.0, -45.0)),
@@ -58,8 +58,8 @@ fn gate_spec() -> Vec<Prop> {
     ]
 }
 
-/// Section 4.2.
-fn compressor_spec() -> Vec<Prop> {
+/// `stromdsp-compressor`.
+fn compressor_props() -> Vec<Prop> {
     vec![
         p("enabled", Bool(true)),
         p("threshold", Float(0.0, 1.0, 0.125)),
@@ -71,8 +71,8 @@ fn compressor_spec() -> Vec<Prop> {
     ]
 }
 
-/// Section 4.3.
-fn equalizer_spec() -> Vec<Prop> {
+/// `stromdsp-equalizer`.
+fn equalizer_props() -> Vec<Prop> {
     let mut v = vec![
         p("enabled", Bool(true)),
         Prop {
@@ -94,8 +94,8 @@ fn equalizer_spec() -> Vec<Prop> {
     v
 }
 
-/// Section 4.4.
-fn limiter_spec() -> Vec<Prop> {
+/// `stromdsp-limiter`.
+fn limiter_props() -> Vec<Prop> {
     vec![
         p("enabled", Bool(true)),
         p("threshold", Float(-60.0, 0.0, -1.0)),
@@ -112,9 +112,9 @@ const GST_FLAGS: [glib::ParamFlags; 4] = [
     gst::PARAM_FLAG_MUTABLE_PLAYING,
 ];
 
-/// Properties added by the phase 1b spec (additive only). These are
-/// the only extra properties allowed on a phase 1 element.
-fn phase1b_additions(factory: &str) -> &'static [&'static str] {
+/// Properties added after the first release of each element (additive
+/// only). These are the only extra properties allowed on these elements.
+fn later_additions(factory: &str) -> &'static [&'static str] {
     match factory {
         "stromdsp-gate" => &["mode", "ratio"],
         "stromdsp-compressor" => &["detector", "rms-window", "auto-makeup"],
@@ -122,30 +122,31 @@ fn phase1b_additions(factory: &str) -> &'static [&'static str] {
     }
 }
 
-fn check_element(factory: &str, type_name: &str, spec: &[Prop]) {
+fn check_element(factory: &str, type_name: &str, want: &[Prop]) {
     util::init();
     let element = gst::ElementFactory::make(factory).build().unwrap();
     assert_eq!(element.type_().name(), type_name);
     let f = element.factory().unwrap();
     assert_eq!(f.metadata("klass"), Some("Filter/Effect/Audio"));
 
-    // Exactly the spec's properties, apart from those inherited from
-    // GstObject/GstBaseTransform and the documented phase 1b additions
-    // (checked in full by `tests/interface_gate_1b.rs`).
+    // Exactly the listed properties, apart from those inherited from
+    // GstObject/GstBaseTransform and the properties added after the first release
+    // (checked in full by `tests/interface_gate_1b.rs` and
+    // `tests/interface_compressor_1b.rs`).
     let own: Vec<String> = element
         .list_properties()
         .iter()
         .filter(|ps| ps.owner_type() == element.type_())
         .map(|ps| ps.name().to_string())
-        .filter(|name| !phase1b_additions(factory).contains(&name.as_str()))
+        .filter(|name| !later_additions(factory).contains(&name.as_str()))
         .collect();
     let mut own_sorted = own.clone();
     own_sorted.sort();
-    let mut spec_names: Vec<String> = spec.iter().map(|p| p.name.clone()).collect();
-    spec_names.sort();
-    assert_eq!(own_sorted, spec_names, "{factory}: property set differs");
+    let mut want_names: Vec<String> = want.iter().map(|p| p.name.clone()).collect();
+    want_names.sort();
+    assert_eq!(own_sorted, want_names, "{factory}: property set differs");
 
-    for prop in spec {
+    for prop in want {
         let name = prop.name.as_str();
         let ps = element
             .find_property(name)
@@ -277,7 +278,7 @@ fn check_pads(factory: &str) {
 
 #[test]
 fn gate_interface() {
-    check_element("stromdsp-gate", "StromDspGate", &gate_spec());
+    check_element("stromdsp-gate", "StromDspGate", &gate_props());
     check_pads("stromdsp-gate");
 }
 
@@ -286,20 +287,24 @@ fn compressor_interface() {
     check_element(
         "stromdsp-compressor",
         "StromDspCompressor",
-        &compressor_spec(),
+        &compressor_props(),
     );
     check_pads("stromdsp-compressor");
 }
 
 #[test]
 fn equalizer_interface() {
-    check_element("stromdsp-equalizer", "StromDspEqualizer", &equalizer_spec());
+    check_element(
+        "stromdsp-equalizer",
+        "StromDspEqualizer",
+        &equalizer_props(),
+    );
     check_pads("stromdsp-equalizer");
 }
 
 #[test]
 fn limiter_interface() {
-    check_element("stromdsp-limiter", "StromDspLimiter", &limiter_spec());
+    check_element("stromdsp-limiter", "StromDspLimiter", &limiter_props());
     check_pads("stromdsp-limiter");
 }
 

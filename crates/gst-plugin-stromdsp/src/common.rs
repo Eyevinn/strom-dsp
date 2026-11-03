@@ -1,4 +1,4 @@
-//! Shared plumbing for the four elements: caps, settings hand-over between the
+//! Shared plumbing for the elements: caps, settings hand-over between the
 //! application thread and the streaming thread, and the per-buffer DSP driver.
 //!
 //! # Settings hand-over and locking
@@ -431,7 +431,7 @@ pub(crate) fn configure_engine<P: Processor + Default, S: Copy>(
 // `enabled` with a crossfade, for the BaseTransform passthrough elements.
 //
 // Steady states: enabled → the processor's output (no mixing); disabled →
-// BaseTransform passthrough, bit-exact (phase 1 spec §4). In between, the
+// BaseTransform passthrough, bit-exact. In between, the
 // streaming thread crossfades ([`BypassFade`]) and owns the passthrough flag:
 //
 // - disabling: `transform_ip` keeps running and fades out; when the fade

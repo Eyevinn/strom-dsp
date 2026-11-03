@@ -1,4 +1,4 @@
-//! Wideband loudness-targeting AGC (phase 2 spec 2.3): a slow, gated,
+//! Wideband loudness-targeting AGC: a slow, gated,
 //! rate-limited gain rider driven by the BS.1770 loudness detector
 //! ([`LoudnessDetector`]).
 //!
@@ -104,7 +104,7 @@ pub const MIN_ACTIVE_MS: f64 = 400.0;
 /// Range of [`AgcParams::window_ms`] (ms).
 pub const AGC_WINDOW_RANGE_MS: (f32, f32) = (400.0, 10_000.0);
 
-/// Parameters of the [`Agc`]. Units follow the phase 2 element interface
+/// Parameters of the [`Agc`]. Units follow the broadcast element interface
 /// (LUFS, dB, dB/s, ms). Out-of-range values are clamped; NaN means default.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AgcParams {

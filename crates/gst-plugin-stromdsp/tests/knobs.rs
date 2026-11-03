@@ -46,18 +46,18 @@
 //! | raised-cosine fade over 20 ms | ≈ −67 dB |
 //!
 //! The steady-state floor of the elements is −90 … −150 dB (f32 rounding).
-//! The Strom team's listening reading was "above −40 dB is a click, −40 to
-//! −60 dB is worth a listen". −50 dB fails every hard switch by a wide
-//! margin, and passes any fade that is smooth (no slope kink) and at least a
-//! few ms long. It is not tight enough to demand the −60 dB target from
-//! every change: a dynamics processor's own attack (a one-pole by design, the
-//! user's choice of speed) is allowed to be a fast but smooth change.
+//! As a listening guide: above −40 dB is a click, −40 to −60 dB is worth a
+//! listen. −50 dB fails every hard switch by a wide margin, and passes any
+//! fade that is smooth (no slope kink) and at least a few ms long. It is not
+//! tight enough to demand the −60 dB target from every change: a dynamics
+//! processor's own attack (a one-pole by design, its speed set by the attack
+//! property) is allowed to be a fast but smooth change.
 //!
 //! # Scenarios
 //!
 //! The scenarios are chosen so that a correctly smoothed change stays below
 //! the bound: the test is about hard discontinuities, not about changes that
-//! are meant to be heard. Where a time the user sets decides the speed (a
+//! are meant to be heard. Where a time property decides the speed (a
 //! gate's attack, a dynamics processor's attack), the scenario uses a
 //! moderate setting and says so. Exemptions are explicit, per scenario, with a
 //! reason ([`Case::exempt`]).

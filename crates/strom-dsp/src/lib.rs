@@ -1,11 +1,19 @@
 //! `strom-dsp`: a small clean-room audio DSP library.
 //!
-//! Four processors, all working in place on interleaved `f32` frames:
+//! The channel-strip processors, re-exported at the crate root, all work in
+//! place on interleaved `f32` frames:
 //!
 //! - [`Gate`]: downward noise gate with hysteresis and hold.
 //! - [`Compressor`]: feed-forward downward compressor with soft knee.
 //! - [`Equalizer`]: up to 8 RBJ-cookbook biquad bands in series.
 //! - [`Limiter`]: lookahead sample-peak limiter.
+//!
+//! Further processors live in their modules: [`deesser`], [`ducker`],
+//! [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`],
+//! [`truepeak`] (true-peak limiter) and [`broadcast`] (the broadcast chain,
+//! with its [`presets`]). Measurement is in [`meter`]; the building blocks
+//! ([`biquad`], [`filter`], [`oversample`], [`resample`], [`stft`],
+//! [`dynamics`]) are public too.
 //!
 //! # Usage contract (shared by every processor)
 //!
@@ -65,7 +73,7 @@ pub trait Processor {
     /// Clear all signal-dependent state (filters, envelopes, delay lines).
     fn reset(&mut self);
 
-    /// Processing latency in frames (non-zero only for the limiter).
+    /// Processing latency in frames (0 unless the processor looks ahead).
     fn latency_frames(&self) -> usize {
         0
     }

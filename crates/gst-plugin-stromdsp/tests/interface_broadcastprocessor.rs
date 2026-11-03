@@ -1,8 +1,7 @@
-//! Interface test of `stromdsp-broadcastprocessor` (phase 2 spec §3.1 and
-//! the agreed additions): name, GLib type, range, default and flags of every
-//! property, enum values and nicks, the additive `crossover-frequencies`,
-//! the action signals, metadata and pad templates. This is the contract the
-//! Strom block is built against: it must fail if anything drifts.
+//! Interface test of `stromdsp-broadcastprocessor`: name, GLib type, range,
+//! default and flags of every property, enum values and nicks, the additive
+//! `crossover-frequencies`, the action signals, metadata and pad templates.
+//! This is the element's public contract: it must fail if anything drifts.
 
 mod util;
 

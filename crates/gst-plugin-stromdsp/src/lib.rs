@@ -1,8 +1,13 @@
-//! GStreamer plugin `stromdsp`: gate, compressor, equalizer and limiter elements
-//! built on the `strom-dsp` library.
+//! GStreamer plugin `stromdsp`: audio elements built on the `strom-dsp`
+//! library.
 //!
 //! Elements: `stromdsp-gate`, `stromdsp-compressor`, `stromdsp-equalizer`,
-//! `stromdsp-limiter`. All are in-place `BaseTransform`s on interleaved F32LE.
+//! `stromdsp-limiter`, `stromdsp-ducker`, `stromdsp-deesser`,
+//! `stromdsp-delay`, `stromdsp-stereo`, `stromdsp-cleanup`,
+//! `stromdsp-meter` and `stromdsp-broadcastprocessor`. All work on
+//! interleaved F32LE. All except `stromdsp-ducker` are in-place
+//! `BaseTransform`s; the ducker is an `Aggregator` with a `sidechain`
+//! request pad for its key.
 //!
 //! Use it dynamically (`GST_PLUGIN_PATH` pointing at the built `cdylib`) or link
 //! it statically and call [`plugin_register_static`] once after `gst::init()`.
@@ -38,7 +43,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 }
 
 // `plugin_define!` also generates the public `plugin_register_static()`
-// (re-exported at the crate root), which registers the plugin and its four
+// (re-exported at the crate root), which registers the plugin and its
 // elements when the crate is linked statically as an `rlib`. Call it once after
 // `gst::init()`.
 gst::plugin_define!(

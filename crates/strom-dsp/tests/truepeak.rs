@@ -46,9 +46,9 @@ fn allocs() -> usize {
 // ---------------------------------------------------------------------------
 // Helpers.
 
-/// The guarantee's sample rates (spec 2.5).
+/// The guarantee's sample rates.
 const RATES: [f32; 3] = [44_100.0, 48_000.0, 96_000.0];
-/// Allowed true-peak excess over the ceiling (spec 2.5).
+/// Allowed true-peak excess over the ceiling (dB).
 const TOLERANCE_DB: f64 = 0.1;
 
 fn lin(db: f64) -> f64 {
@@ -222,7 +222,7 @@ fn music_like(frames: usize, ch: usize, fs: f64, seed: u64, amp: f64) -> Vec<f32
         .collect()
 }
 
-/// The explicit nasty cases of spec 2.5 at `fs`.
+/// The explicit nasty cases (signals that provoke inter-sample peaks) at `fs`.
 fn nasty_cases(fs: f32, ch: usize) -> Vec<(String, Vec<f32>)> {
     let f = fs as f64;
     let n = (0.25 * f) as usize;
@@ -261,7 +261,7 @@ fn nasty_cases(fs: f32, ch: usize) -> Vec<(String, Vec<f32>)> {
 // ---------------------------------------------------------------------------
 // The guarantee.
 
-/// Spec 2.5's explicit cases at 44.1, 48 and 96 kHz, mono and stereo, at
+/// The explicit nasty cases at 44.1, 48 and 96 kHz, mono and stereo, at
 /// several ceilings, the shortest and default lookaheads and fast/slow
 /// release.
 #[test]
@@ -585,8 +585,8 @@ fn thd(x: &[f64], freq: f64, fs: f64) -> f64 {
 }
 
 /// −13 dBFS sines into a −25 dBTP ceiling, lookahead 5 ms, release 50 and
-/// 100 ms (the limiter's listening-test settings): ≤ 1 % at 50 Hz, ≤ 0.3 %
-/// at 100 Hz, ≤ 0.1 % at 200 Hz, as for the phase 1 limiter.
+/// 100 ms (the limiter settings used when tuning it by ear): ≤ 1 % at 50 Hz, ≤ 0.3 %
+/// at 100 Hz, ≤ 0.1 % at 200 Hz, as for the sample-peak limiter.
 #[test]
 fn bass_thd_at_fast_settings_is_low() {
     let fs = 48_000.0f32;

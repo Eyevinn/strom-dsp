@@ -219,7 +219,7 @@ fn attack_time_constant() {
 
 /// Release is the time to close: once the gate starts falling, the gain is a
 /// straight line in dB from 0 dB to `reduction` and arrives after `release` ms
-/// (phase 1b fix after listening tests; it used to be a one-pole time constant).
+/// (found by ear on speech; it used to be a one-pole time constant).
 #[test]
 fn release_closes_over_full_range_in_release_time() {
     for (release, red_db) in [

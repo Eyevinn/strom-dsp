@@ -1,4 +1,4 @@
-//! Compressor additions after the listening tests: detector mode (peak /
+//! Compressor features added after the first release: detector mode (peak /
 //! sine-calibrated RMS with an rms-window) and auto-makeup. Static curves
 //! against the documented formulas, RMS timing, switching while running,
 //! and zero allocations.
@@ -43,7 +43,7 @@ fn ms(n_ms: f64) -> usize {
     (n_ms * 0.001 * FS as f64).round() as usize
 }
 
-/// Static curve per phase 1 spec §3.3 (Giannoulis quadratic knee), output
+/// Static curve (Giannoulis quadratic knee), output
 /// level in dB for a detector level `x` dB, without makeup.
 fn curve_out_db(x: f64, p: &CompressorParams) -> f64 {
     let k = (p.knee as f64).max(0.001);

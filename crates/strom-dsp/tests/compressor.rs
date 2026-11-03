@@ -1,5 +1,5 @@
 //! Compressor tests: static curve (incl. soft knee) against the gain-computer
-//! formula of spec 3.3, attack/release time constants, unity at ratio 1, linking,
+//! formula (Giannoulis quadratic knee), attack/release time constants, unity at ratio 1, linking,
 //! robustness, parameter-change jump bound and real-time safety.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -57,7 +57,7 @@ fn ms(n_ms: f64) -> usize {
     (n_ms * 0.001 * FS as f64).round() as usize
 }
 
-/// Static output level (dB) per spec 3.3, written directly from the definition:
+/// Static output level (dB), written directly from the definition:
 /// knee region `threshold·k … threshold/k`, `W = −40·log10(k)`, Giannoulis quadratic
 /// interpolation inside the region, `T + (x − T)/R` above it.
 fn expected_out_db(x: f64, p: &CompressorParams) -> f64 {
@@ -203,7 +203,7 @@ fn release_time_constant() {
         let r0 = step_reduction(&mut c, 1.0, 1000);
         assert!((r0.last().unwrap() - 15.0).abs() < 1e-6);
         // The detector holds the level for H = min(DETECTOR_HOLD_MS, release)
-        // frames before the static reduction steps down (listening-test THD
+        // frames before the static reduction steps down (the bass THD
         // fix); the documented time constant applies from there.
         // A window of H frames includes the current one, so the static
         // reduction steps down H − 1 frames after the input.

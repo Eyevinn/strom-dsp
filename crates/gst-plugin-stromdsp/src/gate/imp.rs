@@ -32,9 +32,9 @@ impl common::Bypassable for Settings {
 struct Settings {
     enabled: bool,
     params: GateParams,
-    /// Phase 1b: gate or expander.
+    /// Gate or expander.
     mode: StromDspGateMode,
-    /// Phase 1b: expander ratio (1 … 20).
+    /// Expander ratio (1 … 20).
     ratio: f32,
 }
 
@@ -141,7 +141,7 @@ impl ObjectImpl for StromDspGate {
                     0.0,
                     d.reduction_db,
                 ),
-                // Phase 1b additions (phase 1b spec §3.3).
+                // Added after the first release.
                 glib::ParamSpecEnum::builder_with_default("mode", broadcast_mode())
                     .nick("Mode")
                     .blurb(

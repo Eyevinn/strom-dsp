@@ -533,7 +533,7 @@ fn release_follows_documented_time_constant() {
         let g0 = db(-20.0);
         // First frame of release. The gain is held for
         // H = min(GAIN_HOLD_MS, release) frames after the last loud frame
-        // (listening-test THD fix); the time constant applies from there.
+        // (the bass THD fix); the time constant applies from there.
         let start = gains.iter().position(|&g| g > g0 * 1.0001).unwrap();
         let hold = (f64::from(rel).min(GAIN_HOLD_MS) * 0.001 * fs as f64).round() as usize;
         assert_eq!(

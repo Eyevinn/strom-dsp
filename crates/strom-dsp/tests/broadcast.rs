@@ -1,5 +1,5 @@
 //! Tests of the broadcast chain ([`strom_dsp::broadcast::BroadcastProcessor`]),
-//! phase 2 spec §2.6, §2.7 and §4 ("Chain", "Latency"). All signals are
+//! its meters, latency and loudness acceptance. All signals are
 //! synthetic with fixed seeds.
 //!
 //! - Latency: an impulse through a flat configuration comes out exactly at
@@ -674,6 +674,94 @@ fn meters_agree_with_loudness_meter() {
     assert!(bp.take_meters().output_integrated_lufs > -40.0);
 }
 
+/// The input meters are measured before the input gain: with +12 dB of
+/// input gain they read the raw input (same as with 0 dB, and as
+/// `ebur128` on the raw signal), while the output meters see the gain.
+#[test]
+fn input_meters_are_before_input_gain() {
+    let ch = 2;
+    let fs = FS as f64;
+    let mut x = pink(1 << 17, ch, fs, 5);
+    scale_to_lufs(&mut x, ch, fs, -35.0);
+    let cfg = LoudnessConfig {
+        sample_rate: FS,
+        channels: ch,
+        layout: ChannelLayout::Unknown,
+        true_peak: true,
+    };
+    // Flat chain without AGC and limiter, so the output is the input
+    // times the input gain (−35 + 12 = −23 LUFS stays below the ceiling).
+    let mut flat = flat_params();
+    flat.agc_enabled = false;
+    flat.limiter_enabled = false;
+    let mut boosted = flat;
+    boosted.input_gain_db = 12.0;
+    let mut bp0 = processor(FS, ch, &flat);
+    let mut bp12 = processor(FS, ch, &boosted);
+    let mut reference = LoudnessMeter::new(&cfg).unwrap();
+    let mut looper = Looper::new(&x);
+    let mut buf = vec![0.0f32; BLOCK * ch];
+    let (mut tp0, mut tp12) = (SILENCE_DB, SILENCE_DB);
+    let mut ref_tp = SILENCE_DB;
+    let mut checked = 0;
+    for i in 0..800 {
+        looper.fill(&mut buf);
+        reference.process(&buf);
+        let mut y0 = buf.clone();
+        let mut y12 = buf.clone();
+        bp0.process(&mut y0);
+        bp12.process(&mut y12);
+        let m0 = bp0.take_meters();
+        let m12 = bp12.take_meters();
+        assert_no_nan(&m12);
+        tp0 = tp0.max(m0.input_true_peak_dbtp);
+        tp12 = tp12.max(m12.input_true_peak_dbtp);
+        ref_tp = ref_tp.max(db((0..ch)
+            .map(|c| reference.interval_true_peak(c))
+            .fold(0.0, f64::max)));
+        reference.clear_interval_peaks();
+        if i < 400 {
+            continue; // let the 3 s windows fill
+        }
+        checked += 1;
+        // Identical to the unboosted chain, and to the raw-input reference.
+        assert_eq!(
+            m12.input_momentary_lufs, m0.input_momentary_lufs,
+            "block {i}"
+        );
+        assert_eq!(
+            m12.input_short_term_lufs, m0.input_short_term_lufs,
+            "block {i}"
+        );
+        assert!(
+            (m12.input_momentary_lufs - reference.momentary()).abs() <= 0.2,
+            "block {i}: input momentary {} vs raw {}",
+            m12.input_momentary_lufs,
+            reference.momentary()
+        );
+        assert!(
+            (m12.input_short_term_lufs - reference.short_term()).abs() <= 0.2,
+            "block {i}: input short-term {} vs raw {}",
+            m12.input_short_term_lufs,
+            reference.short_term()
+        );
+        assert!(
+            (m12.input_short_term_lufs + 35.0).abs() <= 1.0,
+            "block {i}: input short-term {}",
+            m12.input_short_term_lufs
+        );
+        // The output does carry the +12 dB.
+        let d = m12.output_short_term_lufs - m0.output_short_term_lufs;
+        assert!((d - 12.0).abs() <= 0.1, "block {i}: output difference {d}");
+    }
+    assert!(checked > 300);
+    assert_eq!(tp12, tp0);
+    assert!(
+        (tp12 - ref_tp).abs() <= 0.2,
+        "input true peak {tp12} vs raw {ref_tp}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Robustness and real-time safety.
 
@@ -812,7 +900,7 @@ fn no_allocation() {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance (phase 2 spec §4 "Chain").
+// Acceptance: integrated loudness and true peak per preset.
 
 /// 60 s programmes per preset (`strom_dsp::presets`, at the default 4 bands)
 /// at three input levels: the integrated loudness (excluding the first
@@ -829,7 +917,7 @@ mod acceptance {
 
     const SECONDS: usize = 60;
     const SKIP_SECONDS: usize = 10;
-    /// Allowed true-peak overshoot (phase 2 spec §2.5).
+    /// Allowed true-peak overshoot (0.1 dB, the true-peak limiter's guarantee).
     const TP_MARGIN_DB: f64 = 0.1;
 
     /// The preset with this nick, at the default band count.

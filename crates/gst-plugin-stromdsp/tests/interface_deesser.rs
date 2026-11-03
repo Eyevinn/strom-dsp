@@ -1,4 +1,4 @@
-//! Interface test of `stromdsp-deesser` (phase 1b spec 3.2): every property's
+//! Interface test of `stromdsp-deesser`: every property's
 //! name, GLib type, range, default and flags. Fails if the interface drifts.
 
 mod iface_check;

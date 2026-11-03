@@ -1,4 +1,4 @@
-//! Interface test of `stromdsp-cleanup` (phase 1b spec 3.6): every property's
+//! Interface test of `stromdsp-cleanup`: every property's
 //! name, GLib type, range, default and flags. Fails if the interface drifts.
 
 mod iface_check;

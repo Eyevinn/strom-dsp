@@ -1,4 +1,4 @@
-//! Oversampler tests (phase 1b spec 2.3 and 4): passband ripple and stopband
+//! Oversampler tests: passband ripple and stopband
 //! measured with sine sweeps through the real processor, latency by impulse,
 //! round trip, every factor at 44.1/48/96 kHz, robustness, SIMD level
 //! equivalence and zero allocations after `configure`.

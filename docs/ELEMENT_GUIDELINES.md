@@ -1,6 +1,6 @@
 # Element Guidelines
 
-Rules every strom-dsp element follows. They apply to elements written by people and by AI agents alike, so both read the same text.
+Rules every strom-dsp element follows.
 
 These are rules, not a description of the code. The code is the source of truth for how each element implements them.
 

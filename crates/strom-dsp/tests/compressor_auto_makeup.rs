@@ -17,7 +17,7 @@
 //! moves the integrated value by far less than the margin (measured worst
 //! case 1.0 LU). The remaining error is mainly that the estimator weights
 //! frames by their unweighted peak energy above a −50 dB gate, while
-//! BS.1770 uses K-weighting and a −10 LU relative gate. The phase 1b static
+//! BS.1770 uses K-weighting and a −10 LU relative gate. An earlier fixed
 //! reference (−18 dB) fails this test at 87 of 150 grid points (worst
 //! −8.1 LU, peak mode, dense programme at 10:1).
 
@@ -206,9 +206,9 @@ fn compressed(x: &[f32], p: &CompressorParams, det: CompressorDetector, auto: bo
     y
 }
 
-/// The listening-test settings: threshold −20 dB, 4:1, 10 ms / 100 ms,
+/// Reference settings (tuned by ear on programme material): threshold −20 dB, 4:1, 10 ms / 100 ms,
 /// knee 0.5012 (12 dB).
-fn listening_params() -> CompressorParams {
+fn reference_params() -> CompressorParams {
     CompressorParams {
         threshold: 0.1,
         ratio: 4.0,
@@ -277,17 +277,17 @@ fn steady_sine_keeps_its_level() {
     }
 }
 
-/// The table of the listening-test report on the typical programme:
-/// integrated output loudness with the listening-test settings, per
+/// A table on the typical programme:
+/// integrated output loudness with the reference settings, per
 /// detector, with and without auto-makeup. Prints only (`--nocapture`).
 #[test]
-fn listening_settings_table() {
+fn reference_settings_table() {
     let x = programme(TYPICAL);
     let input = loudness(&x);
     eprintln!("typical programme: {input:.2} LUFS in");
     for det in [CompressorDetector::Peak, CompressorDetector::Rms] {
         for auto in [false, true] {
-            let out = loudness(&compressed(&x, &listening_params(), det, auto));
+            let out = loudness(&compressed(&x, &reference_params(), det, auto));
             eprintln!(
                 "{det:?} auto-makeup {auto}: {out:.2} LUFS ({:+.2} LU)",
                 out - input
@@ -300,7 +300,7 @@ fn listening_settings_table() {
 /// compression, on all three programmes and in both detector modes.
 ///
 /// Grid: thresholds −30, −25, −20, −15, −10 dB × ratios 2, 4, 6, 10;
-/// attack 10 ms, release 100 ms, knee 0.5012 (the listening-test times)
+/// attack 10 ms, release 100 ms, knee 0.5012 (the reference times)
 /// and the default knee 0.0625 at 4:1. Every point within ±`TOL_LU` of the
 /// input, measured over the whole programme (no exclusion: the estimate
 /// starts from the static prior and needs no convergence time to stay
@@ -334,7 +334,7 @@ fn loudness_follows_input_across_settings() {
                     threshold: db_to_lin(t_db) as f32,
                     ratio,
                     knee,
-                    ..listening_params()
+                    ..reference_params()
                 };
                 let l = loudness(&compressed(&x, &p, det, true)) - input;
                 line += &format!(" {l:+.1}");
@@ -367,7 +367,7 @@ fn loudness_follows_input_across_times() {
                 ratio: 6.0,
                 attack_ms,
                 release_ms,
-                ..listening_params()
+                ..reference_params()
             };
             let l = loudness(&compressed(&x, &p, det, true)) - input;
             let l0 = loudness(&compressed(&x, &p, det, false)) - input;
@@ -384,7 +384,7 @@ fn estimate_is_gated_bounded_and_follows_settings() {
     let x = programme(TYPICAL);
     let mut c = Compressor::new();
     c.set_auto_makeup(true);
-    c.set_params(&listening_params());
+    c.set_params(&reference_params());
     c.configure(FS, CH);
     let mut y = x.clone();
     for chunk in y.chunks_mut(1024 * CH) {
@@ -423,7 +423,7 @@ fn estimate_is_gated_bounded_and_follows_settings() {
     // A new setting changes the target immediately (no re-adaptation).
     let mut c2 = Compressor::new();
     c2.set_auto_makeup(true);
-    c2.set_params(&listening_params());
+    c2.set_params(&reference_params());
     c2.configure(FS, CH);
     let mut y = x.clone();
     for chunk in y.chunks_mut(1024 * CH) {
@@ -432,7 +432,7 @@ fn estimate_is_gated_bounded_and_follows_settings() {
     let before = c2.auto_makeup_gain_db();
     c2.set_params(&CompressorParams {
         ratio: 10.0,
-        ..listening_params()
+        ..reference_params()
     });
     assert!(c2.auto_makeup_gain_db() > before + 0.5);
 
@@ -440,7 +440,7 @@ fn estimate_is_gated_bounded_and_follows_settings() {
     c2.set_params(&CompressorParams {
         threshold: 0.0,
         ratio: 100.0,
-        ..listening_params()
+        ..reference_params()
     });
     assert_eq!(c2.auto_makeup_gain_db(), AUTO_MAKEUP_MAX_DB);
 }
@@ -457,13 +457,13 @@ fn independent_of_buffer_size() {
         let mut c = Compressor::new();
         c.set_detector(CompressorDetector::Rms);
         c.set_auto_makeup(true);
-        c.set_params(&listening_params());
+        c.set_params(&reference_params());
         c.configure(FS, CH);
         let mut y = x.to_vec();
         for (i, chunk) in y.chunks_mut(frames * CH).enumerate() {
             if resend {
                 c.set_auto_makeup(true);
-                c.set_params(&listening_params());
+                c.set_params(&reference_params());
             }
             if key {
                 let k = x[i * frames * CH..][..chunk.len()].to_vec();
@@ -508,7 +508,7 @@ fn programmes_span_loudness_levels() {
 
 /// Toggling auto-makeup, and changing threshold and ratio while it is on,
 /// is click-free on running programme: per-frame change of the gain
-/// (output/input, dB) bounded as in the phase 1 parameter-change test.
+/// (output/input, dB) bounded as in the compressor's parameter-change test (`tests/compressor.rs`).
 #[test]
 fn auto_makeup_changes_glide() {
     let level = 0.5f32;
@@ -554,6 +554,6 @@ fn auto_makeup_changes_glide() {
     }
     // Largest change: about 30 dB (auto-makeup of 10:1 at −30 dB with a
     // −6 dB signal, below the bound), spread over a 10 ms one-pole:
-    // ≈ 30/480 dB per frame at most, times 3 as in the phase 1 bound.
+    // ≈ 30/480 dB per frame at most, times 3 as in that test's bound.
     assert!(max_step < 0.2, "max step {max_step} dB");
 }

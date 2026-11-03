@@ -1,4 +1,4 @@
-//! Criterion benchmarks of the phase 1b dynamics processors at 48 kHz stereo
+//! Criterion benchmarks of the de-esser at 48 kHz stereo
 //! with 480-frame (10 ms) buffers. Throughput is in frames, so the share of
 //! one core is `48 000 frames/s ÷ measured frames/s`.
 use std::f64::consts::PI;

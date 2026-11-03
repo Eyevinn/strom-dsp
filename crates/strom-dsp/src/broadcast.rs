@@ -1,8 +1,9 @@
-//! Broadcast final processor chain (phase 2 spec §2.6):
+//! Broadcast final processor chain:
 //! input gain → wideband AGC → multiband compressor → true-peak limiter.
 //!
-//! Units follow the element interface (phase 2 spec §3.1): dB, LUFS, dBTP,
-//! dB/s, ms, Hz. Meter conventions follow the agreed element message:
+//! Units follow the element interface (`stromdsp-broadcastprocessor`): dB,
+//! LUFS, dBTP, dB/s, ms, Hz. Meter conventions follow the element's public
+//! contract (its meter message):
 //! gain reductions are **positive dB of reduction**, the AGC gain is
 //! **signed** (+ = boost), and silence reads [`SILENCE_DB`].
 //!
@@ -58,13 +59,16 @@
 //!
 //! | Value | Source | Cost |
 //! |---|---|---|
-//! | input momentary / short-term | the AGC's BS.1770 [`LoudnessDetector`] (AGC input, i.e. **after the input gain**) | O(1) read |
+//! | input momentary / short-term | a BS.1770 [`LoudnessDetector`] on the raw input (**before the input gain**) | ≈ 1.3 µs per 480 stereo frames, O(1) read |
 //! | output momentary / short-term | a second [`LoudnessDetector`] on the final output | ≈ 1.3 µs per 480 stereo frames, O(1) read |
 //! | output integrated | [`LoudnessMeter`] (histogram mode, no true peak) on the final output | ≈ 7 µs per 480 stereo frames, < 1 µs read |
-//! | input / output true peak | 4× [`Oversampler`] peaks (max over sub-samples and channels) after the input gain / of the final output, held until [`BroadcastProcessor::take_meters`] | upsampling per block |
+//! | input / output true peak | 4× [`Oversampler`] peaks (max over sub-samples and channels) of the raw input (before the input gain) / of the final output, held until [`BroadcastProcessor::take_meters`] | upsampling per block |
 //! | AGC gain | [`crate::agc::Agc::gain_db`] | O(1) |
 //! | band gain reduction | [`crate::multiband::MultibandCompressor::gain_reduction_db`] at read time | O(1) |
 //! | limiter gain reduction | max of the value at the end of each internal chunk since the last read | O(1) |
+//!
+//! The input meters show what actually comes in: they are measured before
+//! the input gain, so `input_gain_db` does not change them.
 //!
 //! The AGC gain and the gain reductions read 0 while their stage (or the
 //! chain) is switched off, i.e. they show what is being applied.
@@ -99,7 +103,7 @@ pub const SILENCE_DB: f64 = -200.0;
 /// Number of crossover frequencies (`MAX_BANDS − 1`).
 pub const MAX_CROSSOVERS: usize = MAX_BANDS - 1;
 
-/// All parameters of the chain (phase 2 spec §3.1, minus `preset` and
+/// All parameters of the chain (the element's properties, minus `preset` and
 /// `meter-interval`, which belong to the element).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BroadcastParams {
@@ -143,8 +147,11 @@ pub struct BroadcastParams {
 }
 
 impl Default for BroadcastParams {
-    /// Neutral placeholder until presets exist; the element applies the
-    /// `ebu-r128` preset as its default.
+    /// Neutral library defaults. They share the top-level values of the
+    /// `ebu-r128` preset (target, ceiling, AGC range and rates, crossovers)
+    /// but not its band settings or limiter release. The element applies
+    /// the full `ebu-r128` preset ([`BroadcastParams::preset`]) as its
+    /// default.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -169,14 +176,14 @@ impl Default for BroadcastParams {
     }
 }
 
-/// Meter values of the chain (phase 2 spec §2.7). Read once per block by
+/// Meter values of the chain. Read once per block by
 /// the element; dB/LUFS values are [`SILENCE_DB`] when there is nothing to
 /// measure.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BroadcastMeters {
-    /// Input momentary loudness (LUFS, 400 ms).
+    /// Input momentary loudness (LUFS, 400 ms), measured before the input gain.
     pub input_momentary_lufs: f64,
-    /// Input short-term loudness (LUFS, 3 s).
+    /// Input short-term loudness (LUFS, 3 s), measured before the input gain.
     pub input_short_term_lufs: f64,
     /// Output momentary loudness (LUFS).
     pub output_momentary_lufs: f64,
@@ -184,7 +191,8 @@ pub struct BroadcastMeters {
     pub output_short_term_lufs: f64,
     /// Output gated integrated loudness since configure/reset/`reset_integrated` (LUFS).
     pub output_integrated_lufs: f64,
-    /// Input true peak (dBTP), max since the last [`BroadcastProcessor::take_meters`].
+    /// Input true peak (dBTP) before the input gain, max since the last
+    /// [`BroadcastProcessor::take_meters`].
     pub input_true_peak_dbtp: f64,
     /// Output true peak (dBTP), max since the last [`BroadcastProcessor::take_meters`].
     pub output_true_peak_dbtp: f64,
@@ -333,11 +341,6 @@ impl AgcStage {
 
     fn gain_db(&self) -> f64 {
         self.inner.gain_db()
-    }
-
-    /// The BS.1770 detector on the AGC input (input meters).
-    fn detector(&self) -> &LoudnessDetector {
-        self.inner.detector()
     }
 }
 
@@ -608,6 +611,8 @@ pub struct BroadcastProcessor {
     /// Per-frame true-peak estimates (`CHUNK`).
     peaks: Vec<f32>,
 
+    /// Loudness of the raw input (before the input gain).
+    input_detector: LoudnessDetector,
     output_detector: LoudnessDetector,
     integrated: Option<LoudnessMeter>,
     input_tp: Oversampler,
@@ -649,6 +654,7 @@ impl BroadcastProcessor {
             stage_dry: Vec::new(),
             chain_dry: Vec::new(),
             peaks: Vec::new(),
+            input_detector: LoudnessDetector::new(),
             output_detector: LoudnessDetector::new(),
             integrated: None,
             input_tp: Oversampler::new(),
@@ -704,7 +710,7 @@ impl BroadcastProcessor {
             return BroadcastMeters::default();
         }
         let on = self.params.enabled;
-        let input = self.agc.detector();
+        let input = &self.input_detector;
         let mut band_gain_reduction_db = [0.0; MAX_BANDS];
         if on && self.params.multiband_enabled {
             band_gain_reduction_db = self.multiband.gain_reduction_db();
@@ -765,12 +771,15 @@ impl BroadcastProcessor {
         chain_dry.copy_from_slice(chunk);
         self.chain_delay.process(chain_dry);
 
-        self.input_gain.apply(chunk, ch);
+        // Input meters: the raw input, before the input gain.
+        self.input_detector.process(chunk);
         self.input_tp
             .upsample_peaks(chunk, &mut self.peaks[..frames]);
         self.input_peak = self.peaks[..frames]
             .iter()
             .fold(self.input_peak, |a, &b| a.max(b));
+
+        self.input_gain.apply(chunk, ch);
 
         let dry = &mut self.stage_dry[..len];
         let agc = &mut self.agc;
@@ -849,6 +858,8 @@ impl Processor for BroadcastProcessor {
         self.chain_dry = vec![0.0; CHUNK * channels];
         self.peaks = vec![0.0; CHUNK];
 
+        self.input_detector
+            .configure(sample_rate, channels, ChannelLayout::Unknown);
         self.output_detector
             .configure(sample_rate, channels, ChannelLayout::Unknown);
         self.integrated = LoudnessMeter::new(&LoudnessConfig {
@@ -918,6 +929,7 @@ impl Processor for BroadcastProcessor {
         ] {
             f.snap();
         }
+        self.input_detector.reset();
         self.output_detector.reset();
         if let Some(m) = &mut self.integrated {
             m.reset();

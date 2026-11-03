@@ -5,12 +5,12 @@
 //! # Why not [`LoudnessMeter`](super::LoudnessMeter)
 //!
 //! The `ebur128` wrapper is the reference measurement, but it does not suit a
-//! detector that drives a gain every block (phase 2 spec 2.2):
+//! detector that drives a gain every block (the broadcast chain's AGC):
 //!
 //! - **Read cost.** It stores the filtered audio and sums the whole window on
 //!   every read: about 20 µs for momentary and 150 µs for short-term at 48 kHz
 //!   stereo (`benches/meter.rs`). Read every 10 ms block, the short-term read
-//!   alone costs 1.5 % of a core, half the phase 2 budget for the whole chain,
+//!   alone costs 1.5 % of a core, half the 3 % budget of the whole broadcast chain,
 //!   and the cost grows with the sample rate.
 //! - **No per-block energies.** It only returns whole-window values. The AGC
 //!   gate (see [`crate::agc`]) needs the energy of each short block to decide
@@ -121,7 +121,7 @@
 //!
 //! [`LoudnessDetector::configure`] allocates; everything else is
 //! allocation-free (counting-allocator and RTSan tests). The filters run on
-//! the phase 1 Direct Form I kernels (`f64` state, channels as SIMD lanes,
+//! the [`crate::biquad`] Direct Form I kernels (`f64` state, channels as SIMD lanes,
 //! both stages in series per sample, denormal flush) over a 256-frame
 //! scratch copy of the input; non-finite input samples are replaced by 0 in
 //! the copy.
