@@ -424,8 +424,24 @@ fn cases() -> Vec<Case> {
 
     // ---- de-esser (7 kHz tone) ----
     let d = "stromdsp-deesser";
-    v.push(case(d, &[], &[("enabled", "false")]));
-    v.push(case(d, &[("enabled", "false")], &[("enabled", "true")]));
+    // The annihilator weights the slope of a smooth fade by sin ω: 7 kHz reads
+    // 15.6 dB higher than 1 kHz for the same fade. The 20 ms raised-cosine
+    // crossfade between the split-band output (phase-shifted by the band
+    // split) and dry reads -48 dB here; the same toggle with the band and the
+    // tone at 1.2 kHz (below) must meet the normal bound.
+    const HF: &str = "smooth 20 ms crossfade on a 7 kHz tone: the annihilator reads a \
+                      fade 15.6 dB higher than at 1 kHz (sin w); see the 1.2 kHz case";
+    v.push(case(d, &[], &[("enabled", "false")]).exempt(-45.0, HF));
+    v.push(case(d, &[("enabled", "false")], &[("enabled", "true")]).exempt(-45.0, HF));
+    v.push(case(d, &[("frequency", "1000")], &[("enabled", "false")]).tone(1200.0, 0.25));
+    v.push(
+        case(
+            d,
+            &[("frequency", "1000"), ("enabled", "false")],
+            &[("enabled", "true")],
+        )
+        .tone(1200.0, 0.25),
+    );
     v.push(case(d, &[("threshold", "-10")], &[("threshold", "-40")]));
     v.push(case(d, &[], &[("threshold", "0")]));
     v.push(case(d, &[], &[("frequency", "2000")]));
