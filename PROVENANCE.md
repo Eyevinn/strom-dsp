@@ -205,6 +205,17 @@ Written from the gstreamer-rs bindings documentation and crate sources
   lookahead to upstream's min/max in the LATENCY query, and posts a Latency
   message when the lookahead changes.
 
+### Performance and real-time-safety tooling
+
+`tests/rtsan.rs` uses RealtimeSanitizer through `rtsan-standalone`, written
+from that crate's README and API docs; a canary test that must abort proves
+the sanitizer is really active. `benches/strip_gungraun.rs` uses gungraun,
+written from its crate documentation. Both are optional features used only
+by tests and benches, never by library code. `tests/denormals.rs` (own
+design) verifies the explicit-flush policy: no subnormal output or gain state
+after loud input followed by long silence at extreme parameters. FTZ/DAZ is
+deliberately not set (see `docs/PERFORMANCE.md`).
+
 ## Incident log
 
 - **2026-11-03, research only, no code affected.** During online research of
@@ -228,6 +239,13 @@ Written from the gstreamer-rs bindings documentation and crate sources
 | `gstreamer-check` 0.25 (dev) | plugin tests | MIT OR Apache-2.0 |
 | `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
 | `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
+| `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
+| RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
+| `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |
+
+External developer/CI tools, not linked or distributed: `gungraun-runner`
+(MIT OR Apache-2.0), Valgrind (GPL-2.0, run as a separate program by the
+gungraun CI job only) and `cargo-show-asm` (MIT OR Apache-2.0).
 
 Transitive dependencies are checked against the allowlist in `deny.toml` by
 `cargo deny check licenses`. The GStreamer C libraries (LGPL) are system
