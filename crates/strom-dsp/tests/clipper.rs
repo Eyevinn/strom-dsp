@@ -632,7 +632,7 @@ fn stereo_channels_are_independent() {
     let st = scale_peak(st, threshold() + 3.0);
     let corr = |v: &[f32]| {
         let (mut lr, mut ll, mut rr) = (0.0f64, 0.0f64, 0.0f64);
-        for f in v.chunks_exact(2) {
+        for f in v.as_chunks::<2>().0 {
             lr += f[0] as f64 * f[1] as f64;
             ll += f[0] as f64 * f[0] as f64;
             rr += f[1] as f64 * f[1] as f64;
