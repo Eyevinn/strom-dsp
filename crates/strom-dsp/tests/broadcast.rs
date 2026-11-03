@@ -12,7 +12,8 @@
 //!   `meter::LoudnessMeter` (`ebur128`) on the same signal.
 //! - Robustness and zero allocations.
 //! - Acceptance (60 s programme per preset at −35/−23/−10 LUFS): see
-//!   [`acceptance`]; ignored until the true-peak limiter is in the chain.
+//!   [`acceptance`]: integrated loudness (from 10 s) within ±1 LU of the
+//!   target, true peak ≤ ceiling + 0.1 dB, both measured with `ebur128`.
 
 mod agc_support;
 
@@ -224,6 +225,19 @@ fn latency_formula() {
             BroadcastProcessor::latency_frames_for(fs, 10.0)
         );
     }
+    // Lookahead plus the true-peak detector delay (24 + 8 frames).
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(48_000.0, 5.0),
+        240 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(44_100.0, 5.0),
+        221 + 32
+    );
+    assert_eq!(
+        BroadcastProcessor::latency_frames_for(96_000.0, 5.0),
+        480 + 32
+    );
     // Out-of-range lookaheads are clamped to 0.5 … 20 ms.
     assert_eq!(
         BroadcastProcessor::latency_frames_for(48_000.0, 0.0),
@@ -799,8 +813,8 @@ fn no_allocation() {
 // ---------------------------------------------------------------------------
 // Acceptance (phase 2 spec §4 "Chain").
 
-/// 60 s programmes per preset at three input levels. Needs the true-peak
-/// limiter (the stand-in limiter is sample-peak only) and the presets.
+/// 60 s programmes per preset at three input levels, measured with
+/// `meter::LoudnessMeter` (`ebur128`, true-peak mode).
 mod acceptance {
     use super::*;
 
@@ -907,25 +921,21 @@ mod acceptance {
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_ebu_r128() {
         check("ebu-r128");
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_atsc_a85() {
         check("atsc-a85");
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_streaming() {
         check("streaming");
     }
 
     #[test]
-    #[ignore = "needs the true-peak limiter (the stand-in is sample-peak) and the presets"]
     fn preset_speech() {
         check("speech");
     }
