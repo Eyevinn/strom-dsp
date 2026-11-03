@@ -105,8 +105,30 @@ notch, APF, peakingEQ, lowShelf and highShelf (cookbook Q form, not S).
   Type changes, enable/disable and `num_bands` changes use a 10 ms linear
   crossfade between the old and new realisation (a second state bank).
 - Off, disabled and unused bands are skipped entirely (bit-exact, zero cost).
-  Biquad outputs are denormal-flushed below 1e-15, and output is clamped to the
-  finite f32 range.
+  Output is clamped to the finite f32 range.
+- **Hot path (own design):** channels are processed as lanes in pairs
+  (structure-of-arrays state, plus a single lane for an odd channel), and all
+  bands run in series per sample with the signal kept in f64 between bands.
+  There are specialised loops for 1–8 bands: a plain steady-state loop, a
+  ramp loop with a per-stage coefficient step, and a general loop used only
+  during crossfades. The DF-I sum is ordered so the loop-carried dependency is
+  one multiply-add (fused where the target has FMA). Steady-state loops flush
+  filter state below 1e-15 every 32 frames; the crossfade loop every sample.
+
+### Biquad building blocks (`crates/strom-dsp/src/biquad.rs`)
+
+Public, reusable primitives; the equalizer is built from them.
+
+- `BiquadCoefficients`: normalised coefficients (a0 = 1) with one design
+  function per RBJ cookbook type (as above), `magnitude`/`magnitude_at`
+  (analytic |H(e^jω)|), `is_stable` (stability triangle, J. O. Smith III) and
+  linear per-sample interpolation steps.
+- `Biquad`: Direct Form I filter with f64 state for mono or interleaved
+  multichannel data, with `set_coefficients` and `ramp_to` (stable throughout,
+  because the stability triangle is convex). Never allocates after `new`.
+- Internal `Lanes<L>` (`lanes.rs`): element-wise `[f64; L]` wrapper that the
+  compiler vectorises, kept small so it can be swapped for an explicit SIMD
+  type.
 
 ### Dynamics building blocks (`crates/strom-dsp/src/dynamics/`)
 
