@@ -710,7 +710,8 @@ the decision to keep `stromdsp-equalizer`, `-cleanup`, `-delay` and `-stereo`
 neutral (bit-exact until an operator changes them) and the broadcast presets
 (see "Broadcast chain and presets"). They are chosen for live broadcast
 speech and programme from textbook and common broadcast practice, never from
-any product's presets. Each value and its reason is documented in the README
+any product's presets. Each value and its reason is documented on the
+element's page under [docs/elements/](docs/elements/README.md)
 ("Why these defaults"), and for the gate, compressor, limiter and broadcast
 presets also in `presets.rs`. The references are:
 

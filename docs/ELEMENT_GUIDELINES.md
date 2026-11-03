@@ -28,11 +28,11 @@ strom-dsp elements are **real-time** processors. An operator changes them while 
 - An element that doesn't need latency adds none: no internal buffering, and it leaves the `LATENCY` query unchanged.
 - An element that needs latency (lookahead, oversampling filters, STFT) reports all of it in the `LATENCY` query, keeps it constant for a given configuration, and posts a `Latency` message when a property change alters it.
 - Latency is kept to what the processing needs. Where it is a trade-off (e.g. lookahead), it is a property with a documented default.
-- The README lists each element's latency, or its formula.
+- Each element's page under [docs/elements/](elements/README.md) gives its latency, or its formula.
 - An intentional content delay (e.g. `stromdsp-delay`) is not latency: it is not reported, and timestamps are unchanged.
 
 ## Defaults
-- Every property has a default that is sensible on its own for live broadcast use (speech and programme audio). Each default and its reason are documented in the README.
+- Every property has a default that is sensible on its own for live broadcast use (speech and programme audio). Each default and its reason are documented on the element's page under [docs/elements/](elements/README.md).
 
 ## Tests
 Each rule has a test that fails if the rule is broken:
