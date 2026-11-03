@@ -153,3 +153,46 @@ pub fn butterworth_all_pass(order: usize, freq_hz: f64, sample_rate: f64) -> Sec
     }
     out
 }
+
+/// Product of two first-order sections (`b2 = a2 = 0`) as one biquad.
+fn multiply_first_order(p: &BiquadCoefficients, q: &BiquadCoefficients) -> BiquadCoefficients {
+    BiquadCoefficients {
+        b0: p.b0 * q.b0,
+        b1: p.b0 * q.b1 + p.b1 * q.b0,
+        b2: p.b1 * q.b1,
+        a1: p.a1 + q.a1,
+        a2: p.a1 * q.a1,
+    }
+}
+
+/// Linkwitz-Riley filter of order `2·bw_order` (`bw_order` ∈ {1, 2, 4}): the
+/// Butterworth filter of order `bw_order` applied twice. For `bw_order = 1`
+/// (LR2) the two first-order sections are merged into one biquad, and the
+/// high-pass is **polarity-inverted** (`−HP²`), so that `LP² + (−HP²)` is
+/// all-pass (see the module documentation).
+pub(crate) fn linkwitz_riley(
+    kind: FilterKind,
+    bw_order: usize,
+    freq_hz: f64,
+    sample_rate: f64,
+) -> Sections {
+    let bw = butterworth(kind, bw_order, freq_hz, sample_rate);
+    let mut out = Sections::default();
+    if bw_order == 1 {
+        let s = bw.as_slice()[0];
+        let mut c = multiply_first_order(&s, &s);
+        if kind == FilterKind::HighPass {
+            c.b0 = -c.b0;
+            c.b1 = -c.b1;
+            c.b2 = -c.b2;
+        }
+        out.push(c);
+    } else {
+        for _ in 0..2 {
+            for &c in bw.as_slice() {
+                out.push(c);
+            }
+        }
+    }
+    out
+}

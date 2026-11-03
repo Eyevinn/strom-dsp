@@ -1,5 +1,6 @@
-//! Higher-order filters: Butterworth low-/high-pass of order 1–8 as cascaded
-//! second-order sections, designed for any sample rate.
+//! Higher-order filters and crossovers: Butterworth low-/high-pass of order
+//! 1–8 as cascaded second-order sections for any sample rate, and
+//! Linkwitz-Riley crossovers (LR2/LR4/LR8, 1–5 bands, all-pass compensated).
 //!
 //! # Butterworth design
 //!
@@ -43,11 +44,66 @@
 //!   the old output is computed into a preallocated scratch buffer.
 //! - After `configure`/`reset`, the first `process` call takes the parameters
 //!   immediately.
+//!
+//! # Linkwitz-Riley crossover ([`Crossover`])
+//!
+//! References: S. H. Linkwitz, "Active Crossover Networks for Noncoincident
+//! Drivers", JAES 24(1), 1976; the textbook Linkwitz-Riley property that an
+//! LR filter of order `2n` is a Butterworth filter of order `n` applied twice.
+//!
+//! - **One split.** With the Butterworth prototype `L(s) = 1/B(s)`,
+//!   `H(s) = sⁿ/B(s)` and the Butterworth identity
+//!   `B(s)·B(−s) = 1 + (−1)ⁿ·s²ⁿ`:
+//!   `L² + H² = (1 + s²ⁿ)/B(s)² = B(−s)/B(s)` for even `n` (LR4: n = 2,
+//!   LR8: n = 4), and `L² − H² = (1 − s²)/B(s)² = B(−s)/B(s)` for `n = 1`
+//!   (LR2). `B(−s)/B(s)` is an all-pass (each pole pair gives the cookbook APF
+//!   at `Q_k`, the real pole `(1 − s)/(1 + s)`). The bilinear transform is a
+//!   substitution, so the identity holds exactly for the digital filters too
+//!   (same pre-warp at the crossover frequency).
+//! - **LR2 polarity (our convention).** Without inversion, LR2's `L² + H²`
+//!   has a zero at the crossover frequency (a deep notch). The LR2 high-pass
+//!   is therefore defined as `−H²` (polarity inverted), so for **every** order
+//!   the invariant is the same: the plain sum of the bands is an all-pass.
+//!   Consequence: with LR2, band `k` has polarity `(−1)ᵏ` relative to the
+//!   textbook `L²`/`H²` cascade. LR4 and LR8 bands are not inverted.
+//! - **Band edges.** `|L(f_c)| = |H(f_c)| = 1/√2`, so both bands of a split
+//!   are at −6.02 dB at its frequency, for LR2, LR4 and LR8 alike. (For LR2
+//!   the two bands are in phase there only because of the inversion above;
+//!   textbook LR2 bands are in phase opposition at `f_c`.)
+//! - **Topology (N bands, splits `f_0 ≤ … ≤ f_{N−2}`).** A cascade of
+//!   high-passes: the remainder starts as the input; split `s` takes band `s`
+//!   as `LP_s(remainder)` and replaces the remainder by `HP_s(remainder)`; the
+//!   last band is the final remainder. Band `s` then passes through the
+//!   all-passes `A_j = LP_j + HP_j` of every *higher* split `j > s` (phase
+//!   compensation). By induction from the top split,
+//!   `Σ bands = A_0·A_1·…·A_{N−2}`: an all-pass, so the summed bands have a
+//!   flat magnitude. The top band needs no compensation, band 0 the most
+//!   (LR8 with 5 bands: 4 + 3·2 biquads).
+//! - **Latency**: none (IIR only). The sum has the all-pass cascade's phase.
+//! - **Parameters**: frequencies are clamped to `[1 Hz, 0.499·fs]` and to be
+//!   non-decreasing. Frequency changes glide like the Butterworth cutoff (all
+//!   sections redesigned every 32 frames and interpolated per sample; during
+//!   a glide the sum deviates slightly from all-pass, because interpolated LP
+//!   and HP sections are not exactly complementary). Order and band-count
+//!   changes crossfade every band over 10 ms from the old structure (second
+//!   state bank, preallocated scratch bands) to the new one; bands that the
+//!   old structure did not have fade in from silence, and old bands beyond a
+//!   smaller new count are folded into the new top band, so the band sum
+//!   crossfades continuously. A structural change takes effect at the start
+//!   of the next `process` call (so the realised band count always matches
+//!   [`Crossover::num_bands`]); if one arrives while a crossfade is still
+//!   running, that crossfade ends at once (a small step, only for structural
+//!   changes less than 10 ms apart).
+//! - **Processing**: the same DF-I SIMD kernels; each band runs through all
+//!   its sections per sample (in groups of at most 8). Outputs are `f32`
+//!   buffers owned by the caller.
 
 mod butterworth;
+mod crossover;
 mod design;
 
 pub use butterworth::{Butterworth, ButterworthParams};
+pub use crossover::{Crossover, CrossoverParams, LrOrder, MAX_CROSSOVER_BANDS, MAX_SPLITS};
 pub use design::{
     butterworth, butterworth_all_pass, butterworth_pair_q, clamp_cutoff, FilterKind, Sections,
     MAX_ORDER, MAX_SECTIONS, MIN_FREQUENCY_HZ, NYQUIST_FRACTION,
