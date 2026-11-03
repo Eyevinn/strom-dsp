@@ -54,9 +54,13 @@ Reusable building blocks are public too:
   compressor per band (1–5 bands).
 - `strom_dsp::truepeak`: `TruePeakLimiter`, a lookahead limiter with a 4×
   oversampled true-peak detector (BS.1770 Annex 2).
+- `strom_dsp::clipper`: `FinalClipper`, oversampled soft clipping of
+  shaped clippings, with latency settings and per-block activity
+  (`ClipStats`).
+- `strom_dsp::governor`: `ClipBudgetGovernor`, the clip budget loop.
 - `strom_dsp::broadcast`: `BroadcastProcessor`, the chain behind
-  `stromdsp-broadcastprocessor` (input gain → AGC → multiband → true-peak
-  limiter), with its meters.
+  `stromdsp-broadcastprocessor` (input gain → AGC → multiband → final
+  clipper → true-peak limiter, clip budget governor), with its meters.
 - `strom_dsp::presets`: the element defaults (`GateParams::broadcast()` and
   friends) and the broadcast presets (`BroadcastPreset`).
 - Processors behind the utility elements: `ducker`, `deesser`, `cleanup`,

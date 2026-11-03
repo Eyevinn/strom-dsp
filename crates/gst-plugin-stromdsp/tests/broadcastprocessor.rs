@@ -101,7 +101,11 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "input-gain" | "multiband-drive" => f(0.0),
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
-        "agc-enabled" | "multiband-enabled" | "limiter-enabled" => true.to_value(),
+        "agc-enabled" | "multiband-enabled" | "clipper-enabled" | "governor-enabled"
+        | "limiter-enabled" => true.to_value(),
+        "clipper-bandwidth" => f(20_000.0),
+        "clip-budget" if nick == "streaming" => f(3.0),
+        "clip-budget" => f(2.0),
         // Every preset has ±24 dB of AGC range; ebu-r128 rides slower.
         "agc-max-gain" | "agc-max-cut" => f(24.0),
         "agc-rate-up" if nick == "ebu-r128" => f(1.0),
@@ -265,6 +269,10 @@ fn library_value(p: &BroadcastParams, name: &str) -> glib::Value {
         "agc-gate" => p.agc_gate_lufs.to_value(),
         "multiband-enabled" => p.multiband_enabled.to_value(),
         "multiband-drive" => p.multiband_drive_db.to_value(),
+        "clipper-enabled" => p.clipper_enabled.to_value(),
+        "clipper-bandwidth" => p.clipper_bandwidth_hz.to_value(),
+        "governor-enabled" => p.governor_enabled.to_value(),
+        "clip-budget" => p.clip_budget_db.to_value(),
         "limiter-enabled" => p.limiter_enabled.to_value(),
         "limiter-release" => p.limiter_release_ms.to_value(),
         _ => {
@@ -785,7 +793,7 @@ fn latency_message_on_renegotiation() {
     h.play();
     push_one(&mut h, 2);
     while bus.pop().is_some() {}
-    let initial = expected_latency(48_000, 5.0);
+    let initial = expected_latency(48_000, 1.5);
     assert_eq!(query_latency(&h).1, initial);
 
     // READY-only lookahead written while playing: no change yet, no message.
@@ -956,7 +964,7 @@ fn reference_meters(
     out
 }
 
-const FIELDS: [&str; 12] = [
+const FIELDS: [&str; 15] = [
     "running-time",
     "stream-time",
     "input-momentary",
@@ -969,6 +977,9 @@ const FIELDS: [&str; 12] = [
     "agc-gain",
     "band-gain-reduction",
     "limiter-gain-reduction",
+    "clip-depth",
+    "loudness-deficit",
+    "governor-state",
 ];
 
 fn clean(x: f64) -> f64 {
@@ -1015,6 +1026,14 @@ fn check_message(r: &Received, m: &BroadcastMeters, num_bands: usize) {
     }
     let agc = s.get::<f64>("agc-gain").unwrap();
     assert!((agc - m.agc_gain_db).abs() < 1e-9, "{ctx}: agc-gain");
+    assert!((get_f64(s, "clip-depth") - clean(m.clip_depth_db)).abs() < 1e-9);
+    let deficit = s.get::<f64>("loudness-deficit").unwrap();
+    assert!(deficit >= 0.0 && (deficit - m.loudness_deficit_lu.max(0.0)).abs() < 1e-9);
+    assert_eq!(
+        s.get::<&str>("governor-state").unwrap(),
+        m.governor_state.nick(),
+        "{ctx}: governor-state"
+    );
     let lim = s.get::<f64>("limiter-gain-reduction").unwrap();
     assert!(lim >= 0.0 && (lim - m.limiter_gain_reduction_db.max(0.0)).abs() < 1e-9);
     let bands = s.get::<gst::Array>("band-gain-reduction").unwrap();

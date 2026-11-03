@@ -1,13 +1,17 @@
 //! Criterion benchmark of the full broadcast chain (input gain → AGC →
-//! 4-band multiband compressor → limiter, plus all meters), 48 kHz stereo,
-//! 480-frame (10 ms) buffers, with `take_meters` once per buffer. Throughput
-//! is in frames, so the share of one core is
+//! 4-band multiband compressor → final clipper → limiter, governor, plus all
+//! meters), 48 kHz stereo, 480-frame (10 ms) buffers, with `take_meters`
+//! once per buffer; and of the final clipper on its own (idle, and
+//! clipping every sample's neighbourhood, at both latency settings).
+//! Throughput is in frames, so the share of one core is
 //! `48 000 frames/s ÷ measured frames/s`.
 use std::f64::consts::PI;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
+use strom_dsp::clipper::{ClipperLatency, FinalClipper};
+use strom_dsp::presets::BroadcastPreset;
 use strom_dsp::Processor;
 
 const FS: f32 = 48_000.0;
@@ -63,6 +67,61 @@ fn bench(c: &mut Criterion) {
             black_box(bp.take_meters());
         })
     });
+    for (name, preset) in [
+        (
+            "full_chain_defaults_ebu_r128_48k_stereo_480",
+            BroadcastPreset::EbuR128,
+        ),
+        (
+            "full_chain_defaults_streaming_48k_stereo_480",
+            BroadcastPreset::Streaming,
+        ),
+    ] {
+        let mut bp = BroadcastProcessor::new();
+        bp.set_params(&BroadcastParams::preset(preset, 4));
+        bp.configure(FS, 2);
+        let mut pos = 0;
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let len = buf.len();
+                if pos + len > src.len() {
+                    pos = 0;
+                }
+                buf.copy_from_slice(&src[pos..pos + len]);
+                pos += len;
+                bp.process(black_box(&mut buf));
+                black_box(bp.take_meters());
+            })
+        });
+    }
+    // The final clipper alone: idle (programme 20 dB under its knee, the
+    // early-out skips the resampling) and clipping (programme 6 dB over).
+    for (latency, lname) in [
+        (ClipperLatency::Standard, "standard"),
+        (ClipperLatency::Low, "low"),
+    ] {
+        for (gain, cname) in [(0.1f32, "idle"), (4.0, "clipping")] {
+            let mut c = FinalClipper::new();
+            c.set_latency(latency);
+            c.configure(FS, 2);
+            let scaled: Vec<f32> = src.iter().map(|v| v * gain).collect();
+            let mut pos = 0;
+            group.bench_function(
+                format!("final_clipper_{lname}_{cname}_48k_stereo_480"),
+                |b| {
+                    b.iter(|| {
+                        let len = buf.len();
+                        if pos + len > scaled.len() {
+                            pos = 0;
+                        }
+                        buf.copy_from_slice(&scaled[pos..pos + len]);
+                        pos += len;
+                        c.process(black_box(&mut buf));
+                    })
+                },
+            );
+        }
+    }
     group.finish();
 }
 

@@ -18,7 +18,10 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use gst_base::prelude::*;
 use gst_base::subclass::prelude::*;
-use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, MAX_CROSSOVERS};
+use strom_dsp::broadcast::{
+    BroadcastMeters, BroadcastParams, BroadcastProcessor, CLIPPER_BANDWIDTH_RANGE_HZ,
+    CLIP_BUDGET_RANGE_DB, MAX_CROSSOVERS,
+};
 use strom_dsp::multiband::{
     ATTACK_RANGE_MS, MAKEUP_RANGE_DB, MAX_BANDS, RATIO_RANGE, RELEASE_RANGE_MS, THRESHOLD_RANGE_DB,
 };
@@ -85,6 +88,8 @@ enum FloatField {
     BandAttack(usize),
     BandRelease(usize),
     BandMakeup(usize),
+    ClipperBandwidth,
+    ClipBudget,
     LimiterRelease,
     Lookahead,
 }
@@ -107,6 +112,8 @@ impl FloatField {
             Self::BandAttack(k) => &mut p.bands[k].attack_ms,
             Self::BandRelease(k) => &mut p.bands[k].release_ms,
             Self::BandMakeup(k) => &mut p.bands[k].makeup_db,
+            Self::ClipperBandwidth => &mut p.clipper_bandwidth_hz,
+            Self::ClipBudget => &mut p.clip_budget_db,
             Self::LimiterRelease => &mut p.limiter_release_ms,
             Self::Lookahead => &mut p.limiter_lookahead_ms,
         }
@@ -124,6 +131,8 @@ enum BoolField {
     Enabled,
     Agc,
     Multiband,
+    Clipper,
+    Governor,
     Limiter,
 }
 
@@ -133,6 +142,8 @@ impl BoolField {
             Self::Enabled => &mut p.enabled,
             Self::Agc => &mut p.agc_enabled,
             Self::Multiband => &mut p.multiband_enabled,
+            Self::Clipper => &mut p.clipper_enabled,
+            Self::Governor => &mut p.governor_enabled,
             Self::Limiter => &mut p.limiter_enabled,
         }
     }
@@ -288,6 +299,21 @@ fn float_specs() -> &'static [FloatSpec] {
             ));
         }
         v.push(s(
+            "clipper-bandwidth",
+            "Clipper bandwidth",
+            "Band limit of what the final clipper removes (Hz); the clipper adds nothing above it",
+            CLIPPER_BANDWIDTH_RANGE_HZ,
+            FloatField::ClipperBandwidth,
+        ));
+        v.push(s(
+            "clip-budget",
+            "Clip budget",
+            "How much clipping and limiting the governor allows (dB, 0 = cleanest); over it, the \
+             governor gives up loudness instead (reported as loudness-deficit)",
+            CLIP_BUDGET_RANGE_DB,
+            FloatField::ClipBudget,
+        ));
+        v.push(s(
             "limiter-release",
             "Limiter release",
             "Release time of the true-peak limiter (ms)",
@@ -300,9 +326,11 @@ fn float_specs() -> &'static [FloatSpec] {
 }
 
 /// Names of the boolean properties a preset sets.
-const PRESET_BOOLS: [(&str, BoolField); 3] = [
+const PRESET_BOOLS: [(&str, BoolField); 5] = [
     ("agc-enabled", BoolField::Agc),
     ("multiband-enabled", BoolField::Multiband),
+    ("clipper-enabled", BoolField::Clipper),
+    ("governor-enabled", BoolField::Governor),
     ("limiter-enabled", BoolField::Limiter),
 ];
 
@@ -349,6 +377,17 @@ fn preset_props() -> &'static [(String, Prop)] {
                     | FloatField::BandMakeup(_)
             )
         }) {
+            push_float(&mut v, f);
+        }
+        v.push(("clipper-enabled".into(), Prop::Bool(BoolField::Clipper)));
+        for f in floats
+            .iter()
+            .filter(|f| f.field == FloatField::ClipperBandwidth)
+        {
+            push_float(&mut v, f);
+        }
+        v.push(("governor-enabled".into(), Prop::Bool(BoolField::Governor)));
+        for f in floats.iter().filter(|f| f.field == FloatField::ClipBudget) {
             push_float(&mut v, f);
         }
         v.push(("limiter-enabled".into(), Prop::Bool(BoolField::Limiter)));
@@ -545,6 +584,9 @@ fn meter_structure(
             "limiter-gain-reduction",
             reduction(m.limiter_gain_reduction_db),
         )
+        .field("clip-depth", level(m.clip_depth_db))
+        .field("loudness-deficit", reduction(m.loudness_deficit_lu))
+        .field("governor-state", m.governor_state.nick())
         .build()
 }
 
@@ -722,6 +764,20 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     v.push(float(&format!("band{k}-{f}")));
                 }
             }
+            v.push(common::bool_prop(
+                "clipper-enabled",
+                "Clipper enabled",
+                "Run the final clipper before the limiter (bypassed: unity gain, same delay)",
+                d.clipper_enabled,
+            ));
+            v.push(float("clipper-bandwidth"));
+            v.push(common::bool_prop(
+                "governor-enabled",
+                "Governor enabled",
+                "Keep the clipper and the limiter within clip-budget, trading loudness when needed",
+                d.governor_enabled,
+            ));
+            v.push(float("clip-budget"));
             v.push(common::bool_prop(
                 "limiter-enabled",
                 "Limiter enabled",
@@ -979,9 +1035,10 @@ impl ElementImpl for StromDspBroadcastProcessor {
                 "strom-dsp broadcast processor",
                 "Filter/Effect/Audio",
                 "Broadcast/streaming final processor: input gain, loudness-targeting AGC, \
-                 multiband compressor (1-5 bands, LR4) and true-peak limiter, with presets \
+                 multiband compressor (1-5 bands, LR4), final clipper and true-peak limiter \
+                 under a clip budget governor, with presets \
                  for EBU R 128, ATSC A/85, streaming and speech. Reports its latency \
-                 (lookahead + oversampling filter); enabled=false keeps the delay. Posts \
+                 (clipper + lookahead + oversampling filter); enabled=false keeps the delay. Posts \
                  'stromdsp-broadcastprocessor' meter messages every meter-interval ms.",
                 "Eyevinn Technology",
             )
@@ -1208,8 +1265,9 @@ mod tests {
     #[test]
     fn preset_props_cover_every_preset_field() {
         let names: Vec<&str> = preset_props().iter().map(|(n, _)| n.as_str()).collect();
-        // 9 scalars + 4 crossovers + 25 band values + limiter-release + 3 booleans.
-        assert_eq!(names.len(), 9 + 4 + 25 + 1 + 3);
+        // 9 scalars + 4 crossovers + 25 band values + clipper-bandwidth +
+        // clip-budget + limiter-release + 5 booleans.
+        assert_eq!(names.len(), 9 + 4 + 25 + 3 + 5);
         for excluded in [
             "enabled",
             "preset",

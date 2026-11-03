@@ -1,7 +1,9 @@
 //! `stromdsp-broadcastprocessor`: broadcast/streaming final processor.
 //!
 //! ```text
-//! input gain → wideband AGC → multiband compressor → true-peak limiter
+//! input gain → wideband AGC → multiband compressor → final clipper → true-peak limiter
+//!                                   ↑                               │
+//!                                   └──── clip budget governor ←────┘
 //! ```
 //!
 //! An in-place `BaseTransform` on interleaved F32LE, any rate and channel
@@ -35,9 +37,13 @@
 //! | `bandN-attack` | Float | ms | 0.1 … 500 | 30, 15, 8, 5, 3 | PLAYING |
 //! | `bandN-release` | Float | ms | 5 … 5000 | 300, 200, 150, 100, 80 | PLAYING |
 //! | `bandN-makeup` | Float | dB | −12 … 24 | 0 | PLAYING |
+//! | `clipper-enabled` | Boolean | | | `true` | PLAYING |
+//! | `clipper-bandwidth` | Float | Hz | 8000 … 22000 | 20000 | PLAYING |
+//! | `governor-enabled` | Boolean | | | `true` | PLAYING |
+//! | `clip-budget` | Float | dB | 0 … 6 | 2 | PLAYING |
 //! | `limiter-enabled` | Boolean | | | `true` | PLAYING |
 //! | `limiter-release` | Float | ms | 1 … 2000 | 200 | PLAYING |
-//! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 5 | READY (not controllable) |
+//! | `limiter-lookahead` | Float | ms | 0.5 … 20 | 1.5 | READY (not controllable) |
 //! | `meter-interval` | UInt | ms | 0 … 10000 (0 = off) | 100 | PLAYING |
 //!
 //! The defaults are the `ebu-r128` preset at 4 bands
@@ -125,6 +131,9 @@
 //! | `agc-gain` | `gdouble` | dB | AGC gain, signed (+ = boost) |
 //! | `band-gain-reduction` | `GstValueArray` of `gdouble` | dB | positive dB of reduction, one per active band, lowest first |
 //! | `limiter-gain-reduction` | `gdouble` | dB | positive dB of reduction |
+//! | `clip-depth` | `gdouble` | dB | energy the final clipper removed relative to its input, since the last message (−200 when nothing) |
+//! | `loudness-deficit` | `gdouble` | LU | how far the governor lets the output fall short of the target (≥ 0) |
+//! | `governor-state` | `gchararray` | | `off`, `frozen`, `free`, `hold`, `density`, `cut` or `release` |
 //!
 //! Silence (and anything not yet measured) reads [`SILENCE_DB`] (−200),
 //! never NaN or −∞.
@@ -133,7 +142,9 @@
 //!
 //! The `LATENCY` query adds
 //! `BroadcastProcessor::latency_frames_for(rate, limiter-lookahead)` frames
-//! (lookahead plus the oversampling filter delay), as time rounded up to
+//! (the final clipper's 69 frames plus the lookahead plus the limiter's
+//! oversampling filter delay; 173 frames, 3.60 ms, at 48 kHz with the
+//! defaults), as time rounded up to
 //! whole nanoseconds. Before caps are negotiated it assumes 48 kHz. It does
 //! not depend on `enabled` or on stage bypass. A `Latency` message is posted
 //! when it changes, which only happens at a caps negotiation (both

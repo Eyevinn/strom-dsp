@@ -414,8 +414,10 @@ No commercial-processor material and no patent-driven method was used.
 **Own design choices.**
 - Curve: identity to `T − knee`, then `k + w·tanh(e/w)`; closed-form
   antiderivative `e²/2 − w²·ln cosh(e/w)` for the antialiasing.
-- 8× oversampling (the shared `Oversampler`): at 4× a 15 kHz tone 6 dB over
-  the threshold left a −75 … −80 dBFS alias, at 8× −94 dBFS.
+- Latency settings: standard 8×, one pass, 41-tap shaping FIR (69 frames);
+  low 4×, one pass, 3-tap FIR (48 frames); two passes (138 frames). At 4×
+  a 15 kHz tone 6 dB over the threshold left a −75 … −80 dBFS alias, at 8×
+  −94 dBFS. The shaping FIR is normalised to unit DC gain.
 - The shaping FIR's passband `1 + a·(f/f_b)²`, `a = 1`, found by measuring
   sample-peak overshoot on our own synthetic signals for a ∈ {0, 0.3, 0.6,
   1, 1.5}. The FIR is centred half a high-rate sample early to undo the
@@ -423,15 +425,19 @@ No commercial-processor material and no patent-driven method was used.
 - Low cut `H(s) = s²(s + 3)/(s + 1)³` (complement of
   `L = (1 + 3s)/(1 + s)³`), −3 dB at the bass crossover: 12 dB/octave below
   it, no latency, near-zero phase error well above it.
-- Two passes; early-out on a hard bound of the interpolator's gain (exact,
-  with the interpolator primed from a short input history on return).
+- One pass by default (the limiter after the clipper takes the regrowth),
+  two as an option; early-out on a hard bound of the interpolator's gain
+  (exact, with the interpolator primed from a short input history on
+  return).
 - Activity statistics (clip depth as removed/input energy, share of
   touched high-rate samples) for the clip budget and for stages before the
   clipper.
 
-**Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −93.9
-dBFS; sample peaks within +0.26 dB of the threshold on band-limited signals
-driven 2 and 4 dB (+1.6 dB without the compensation); a lower NMR and
+**Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −94.0
+dBFS (standard), −75.8 dBFS (low); worst sample peak over the threshold on
+band-limited signals driven 2 and 4 dB +0.77 dB (standard), +2.17 dB
+(low), +0.27 dB (two passes; +1.6 dB without the compensation); a lower
+NMR and
 equal or higher loudness than the true-peak limiter alone and than a
 base-rate hard clip at drives 0 … 4 dB. The NMR is a test metric only (own
 Bark-band model after Brandenburg 1987 and Zwicker & Fastl); nothing in the
@@ -471,6 +477,16 @@ input gain → wideband AGC (`agc.rs`) → multiband compressor
 (`multiband.rs`) → true-peak limiter (`truepeak.rs`). Levelling comes first,
 so the band dynamics work on programme at the target loudness, and the
 true-peak ceiling comes last, so no later stage can push a peak over it.
+
+The chain now also has a final clipper before the limiter and a clip
+budget governor around both (sections above). With the clipper taking the
+peaks, the limiter's default lookahead dropped from 5 ms to 1.5 ms (0.75 ms
+for low latency), justified by measurement: the true-peak ceiling holds
+within +0.008 dB on the nasty-signal set at 44.1, 48 and 96 kHz, and the
+limiter's mean gain reduction on the peaky test programme is lower than
+before (0.69 dB against 1.72 dB with no clipper and 5 ms). A ceiling change
+glides at 1 dB per 512 frames, so the shorter attack ramp does not make
+a large jump audible.
 
 Own choices:
 - **Input gain:** glides in dB through two cascaded 5 ms one-poles.

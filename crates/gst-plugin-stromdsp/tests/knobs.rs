@@ -280,11 +280,15 @@ fn base_setup(factory: &str) -> Vec<(&'static str, &'static str)> {
         // Steady key well above threshold: ducking by `depth`.
         "stromdsp-ducker" => vec![("threshold", "-30"), ("depth", "-15")],
         // Band 2 (the tone's band) compressing; the tone raised to 0 dBFS
-        // into a −6 dBTP ceiling, so the limiter limits.
+        // into a −6 dBTP ceiling, so the limiter limits. The final clipper
+        // is off here: it would clip the tone first, and the annihilator
+        // reads clipping harmonics as clicks. Its knobs have their own
+        // scenarios below, on a tone under its knee.
         "stromdsp-broadcastprocessor" => vec![
             ("band2-threshold", "-30"),
             ("input-gain", "12"),
             ("true-peak-ceiling", "-6"),
+            ("clipper-enabled", "false"),
         ],
         _ => unreachable!("{factory}"),
     }
@@ -590,6 +594,29 @@ fn cases() -> Vec<Case> {
         &[("crossover-frequencies", "<20.0, 21.0, 22.0, 23.0>")],
     ));
     v.push(case(b, &[], &[("meter-interval", "0")]));
+    // Final clipper and governor, on a tone under the clipper's knee (no
+    // input gain, 0 dBTP ceiling): the toggles must keep the timing.
+    let under_knee = [
+        ("input-gain", "0"),
+        ("true-peak-ceiling", "0"),
+        ("clipper-enabled", "true"),
+    ];
+    v.push(case(b, &under_knee, &[("clipper-enabled", "false")]));
+    v.push(case(
+        b,
+        &[under_knee[0], under_knee[1], ("clipper-enabled", "false")],
+        &[("clipper-enabled", "true")],
+    ));
+    v.push(case(b, &under_knee, &[("clipper-bandwidth", "8000")]));
+    v.push(case(b, &under_knee, &[("clipper-bandwidth", "22000")]));
+    v.push(case(b, &under_knee, &[("governor-enabled", "false")]));
+    v.push(case(
+        b,
+        &[under_knee[0], under_knee[1], ("governor-enabled", "false")],
+        &[("governor-enabled", "true")],
+    ));
+    v.push(case(b, &under_knee, &[("clip-budget", "0")]));
+    v.push(case(b, &under_knee, &[("clip-budget", "6")]));
 
     v
 }
