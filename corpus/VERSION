@@ -1,0 +1,5 @@
+# The test corpus release that scripts/fetch-corpus.sh downloads.
+# build-corpus-archive.sh rewrites sha256= when it builds the archive.
+version=v1
+url=https://github.com/Eyevinn/strom-dsp/releases/download/corpus-v1/strom-dsp-corpus-v1.tar.gz
+sha256=ff509cf5a7acfcbef39e601f33eda61d0d60b8c9eeb184b486fa9c55046f38dd
