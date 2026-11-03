@@ -7,9 +7,26 @@
 //!
 //! # Signal flow (per frame of interleaved samples)
 //!
-//! 1. **Level detector**: `x_dB = 20·log10(max_c |x_c|)` over all channels (linked;
-//!    floored at −200 dB). For a steady sine this is a peak detector, so levels and
-//!    the threshold refer to **peak amplitude**.
+//! 1. **Level detector**: the linked peak `p[n] = max_c |x_c[n]|` over all
+//!    channels, then a **peak hold**: the detector level is the maximum of `p`
+//!    over the last `H` frames (sliding window, van Herk / Gil–Werman
+//!    [`SegmentedMin`] on `−p`), `H = min(`[`DETECTOR_HOLD_MS`]`, release)`, and
+//!    `x_dB = 20·log10(level)` (floored at −200 dB). For a steady sine this is
+//!    its **peak amplitude**, so levels and the threshold refer to peak level.
+//!
+//!    Why the hold (listening-test fix): without it the detector followed each
+//!    half-cycle of the waveform, so with fast times the gain rippled at twice
+//!    the signal frequency and distorted bass (2.5 % THD at 60 Hz with attack
+//!    1 ms / release 50 ms; Giannoulis et al. 2012, section on artefacts of
+//!    fast time constants: the detector release must be long compared with the
+//!    period of the lowest frequency of interest). A window that is at least
+//!    half a period long always contains a waveform peak, so the level of a
+//!    steady sine above `1/(2H)` (25 Hz) is constant and the gain does not
+//!    ripple at all, while an attack is still seen instantly. The cost is that
+//!    a release starts `H` later. Tying `H` to the release keeps that delay at
+//!    most one release time: an operator who sets a release below 20 ms gets
+//!    a proportionally shorter hold (and more low-frequency distortion, which
+//!    is then their choice).
 //! 2. **Gain computer** ([`GainComputer`], static curve), with threshold
 //!    `T = 20·log10(threshold)`, knee width `W = −40·log10(k)` dB (`k` = `knee`
 //!    clamped to `[0.001, 1]`) and slope `S = 1 − 1/ratio`, the gain reduction
@@ -27,6 +44,9 @@
 //!    `a_A = exp(−1/(τ_A·fs))`, `τ_A = attack_ms/1000` (and likewise for release).
 //!    **Time constant definition**: after a step of the static gain reduction, the
 //!    smoothed reduction (in dB) covers `1 − 1/e` (≈ 63.2 %) of the step after `τ`.
+//!    A rising input level steps the static reduction at once (attack: 63.2 %
+//!    after `τ_A`); a falling level steps it after the hold, i.e. `H` frames
+//!    later (release: 63.2 % after `H + τ_R`).
 //! 4. **Output gain**: `g = 10^(−y/20) · makeup`, applied to all channels.
 //!
 //! # Parameter smoothing
@@ -41,8 +61,8 @@
 //!
 //! Processing runs in blocks of [`BLOCK_FRAMES`]: per-frame peaks, the serial
 //! detector/smoother chain, then gain application. While the parameters are not
-//! gliding, a frame whose peak is below the knee's lower edge (compared in the
-//! linear domain) skips the `log10`, and a frame with zero smoothed reduction
+//! gliding, a block whose held levels are all below the knee's lower edge
+//! (compared in the linear domain) skips the `log10`, and a block with zero smoothed reduction
 //! skips the `exp`; the result is the same as evaluating the full formula.
 //!
 //! # Denormals
@@ -59,12 +79,15 @@
 //! separate key signal through a [`KeyDetector`]: optional key filter
 //! ([`Compressor::set_key_filter`], high-pass or band-pass) and the linked
 //! peak over the key's channels, which may differ in number from the
-//! programme's ([`Compressor::set_key_channels`]). Steps 2–4 are unchanged.
+//! programme's ([`Compressor::set_key_channels`]). The hold of step 1 and
+//! steps 2–4 are unchanged.
 //! [`Processor::process`] never touches the key path and is bit-identical to
 //! the compressor without sidechain support.
 
 use crate::dynamics::frame::{apply_gains_simd, frame_peaks_simd, BLOCK_FRAMES};
-use crate::dynamics::{vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, OnePole};
+use crate::dynamics::{
+    vmath, AttackRelease, GainComputer, KeyDetector, KeyFilter, OnePole, SegmentedMin,
+};
 use crate::simd::{detect, Level};
 use crate::Processor;
 use fearless_simd::dispatch;
@@ -74,6 +97,24 @@ pub use crate::dynamics::MIN_KNEE;
 
 /// Time constant (ms) of the one-pole glide applied to threshold, ratio, knee and makeup.
 pub const PARAM_SMOOTHING_MS: f64 = 10.0;
+
+/// Longest peak hold of the level detector (ms): the hold is
+/// `min(DETECTOR_HOLD_MS, release)`. 20 ms is half a period of 25 Hz, so a
+/// steady sine at or above 25 Hz gives a ripple-free level (see the module docs).
+pub const DETECTOR_HOLD_MS: f64 = 20.0;
+
+/// Largest sample rate `configure` accepts (Hz); also sizes the hold window.
+const MAX_SAMPLE_RATE: f64 = 1.0e6;
+
+/// Hold length in frames for `release_ms` at `fs` (≥ 1; 1 = no hold).
+fn hold_frames(release_ms: f64, fs: f64) -> usize {
+    let f = (release_ms.min(DETECTOR_HOLD_MS) * 0.001 * fs).round();
+    if f.is_finite() && f >= 1.0 {
+        f as usize
+    } else {
+        1
+    }
+}
 
 /// Snap distance of the parameter glides.
 const GLIDE_SNAP: f64 = 1e-9;
@@ -231,6 +272,10 @@ pub struct Compressor {
     /// Linear level at or below which the settled curve gives exactly 0 dB reduction.
     knee_start_lin: f64,
 
+    /// Sliding maximum of the detector level (as a minimum of its negation).
+    hold: SegmentedMin,
+    /// Most recent held detector level (linear).
+    held: f64,
     /// Smoothed gain reduction (dB, ≥ 0).
     reduction: AttackRelease,
     /// True until the first frame is processed after configure/reset: parameters snap.
@@ -271,6 +316,8 @@ impl Compressor {
             },
             gliding: false,
             knee_start_lin: curve.computer().knee_start_lin(),
+            hold: SegmentedMin::default(),
+            held: 0.0,
             reduction: AttackRelease::default(),
             fresh: true,
             level: Level::baseline(),
@@ -375,6 +422,9 @@ impl Compressor {
         let mut makeup = [0.0f64; BLOCK_FRAMES];
         for (b, block) in samples.chunks_mut(BLOCK_FRAMES * ch).enumerate() {
             let frames = block.len() / ch;
+            if frames == 0 {
+                continue;
+            }
             // Vector loops cover whole vectors; lanes past `frames` hold
             // finite leftovers and are ignored. BLOCK_FRAMES is a multiple of
             // every native width.
@@ -387,17 +437,22 @@ impl Compressor {
                         .linked_peaks_simd(simd, &k[start..], kc, &mut peaks[..frames]);
                 }
             }
+            // Peak hold: sliding maximum over the last `H` frames (serial).
+            let mut block_max = 0.0f64;
+            for (l, &p) in level[..frames].iter_mut().zip(&peaks) {
+                let h = -self.hold.push(-(p as f64));
+                block_max = if h > block_max { h } else { block_max };
+                *l = h;
+            }
+            self.held = level[frames - 1];
             // Settled curve and the whole block below the knee: the static
             // reduction is exactly 0, no need for the logarithm.
-            let quiet = !self.gliding
-                && peaks[..frames].iter().fold(0.0f32, |m, &p| m.max(p)) as f64
-                    <= self.knee_start_lin;
+            let quiet = !self.gliding && block_max <= self.knee_start_lin;
             if quiet {
                 level[..frames].fill(0.0);
             } else {
-                for (l, &p) in level.iter_mut().zip(&peaks) {
-                    *l = p as f64;
-                }
+                // Lanes past `frames` must hold finite values.
+                level[frames..lanes].fill(1.0);
                 for v in level[..lanes].chunks_exact_mut(n) {
                     vmath::lin_to_db(simd, S::f64s::from_slice(simd, v)).store_slice(v);
                 }
@@ -456,6 +511,15 @@ impl Compressor {
             fs,
         );
         self.glide.set_time(fs);
+        let h = hold_frames(self.params.release_ms as f64, fs);
+        if h != self.hold.window() {
+            // Restart the window with the level held so far, so a release
+            // change never drops the detector level abruptly.
+            self.hold.reset(h);
+            if !self.fresh {
+                self.hold.push(-self.held);
+            }
+        }
         self.target = Curve::from_params(&self.params);
         if self.fresh {
             self.glide.jump(&self.target);
@@ -484,8 +548,11 @@ fn reduction_db_simd<S: Simd>(simd: S, gc: &GainComputer, x: S::f64s) -> S::f64s
 
 impl Processor for Compressor {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
-        self.sample_rate = (sample_rate as f64).clamp(1.0, 1.0e6);
+        self.sample_rate = (sample_rate as f64).clamp(1.0, MAX_SAMPLE_RATE);
         self.channels = channels;
+        // The only allocation: the hold window for the longest hold.
+        self.hold
+            .allocate(hold_frames(DETECTOR_HOLD_MS, self.sample_rate));
         if !self.level_forced {
             self.level = detect();
         }
@@ -511,6 +578,9 @@ impl Processor for Compressor {
         self.key.reset();
         self.reduction.set_value(0.0);
         self.fresh = true;
+        self.held = 0.0;
+        let h = hold_frames(self.params.release_ms as f64, self.sample_rate);
+        self.hold.reset(h);
         self.update_coefficients();
     }
 }
