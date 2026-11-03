@@ -50,7 +50,7 @@
 //!   the `process` call.
 
 use crate::biquad::{
-    run_changing, run_steady, sanitize_bank, ChangingStage, FadeOut, SteadyStage, MAX_STAGES,
+    run_chain, run_changing, sanitize_bank, ChangingStage, FadeOut, SteadyStage, MAX_STAGES,
     STATE_PER_CHANNEL,
 };
 use crate::util::one_pole_coef;
@@ -437,7 +437,9 @@ impl Equalizer {
             fade: None,
         }; MAX_STAGES];
         let mut count = 0;
-        let mut any_changing = false;
+        let mut ramps = [None; MAX_STAGES];
+        let mut any_ramp = false;
+        let mut any_fade = false;
         let inv_fade = 1.0 / self.fade_len as f64;
         for b in 0..MAX_BANDS {
             let slot = self.slots[b];
@@ -464,8 +466,10 @@ impl Equalizer {
                 done: self.fade_len - slot.fade_left,
                 inv_len: inv_fade,
             });
-            any_changing |= delta.is_some() || fade.is_some();
+            any_ramp |= delta.is_some();
+            any_fade |= fade.is_some();
             steady[count] = cur;
+            ramps[count] = delta;
             changing[count] = ChangingStage {
                 new: (slot.kind != BandType::Off).then_some(cur),
                 delta,
@@ -476,10 +480,13 @@ impl Equalizer {
         if count == 0 {
             return false;
         }
-        if any_changing {
-            run_changing(data, self.channels, &changing[..count], &mut self.states);
+        let (ch, states) = (self.channels, &mut self.states);
+        if any_fade {
+            run_changing(data, ch, &changing[..count], states);
+        } else if any_ramp {
+            run_chain(data, ch, &steady[..count], &ramps[..count], states);
         } else {
-            run_steady(data, self.channels, &steady[..count], &mut self.states);
+            run_chain(data, ch, &steady[..count], &[], states);
         }
         true
     }

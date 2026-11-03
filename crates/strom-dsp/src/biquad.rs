@@ -362,78 +362,105 @@ pub(crate) struct SteadyStage {
 
 /// Run `stages` in series over interleaved `data` (whole frames of `channels`),
 /// sample by sample. `states` holds every bank referenced by the stages.
-pub(crate) fn run_steady(
+///
+/// `ramps` is either empty (fixed coefficients: the steady-state loop) or has
+/// one entry per stage; a stage with `Some(delta)` adds `delta` to its
+/// coefficients before each sample (per-sample linear interpolation), the
+/// others keep theirs.
+pub(crate) fn run_chain(
     data: &mut [f32],
     channels: usize,
     stages: &[SteadyStage],
+    ramps: &[Option<BiquadCoefficients>],
     states: &mut [f64],
 ) {
     debug_assert!(stages.len() <= MAX_STAGES);
+    debug_assert!(ramps.is_empty() || ramps.len() == stages.len());
     if stages.is_empty() {
         return;
     }
     for (c0, width) in channel_groups(channels) {
-        match width {
-            2 => steady_group::<2>(data, channels, c0, stages, states),
-            _ => steady_group::<1>(data, channels, c0, stages, states),
+        match (width, ramps.is_empty()) {
+            (2, true) => chain_group::<2, false>(data, channels, c0, stages, ramps, states),
+            (2, false) => chain_group::<2, true>(data, channels, c0, stages, ramps, states),
+            (_, true) => chain_group::<1, false>(data, channels, c0, stages, ramps, states),
+            (_, false) => chain_group::<1, true>(data, channels, c0, stages, ramps, states),
         }
     }
 }
 
-fn steady_group<const L: usize>(
+fn chain_group<const L: usize, const RAMP: bool>(
     data: &mut [f32],
     channels: usize,
     c0: usize,
     stages: &[SteadyStage],
+    ramps: &[Option<BiquadCoefficients>],
     states: &mut [f64],
 ) {
     // A fixed stage count lets the compiler unroll the chain and keep every
     // state in registers.
+    let args = (data, channels, c0, stages, ramps, states);
     match stages.len() {
-        1 => steady_chain::<L, 1>(data, channels, c0, stages, states),
-        2 => steady_chain::<L, 2>(data, channels, c0, stages, states),
-        3 => steady_chain::<L, 3>(data, channels, c0, stages, states),
-        4 => steady_chain::<L, 4>(data, channels, c0, stages, states),
-        5 => steady_chain::<L, 5>(data, channels, c0, stages, states),
-        6 => steady_chain::<L, 6>(data, channels, c0, stages, states),
-        7 => steady_chain::<L, 7>(data, channels, c0, stages, states),
-        _ => steady_chain::<L, 8>(data, channels, c0, stages, states),
+        1 => chain_n::<L, 1, RAMP>(args),
+        2 => chain_n::<L, 2, RAMP>(args),
+        3 => chain_n::<L, 3, RAMP>(args),
+        4 => chain_n::<L, 4, RAMP>(args),
+        5 => chain_n::<L, 5, RAMP>(args),
+        6 => chain_n::<L, 6, RAMP>(args),
+        7 => chain_n::<L, 7, RAMP>(args),
+        _ => chain_n::<L, 8, RAMP>(args),
     }
 }
 
+/// One frame through `N` stages.
 #[inline(always)]
-fn chain<const L: usize, const N: usize>(
-    coefs: &[BiquadCoefficients; N],
+fn chain_tick<const L: usize, const N: usize, const RAMP: bool>(
+    coefs: &mut [BiquadCoefficients; N],
+    deltas: &[Option<BiquadCoefficients>; N],
     st: &mut [LaneState<L>; N],
     mut x: Lanes<L>,
 ) -> Lanes<L> {
-    for (c, s) in coefs.iter().zip(st.iter_mut()) {
+    for ((c, d), s) in coefs.iter_mut().zip(deltas).zip(st.iter_mut()) {
+        if RAMP {
+            if let Some(d) = d {
+                c.add_step(d);
+            }
+        }
         x = s.tick(c, x);
     }
     x
 }
 
-fn steady_chain<const L: usize, const N: usize>(
-    data: &mut [f32],
-    channels: usize,
-    c0: usize,
-    stages: &[SteadyStage],
-    states: &mut [f64],
+type ChainArgs<'a> = (
+    &'a mut [f32],
+    usize,
+    usize,
+    &'a [SteadyStage],
+    &'a [Option<BiquadCoefficients>],
+    &'a mut [f64],
+);
+
+fn chain_n<const L: usize, const N: usize, const RAMP: bool>(
+    (data, channels, c0, stages, ramps, states): ChainArgs<'_>,
 ) {
     let off = STATE_PER_CHANNEL * c0;
-    let coefs: [BiquadCoefficients; N] = core::array::from_fn(|i| stages[i].coefs);
+    let mut coefs: [BiquadCoefficients; N] = core::array::from_fn(|i| stages[i].coefs);
+    let deltas: [Option<BiquadCoefficients>; N] =
+        core::array::from_fn(|i| if RAMP { ramps[i] } else { None });
     let mut st: [LaneState<L>; N] =
         core::array::from_fn(|i| LaneState::load(&states[stages[i].state + off..]));
     for block in data.chunks_mut(FLUSH_INTERVAL * channels) {
         if channels == L {
             for frame in block.chunks_exact_mut(L) {
-                let y = chain(&coefs, &mut st, Lanes::load_f32(frame));
+                let y =
+                    chain_tick::<L, N, RAMP>(&mut coefs, &deltas, &mut st, Lanes::load_f32(frame));
                 y.store_f32(frame);
             }
         } else {
             for frame in block.chunks_exact_mut(channels) {
                 let lanes = &mut frame[c0..c0 + L];
-                let y = chain(&coefs, &mut st, Lanes::load_f32(lanes));
+                let y =
+                    chain_tick::<L, N, RAMP>(&mut coefs, &deltas, &mut st, Lanes::load_f32(lanes));
                 y.store_f32(lanes);
             }
         }
@@ -466,8 +493,9 @@ pub(crate) struct ChangingStage {
     pub fade: Option<FadeOut>,
 }
 
-/// Like [`run_steady`], with per-sample coefficient interpolation and
-/// crossfades. Used only while something is changing.
+/// Like [`run_chain`], with crossfades between two realisations per stage
+/// (and per-sample coefficient interpolation). Used only while a crossfade
+/// is running.
 pub(crate) fn run_changing(
     data: &mut [f32],
     channels: usize,
@@ -642,18 +670,14 @@ impl Biquad {
         let ch = self.channels;
         let frames = samples.len() / ch;
         let mut data = &mut samples[..frames * ch];
+        let stage = [SteadyStage {
+            coefs: self.coefs,
+            state: 0,
+        }];
         if self.ramp_left > 0 && frames > 0 {
             let n = self.ramp_left.min(frames);
             let (head, tail) = data.split_at_mut(n * ch);
-            let stage = ChangingStage {
-                new: Some(SteadyStage {
-                    coefs: self.coefs,
-                    state: 0,
-                }),
-                delta: Some(self.delta),
-                fade: None,
-            };
-            run_changing(head, ch, &[stage], &mut self.state);
+            run_chain(head, ch, &stage, &[Some(self.delta)], &mut self.state);
             self.ramp_left -= n;
             if self.ramp_left == 0 {
                 self.coefs = self.target;
@@ -665,11 +689,11 @@ impl Biquad {
             }
             data = tail;
         }
-        let stage = SteadyStage {
+        let stage = [SteadyStage {
             coefs: self.coefs,
             state: 0,
-        };
-        run_steady(data, ch, &[stage], &mut self.state);
+        }];
+        run_chain(data, ch, &stage, &[], &mut self.state);
         sanitize_bank(&mut self.state);
     }
 }
