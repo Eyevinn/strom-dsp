@@ -6,7 +6,8 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# gstreamer-rs 0.25 requires Rust 1.92 (the library crate alone needs 1.89).
+rust-version = "1.92"
 
 [lib]
 name = "gststromdsp"

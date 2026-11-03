@@ -8,13 +8,25 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eyevinn Technology"]
 repository = "https://github.com/Eyevinn/strom-dsp"
-rust-version = "1.83"
+# 1.89: needed by `fearless_simd` (planned SIMD pass); checked in CI.
+rust-version = "1.89"
 
 [workspace.dependencies]
 strom-dsp = { path = "crates/strom-dsp" }
 
+# Release: whole-program optimisation for the DSP hot loops. Generic target
+# only; never `target-cpu=native` (the plugin ships as one binary).
+#
+# `panic` stays at the default `unwind` on purpose: gstreamer-rs catches a
+# panic in an element vfunc and turns it into an element error, so the host
+# (Strom) survives. `panic = "abort"` would kill the whole host process.
 [profile.release]
-debug = 1
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
 
+# Benchmarks inherit the release settings above (cargo default); line tables
+# keep profiler and callgrind output attributable to source lines.
 [profile.bench]
-debug = 1
+debug = "line-tables-only"
