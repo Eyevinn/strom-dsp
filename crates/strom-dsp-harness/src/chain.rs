@@ -315,7 +315,24 @@ pub fn delayed(input: &[f32], latency: usize) -> Vec<f32> {
 
 /// The harness numbers of one case (see the module docs).
 pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength) -> Numbers {
-    let skip = (len.skip_seconds * FS) as usize;
+    let programme = matches!(case.level, Level::AtTarget);
+    measure_run(Some(case.signal), programme, p, run, len.skip_seconds)
+}
+
+/// The harness numbers of any chain run (see the module docs), for input
+/// that is not one of the harness cases (e.g. a recording).
+///
+/// `signal` selects the spectral metrics that need a known test signal
+/// (`None`: none of them); `programme` reports the loudness error against
+/// the target (the AGC is on). Measured from `skip_seconds` on.
+pub fn measure_run(
+    signal: Option<SignalKind>,
+    programme: bool,
+    p: &BroadcastParams,
+    run: &ChainRun,
+    skip_seconds: f64,
+) -> Numbers {
+    let skip = ((skip_seconds * FS) as usize).min(run.output.len() / CH);
     let out = &run.output[skip * CH..];
     let mut n = Numbers::new();
     let mut put = |k: &str, v: Option<f64>| {
@@ -324,7 +341,6 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
 
     put("latency_ms", Some(run.latency as f64 * 1000.0 / FS));
     let l = metrics::loudness(out, CH, FS);
-    let programme = matches!(case.level, Level::AtTarget);
     put(
         "loudness_error_lu",
         programme.then_some(l.integrated_lufs - p.target_loudness_lufs as f64),
@@ -365,8 +381,8 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
     let mut put = |k: &str, v: Option<f64>| put(k, v.map(|x| x.max(SPECTRAL_FLOOR_DB)));
     put(
         "alias_spur_db",
-        match case.signal {
-            SignalKind::Sine(f) if f > 10_000.0 => {
+        match signal {
+            Some(SignalKind::Sine(f)) if f > 10_000.0 => {
                 Some(metrics::alias_spur_db(o, CH, FS, from, f, 200.0))
             }
             _ => None,
@@ -374,13 +390,13 @@ pub fn measure(case: &Case, p: &BroadcastParams, run: &ChainRun, len: RunLength)
     );
     put(
         "smpte_imd_db",
-        (case.signal == SignalKind::SmptePair).then(|| metrics::smpte_imd_db(o, CH, FS, from)),
+        (signal == Some(SignalKind::SmptePair)).then(|| metrics::smpte_imd_db(o, CH, FS, from)),
     );
     put(
         "ccif_imd_db",
-        (case.signal == SignalKind::CcifPair).then(|| metrics::ccif_imd_db(o, CH, FS, from)),
+        (signal == Some(SignalKind::CcifPair)).then(|| metrics::ccif_imd_db(o, CH, FS, from)),
     );
-    let bih = case.signal == SignalKind::BassIntoHighs;
+    let bih = signal == Some(SignalKind::BassIntoHighs);
     put(
         "sideband_50hz_dbc",
         bih.then(|| metrics::sideband_dbc(o, CH, FS, from, 3_000.0, 50.0)),
