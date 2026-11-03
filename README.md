@@ -232,6 +232,12 @@ required gain before the peak arrives, and it rounds only downwards. A final
 safety clip exists as a guard only; tests show it never triggers on normal
 material.
 
+**Release hold.** After the last sample that needed gain reduction, the
+limiter holds the gain for min(20 ms, release) before the release starts. This
+keeps bass undistorted at fast attack and release, because the gain no longer
+rises between the waveform peaks of low notes. The ceiling guarantee is
+unaffected.
+
 **Latency.**
 - The audio is delayed by `lookahead`, and the element adds it to the LATENCY
   query.

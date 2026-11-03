@@ -286,6 +286,42 @@ basics from J. O. Smith III. No code listing was used.
 - **Safety clip:** a guard at the ceiling that counts each intervention
   (`safety_clip_count()`); tests show it stays at 0. Release state is snapped
   to its target below 1e-15 (denormal-safe).
+- **Gain hold (bass distortion fix, after listening tests).**
+  - **Problem:** at fast settings (1 ms / 50 ms) the sliding-min window covered
+    only A + 1 frames, so the gain released between waveform peaks. THD was
+    3.4 % at 50 Hz, and 9.3 % with a 10 ms release.
+  - **Fix:** the window is widened backwards by H = min(20 ms, release), to
+    `[m − L − H, m − L + A]`. This follows Giannoulis et al. 2012 on artefacts
+    of fast time constants.
+  - **Proof:** unchanged in substance. The base part of every averaged window
+    still contains n − L.
+  - **Own choice:** on a rebuild (attack, hold or lookahead change), the hold
+    part never reaches further back than the previous pipeline did, so a longer
+    hold grows frame by frame instead of dropping a releasing gain.
+  - **Result:** THD below 0.00005 % from 50 to 440 Hz. The release starts H
+    frames later.
+  - **Guard test:** `tests/limiter_thd.rs`.
+
+### Multiband compressor (`src/multiband.rs`, phase 2)
+
+This is our own composition of existing parts, not a new algorithm. The
+phase 1b LR4 `Crossover` (Linkwitz, JAES 1976, all-pass compensated) feeds one
+phase 1 `Compressor` per band (Giannoulis et al. 2012), and the bands are then
+summed.
+
+Own choices:
+- The interface is in dB/ms. Values are converted to the compressor's linear
+  units: threshold and makeup as 10^(dB/20), knee factor as 10^(−W/40).
+- A global drive is applied before the crossover and is not compensated at the
+  output. It glides in dB through two cascaded 5 ms one-poles.
+- Band-count changes go through the crossover's crossfade, and newly active
+  bands start from a reset compressor.
+- Default band settings are gentle: threshold −18 dB, ratio 2, knee 6 dB, with
+  shorter time constants toward the high bands.
+
+Tests check the static curve per band against the gain-computer formula, and
+the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warped
+`r`. No commercial broadcast-processor material was used.
 
 ### Butterworth filters and Linkwitz-Riley crossover (`src/filter*`, phase 1b)
 
