@@ -13,6 +13,7 @@
 //! ```text
 //! --depths 3,6,10   clip depths below the file's peak (dB)
 //! --latency MODE    low, normal (default) or high
+//! --max-run MS      longest run that is rebuilt (default 2)
 //! --quiet           only the summary
 //! --show-fp         detections on the unclipped files, and missed runs
 //! ```
@@ -31,7 +32,7 @@ use strom_dsp::declipper::{Declipper, DeclipperLatency, DeclipperParams};
 use strom_dsp::Processor;
 
 fn usage() -> ! {
-    eprintln!("usage: declip_eval [--depths 3,6,10] [--latency low|normal|high] [--quiet] [--show-fp] FILE.wav...");
+    eprintln!("usage: declip_eval [--depths 3,6,10] [--latency low|normal|high] [--max-run MS] [--quiet] [--show-fp] FILE.wav...");
     std::process::exit(2)
 }
 
@@ -114,6 +115,12 @@ fn main() {
                     Some("high") => DeclipperLatency::High,
                     _ => usage(),
                 }
+            }
+            "--max-run" => {
+                params.max_run_ms = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage())
             }
             "--show-fp" => show_fp = true,
             s if s.starts_with("--") => usage(),
