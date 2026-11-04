@@ -26,7 +26,7 @@
 //! No allocation; fixed-size state. Per input frame two biquads; per
 //! analysis sample the recursion (`P + 1` multiply-adds); Levinson–Durbin
 //! once per [`Predictability::gain_db`] call. Quiet input (`r₀` under
-//! [`QUIET`]) reads 0 dB.
+//! `QUIET`, 1e-10) reads 0 dB.
 
 use crate::biquad::BiquadCoefficients;
 
