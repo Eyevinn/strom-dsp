@@ -95,6 +95,33 @@
 //!   result does not depend on whether parameters were set before or after
 //!   `configure`.
 //!
+//! # Peak control (crate-internal; off unless set)
+//!
+//! A slow gain on top of the fast one, for material whose peaks grow over
+//! several periods (speech: each glottal pulse a little higher than the
+//! last), where the fast ramp would step down at every new peak. Per frame
+//! `j`, from the same frame peak `p[j]` and in the same peak-stream time:
+//!
+//! 1. Static reduction from the compressor curve ([`GainComputer`]; Giannoulis,
+//!    Massberg & Reiss, JAES 60(6), 2012) with its threshold
+//!    `headroom_db` under the ceiling, `ratio`, a soft knee, and its slope
+//!    scaled by a **drive** (0 … 1, per frame or held, set by the caller).
+//! 2. A hold of [`PEAK_CONTROL_HOLD_MS`] on that static reduction, longer
+//!    than a pitch period, so the smoothed reduction rises continuously
+//!    instead of in steps at each waveform peak (a step synchronous with
+//!    the waveform puts energy below the voice's fundamental, which nothing
+//!    there masks).
+//! 3. A branching one-pole in dB (attack, release).
+//! 4. The required gain becomes `min(r[j], 10^(−y/20))`.
+//!
+//! Step 4 keeps every argument above: the pipeline sees a required gain
+//! that is at most `r[j]`, so the ceiling still holds exactly, and the
+//! peak control gets the lookahead too (its gain enters `L` frames ahead of
+//! the audio). Taking the smaller gain, not the product of two stages in
+//! series, matters on a step: a peak control in series would add its
+//! reduction to the fast one while the fast one holds and releases (up to
+//! the sum of both); here the reduction is the larger of the two.
+//!
 //! # Safety clip
 //!
 //! After the gain, each sample is checked against the ceiling of the frame it
@@ -126,7 +153,7 @@
 //! decays through the subnormal range. The box stage is integer arithmetic.
 
 use crate::dynamics::frame::{frame_peaks_simd, BLOCK_FRAMES};
-use crate::dynamics::{DelayLine, RampSmoother, SegmentedMin};
+use crate::dynamics::{DelayLine, GainComputer, RampSmoother, SegmentedMin};
 use crate::simd::{detect, Level};
 use crate::util::{db_to_lin, one_pole_coef, DENORMAL_FLUSH};
 use crate::Processor;
@@ -151,6 +178,158 @@ const BYPASS_RAMP_MS: f64 = 10.0;
 const TIME_ORIGIN: u64 = 1 << 32;
 /// Sample-rate clamp for `configure` (keeps fixed-point sums far from overflow).
 const MAX_SAMPLE_RATE: f64 = 768_000.0;
+
+/// Slow peak control in the limiter core (see the module docs, "Peak
+/// control"). Off (the default for every limiter) when `ratio` is 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeakControlParams {
+    /// Threshold below the ceiling (dB, ≥ 0).
+    pub headroom_db: f32,
+    /// Ratio above the threshold (1 = off).
+    pub ratio: f32,
+    /// Soft-knee width (dB).
+    pub knee_db: f32,
+    /// Attack time constant of the reduction (ms).
+    pub attack_ms: f32,
+    /// Release time constant of the reduction (ms).
+    pub release_ms: f32,
+}
+
+impl Default for PeakControlParams {
+    fn default() -> Self {
+        Self {
+            headroom_db: 0.0,
+            ratio: 1.0,
+            knee_db: 0.0,
+            attack_ms: 5.0,
+            release_ms: 100.0,
+        }
+    }
+}
+
+/// State of the peak control: its curve relative to the ceiling, the
+/// one-pole coefficients and the smoothed reduction (dB).
+#[derive(Debug, Clone, Copy)]
+struct PeakControl {
+    params: PeakControlParams,
+    /// Curve with the threshold in dB re the ceiling.
+    curve: GainComputer,
+    att: f64,
+    rel: f64,
+    reduction_db: f64,
+    /// Share (0 … 1) of the ratio's slope in force.
+    drive: f64,
+    /// Held static reduction (dB) and frames left in its hold.
+    held_db: f64,
+    hold_left: usize,
+    hold_frames: usize,
+}
+
+impl PeakControl {
+    fn new() -> Self {
+        Self {
+            params: PeakControlParams::default(),
+            curve: GainComputer {
+                threshold_db: 0.0,
+                knee_db: 0.0,
+                slope: 0.0,
+            },
+            att: 0.0,
+            rel: 0.0,
+            reduction_db: 0.0,
+            drive: 1.0,
+            held_db: 0.0,
+            hold_left: 0,
+            hold_frames: 0,
+        }
+    }
+
+    fn set(&mut self, p: &PeakControlParams, fs: f64) {
+        let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        let p = PeakControlParams {
+            headroom_db: f(p.headroom_db, 0.0, 24.0, 0.0),
+            ratio: f(p.ratio, 1.0, 100.0, 1.0),
+            knee_db: f(p.knee_db, 0.0, 24.0, 0.0),
+            attack_ms: f(p.attack_ms, 0.01, 1000.0, 5.0),
+            release_ms: f(p.release_ms, 1.0, 5000.0, 100.0),
+        };
+        self.params = p;
+        self.curve = GainComputer {
+            threshold_db: -(p.headroom_db as f64),
+            knee_db: p.knee_db as f64,
+            slope: 1.0 - 1.0 / p.ratio as f64,
+        };
+        if fs > 0.0 {
+            self.hold_frames = (PEAK_CONTROL_HOLD_MS * 0.001 * fs).round() as usize;
+            self.att = 1.0 - one_pole_coef(p.attack_ms as f64, fs);
+            self.rel = 1.0 - one_pole_coef(p.release_ms as f64, fs);
+        }
+        if !self.is_on() {
+            self.reduction_db = 0.0;
+        }
+    }
+
+    /// Whether it can act: a ratio over 1, or a reduction still releasing.
+    fn is_on(&self) -> bool {
+        self.curve.slope > 0.0 || self.reduction_db > 0.0
+    }
+
+    /// Lower the required gains `req` of frames with linked peaks `peaks`
+    /// to the peak control's gain where that is lower.
+    #[inline(always)]
+    fn apply(&mut self, ceiling: f32, peaks: &[f32], drive: Option<&[f32]>, req: &mut [f64]) {
+        let c = ceiling as f64;
+        let start = c * 10f64.powf(self.curve.knee_start_db() / 20.0);
+        for (i, (r, &p)) in req.iter_mut().zip(peaks).enumerate() {
+            if let Some(d) = drive {
+                let d = d[i];
+                self.drive = if d.is_finite() {
+                    d.clamp(0.0, 1.0) as f64
+                } else {
+                    1.0
+                };
+            }
+            let p = p as f64;
+            let slope = self.curve.slope * self.drive;
+            let target = if p > start && p.is_finite() && slope > 0.0 {
+                GainComputer {
+                    slope,
+                    ..self.curve
+                }
+                .reduction_db(20.0 * (p / c).log10())
+            } else {
+                0.0
+            };
+            // Hold the static reduction for at least a pitch period, so the
+            // smoothed reduction rises continuously instead of in steps at
+            // each waveform peak.
+            let target = if target >= self.held_db {
+                self.hold_left = self.hold_frames;
+                target
+            } else if self.hold_left > 0 {
+                self.hold_left -= 1;
+                self.held_db
+            } else {
+                target
+            };
+            self.held_db = target;
+            let y = self.reduction_db;
+            let y = if target > y {
+                y + self.att * (target - y)
+            } else {
+                y + self.rel * (target - y)
+            };
+            self.reduction_db = if y < 1e-9 { 0.0 } else { y };
+            if self.reduction_db > 0.0 {
+                *r = r.min(10f64.powf(-self.reduction_db / 20.0));
+            }
+        }
+    }
+}
+
+/// Hold of the peak control's static reduction (ms): longer than a pitch
+/// period of speech (2.5 … 12.5 ms).
+pub const PEAK_CONTROL_HOLD_MS: f64 = 20.0;
 
 /// Limiter parameters (units as in the GStreamer interface).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -285,6 +464,9 @@ pub struct Limiter {
     /// whose peak stream lags the audio (see [`Limiter::set_extra_delay`]).
     /// Always 0 for a plain `Limiter`.
     extra_delay: usize,
+    /// Slow peak control (off unless set through
+    /// [`Limiter::set_peak_control`]).
+    peak_control: PeakControl,
 }
 
 impl Default for Limiter {
@@ -328,6 +510,7 @@ impl Limiter {
             level: Level::baseline(),
             level_forced: false,
             extra_delay: 0,
+            peak_control: PeakControl::new(),
         };
         l.set_params(&LimiterParams::default());
         l
@@ -399,13 +582,42 @@ impl Limiter {
         self.extra_delay = frames;
     }
 
+    /// Crate-internal core hook: slow peak control (see the module docs).
+    /// Applies at once, without allocation.
+    pub(crate) fn set_peak_control(&mut self, params: &PeakControlParams) {
+        self.peak_control.set(params, self.sample_rate);
+    }
+
+    /// Crate-internal core hook: the peak control's current reduction (dB,
+    /// ≥ 0).
+    pub(crate) fn peak_control_reduction_db(&self) -> f64 {
+        self.peak_control.reduction_db
+    }
+
+    /// Crate-internal core hook: share (0 … 1) of the peak control's slope in
+    /// force (see the module docs). Applies at once.
+    pub(crate) fn set_peak_control_drive(&mut self, drive: f32) {
+        self.peak_control.drive = if drive.is_finite() {
+            drive.clamp(0.0, 1.0) as f64
+        } else {
+            1.0
+        };
+    }
+
     /// Crate-internal core hook: process `samples` like
     /// [`Processor::process`], but take the linked peak of each frame from
     /// `peaks` (one value per frame, `≥ 0`) instead of measuring the frames.
     /// `peaks.len()` must be at least the frame count. Everything else
     /// (required gain, sliding minimum, ramp, hold, release, delay, safety
     /// clip at the ceiling) is the plain limiter's.
-    pub(crate) fn process_with_peaks(&mut self, samples: &mut [f32], peaks: &[f32]) {
+    /// `drive`, when given, holds the peak control's drive per frame (see
+    /// [`Limiter::set_peak_control_drive`]).
+    pub(crate) fn process_with_peaks(
+        &mut self,
+        samples: &mut [f32],
+        peaks: &[f32],
+        drive: Option<&[f32]>,
+    ) {
         let ch = self.channels;
         if !self.is_configured() || samples.len() < ch || peaks.len() < samples.len() / ch {
             return;
@@ -416,7 +628,7 @@ impl Limiter {
         }
         self.start_crossfade_if_needed();
 
-        dispatch!(self.level, simd => self.process_blocks(simd, samples, Some(peaks)));
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, Some(peaks), drive));
     }
 
     fn is_configured(&self) -> bool {
@@ -664,6 +876,8 @@ impl Processor for Limiter {
     fn configure(&mut self, sample_rate: f32, channels: usize) {
         let fs = effective_rate(sample_rate);
         self.sample_rate = fs;
+        let pc = self.peak_control.params;
+        self.peak_control.set(&pc, fs);
         self.channels = channels;
         if !self.level_forced {
             self.level = detect();
@@ -711,6 +925,7 @@ impl Processor for Limiter {
         self.xfade = None;
         self.safety_clips = 0;
         self.fresh = true;
+        self.peak_control.reduction_db = 0.0;
         self.rebuild();
     }
 
@@ -729,7 +944,7 @@ impl Processor for Limiter {
         }
         self.start_crossfade_if_needed();
 
-        dispatch!(self.level, simd => self.process_blocks(simd, samples, None));
+        dispatch!(self.level, simd => self.process_blocks(simd, samples, None, None));
     }
 }
 
@@ -765,7 +980,13 @@ impl Limiter {
     /// `external` replaces the measured frame peaks (see
     /// [`process_with_peaks`](Self::process_with_peaks)).
     #[inline(always)]
-    fn process_blocks<S: Simd>(&mut self, simd: S, samples: &mut [f32], external: Option<&[f32]>) {
+    fn process_blocks<S: Simd>(
+        &mut self,
+        simd: S,
+        samples: &mut [f32],
+        external: Option<&[f32]>,
+        drive: Option<&[f32]>,
+    ) {
         let ch = self.channels;
         let enabled = self.params.enabled;
         let rise = 1.0 - self.release_coef;
@@ -781,6 +1002,12 @@ impl Limiter {
                 None => frame_peaks_simd(simd, block, ch, &mut peaks[..nf]),
             }
             required_gains(simd, self.ceiling, enabled, &peaks[..nf], &mut req[..nf]);
+            if self.peak_control.is_on() && enabled {
+                let at = b * BLOCK_FRAMES;
+                let drive = drive.map(|d| &d[at..at + nf]);
+                self.peak_control
+                    .apply(self.ceiling, &peaks[..nf], drive, &mut req[..nf]);
+            }
             let mut i = 0;
             // A cross-fade only starts at the top of `process` or right after
             // another one ends, so once none is running the rest of the call

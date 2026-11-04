@@ -142,7 +142,9 @@
 //! it forgets a NaN after its length. No recursive state can go subnormal
 //! (see the limiter docs).
 use crate::dynamics::SegmentedMin;
-use crate::limiter::{lookahead_frames, Limiter, LimiterParams, MAX_LOOKAHEAD_MS};
+use crate::limiter::{
+    lookahead_frames, Limiter, LimiterParams, PeakControlParams, MAX_LOOKAHEAD_MS,
+};
 use crate::oversample::{OversampleFactor, Oversampler};
 use crate::simd::Level;
 use crate::Processor;
@@ -344,6 +346,24 @@ impl TruePeakLimiter {
         l
     }
 
+    /// Slow peak control in the gain core (see [`crate::limiter`], "Peak
+    /// control"): off by default.
+    pub fn set_peak_control(&mut self, params: &PeakControlParams) {
+        self.core.set_peak_control(params);
+    }
+
+    /// Share (0 … 1) of the peak control's ratio slope in force; 1 by
+    /// default. Applies at once; the control's attack and release smooth it.
+    pub fn set_peak_control_drive(&mut self, drive: f32) {
+        self.core.set_peak_control_drive(drive);
+    }
+
+    /// The peak control's current reduction (positive dB), part of
+    /// [`TruePeakLimiter::gain_reduction_db`].
+    pub fn peak_control_reduction_db(&self) -> f64 {
+        self.core.peak_control_reduction_db()
+    }
+
     /// Update parameters. Never allocates. Out-of-range values are clamped.
     pub fn set_params(&mut self, params: &TruePeakLimiterParams) {
         let p = params.sanitized();
@@ -437,12 +457,32 @@ impl Processor for TruePeakLimiter {
     }
 
     fn process(&mut self, samples: &mut [f32]) {
+        self.process_impl(samples, None);
+    }
+}
+
+impl TruePeakLimiter {
+    /// [`Processor::process`] with the peak control's drive (0 … 1, see
+    /// [`TruePeakLimiter::set_peak_control_drive`]) given per input frame:
+    /// `drive[i]` for frame `i` of `samples` (at least one per frame). The
+    /// drive in force afterwards is the last frame's.
+    pub fn process_with_drive(&mut self, samples: &mut [f32], drive: &[f32]) {
+        self.process_impl(samples, Some(drive));
+    }
+
+    fn process_impl(&mut self, samples: &mut [f32], drive: Option<&[f32]>) {
         let ch = self.channels;
         if !self.is_configured() || samples.len() < ch {
             return;
         }
         let frames = samples.len() / ch;
-        for chunk in samples[..frames * ch].chunks_mut(CHUNK_FRAMES * ch) {
+        if drive.is_some_and(|d| d.len() < frames) {
+            return;
+        }
+        for (k, chunk) in samples[..frames * ch]
+            .chunks_mut(CHUNK_FRAMES * ch)
+            .enumerate()
+        {
             let nf = chunk.len() / ch;
             let peaks = &mut self.peaks[..nf];
             self.detector.upsample_peaks(chunk, peaks);
@@ -461,7 +501,8 @@ impl Processor for TruePeakLimiter {
                 let hf = -self.guard_hf.push(-hf_aligned);
                 *p = (tp + HF_WEIGHT * hf) as f32;
             }
-            self.core.process_with_peaks(chunk, peaks);
+            let drive = drive.map(|d| &d[k * CHUNK_FRAMES..k * CHUNK_FRAMES + nf]);
+            self.core.process_with_peaks(chunk, peaks, drive);
         }
     }
 }
