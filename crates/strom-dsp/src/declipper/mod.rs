@@ -2,7 +2,7 @@
 //! them by constrained AR interpolation.
 //!
 //! [`Declipper`] delays the signal by a fixed latency chosen with
-//! [`DeclipperLatency`] (3, 5 or 10 ms; `round(ms · fs)` frames, see
+//! [`DeclipperLatency`] (3, 5 or 10 ms; `floor(ms · fs)` frames, see
 //! [`Declipper::latency_frames_for`]). Inside that delay it:
 //!
 //! 1. **detects** clipped runs per channel with the [`ClipDetector`]: two or
@@ -68,8 +68,9 @@
 //! the budget is dropped (its last solve can lie far outside the boxes),
 //! and the previous round's result is kept. When the first round does not
 //! fit, the run is rebuilt by the cheap fallback, a cubic Hermite curve
-//! across the run from the value and slope on each side, put into the same box (sign,
-//! beyond the clipped value, within `max_overshoot_db`); it is counted in
+//! across the run from the value and slope on each side, put into the same
+//! box (sign, beyond the clipped value, within `max_overshoot_db`); it is
+//! counted in
 //! [`DeclipperStats::fallbacks`]. Runs close together share work: a run
 //! that starts within [`MODEL_REUSE_MS`] of the run whose first-round
 //! model the channel keeps reuses it.
@@ -213,8 +214,9 @@ pub const WORK_BURST: f64 = 200.0e3;
 /// the known samples only; the short context keeps the retry cheap.
 pub const BURG_RETRY_PAST_MS: f32 = 2.5;
 
-/// Bypass crossfade (ms).
-pub const XFADE_MS: f32 = 5.0;
+/// Bypass crossfade (ms), the same as the other elements with latency
+/// (limiter, broadcast processor).
+pub const XFADE_MS: f32 = 10.0;
 
 /// Parameters of [`Declipper`]. All but `enabled` and `latency` take effect
 /// for runs that close after the change.
@@ -362,10 +364,15 @@ impl Declipper {
         ms_frames(PAST_CONTEXT_MS, sample_rate).max(3 * Self::order_for(sample_rate))
     }
 
-    /// Latency (frames) of `mode` at `sample_rate`: `round(ms · fs)`, at
-    /// least 16.
+    /// Latency (frames) of `mode` at `sample_rate`: `floor(ms · fs)`, at
+    /// least 16, so the setting is an upper bound at every rate.
     pub fn latency_frames_for(sample_rate: f32, mode: DeclipperLatency) -> usize {
-        ms_frames(mode.ms(), sample_rate).max(16)
+        let f = (f64::from(mode.ms()) * f64::from(sample_rate) / 1000.0).floor();
+        if f.is_finite() && f > 16.0 {
+            f as usize
+        } else {
+            16
+        }
     }
 
     /// Context frames before a run.
