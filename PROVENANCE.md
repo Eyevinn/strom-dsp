@@ -1121,6 +1121,8 @@ and are shared with the harness.
     per-band least-squares gain matching, a spreading function of
     −10/−25 dB per Bark and a 10 dB offset. **The masking model is a test
     metric only**; nothing in the processing or control path uses it.
+    `metrics::nmr_frames` exposes the per-frame, per-band numbers for
+    diagnosis (the crackle example's `diag:` mode).
 
 ### Listening kit and test corpus (`crates/strom-dsp-harness/src/listen/`, `scripts/`, `corpus/`)
 

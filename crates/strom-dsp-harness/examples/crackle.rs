@@ -10,7 +10,13 @@
 //! [`strom_dsp_harness::crackle`]. `accept` as the fourth argument prints
 //! the acceptance table (worst-frame NMR per preset × latency mode over
 //! the speech clips); `accept:no-spike` and `accept:spike-la-std` print it
-//! with the spike guard off or at the standard lookahead in every mode.
+//! with the spike guard off or at the standard lookahead in every mode;
+//! `accept:no-adapt`, `accept:no-guard` and `accept:no-peak-control` with
+//! the clipper's content-adaptive depth, its bandwidth guard or the
+//! limiter's peak control off. `diag:clip,preset,mode[,switch…]` prints the
+//! worst NMR frames of one run and the Bark bands that make them
+//! (`DIAG_AT=<s>` adds the levels around a time); `predict` the
+//! linear-prediction gain of every corpus clip.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,7 +28,7 @@ use strom_dsp::spike_guard;
 use strom_dsp::Processor;
 use strom_dsp_harness::chain::FS;
 use strom_dsp_harness::crackle::{
-    self, acceptance, at_loudness, clicks, matched_error, verdict, MAX_SECONDS,
+    self, acceptance_with, at_loudness, clicks, matched_error, verdict, MAX_SECONDS,
     SKIP_SECONDS as SKIP_S,
 };
 use strom_dsp_harness::listen::audio;
@@ -179,6 +185,212 @@ fn write_excerpts(dir: &Path, tag: &str, r: &[f32], y: &[f32], at: usize) {
     );
 }
 
+/// One stage switch of the `accept:` and `diag:` modes.
+fn apply_switch(p: &mut BroadcastParams, name: &str) {
+    match name {
+        "no-spike" => p.spike_guard_enabled = false,
+        "spike-on" => p.spike_guard_enabled = true,
+        "spike-la-std" => {
+            p.spike_guard_enabled = true;
+            p.spike_guard_lookahead_ms = spike_guard::STANDARD_LOOKAHEAD_MS
+        }
+        "no-clipper" => p.clipper_enabled = false,
+        "clipper-on" => p.clipper_enabled = true,
+        "no-expander" => p.band_expanders.iter_mut().for_each(|e| e.ratio = 1.0),
+        "no-limiter" => p.limiter_enabled = false,
+        "no-agc" => p.agc_enabled = false,
+        "no-multiband" => p.multiband_enabled = false,
+        "no-bassclip" => p.bass_clipper_enabled = false,
+        "no-governor" => p.governor_enabled = false,
+        "limiter-la-std" => p.limiter_lookahead_ms = LatencyMode::Standard.limiter_lookahead_ms(),
+        "clipper-std" => p.clipper_latency = ClipperLatency::Standard,
+        "no-adapt" | "no-guard" | "no-peak-control" => {}
+        v => {
+            if let Some(ms) = v.strip_prefix("limiter-la=") {
+                p.limiter_lookahead_ms = ms.parse().expect("ms");
+            } else if let Some(ms) = v.strip_prefix("limiter-rel=") {
+                p.limiter_release_ms = ms.parse().expect("ms");
+            } else {
+                panic!("unknown switch {v}")
+            }
+        }
+    }
+}
+
+/// The stage switches of the `accept:` and `diag:` modes that are not
+/// parameters.
+fn apply_processor_switch(bp: &mut BroadcastProcessor, name: &str) {
+    match name {
+        "no-adapt" => bp.set_clipper_adaptive_depth(false),
+        "no-guard" => bp.set_clipper_bandwidth_guard(false),
+        "no-peak-control" => bp.set_limiter_peak_control(false),
+        _ => {}
+    }
+}
+
+/// `diag:clip,preset,mode[,switch…]`: the worst NMR frames of one run, the
+/// Bark bands that make them, and the limiter's reduction around them.
+fn diag(corpus: &Path, spec: &str) {
+    let f: Vec<&str> = spec.split(',').collect();
+    let x = load(corpus, f[0]);
+    let preset = BroadcastPreset::ALL
+        .into_iter()
+        .find(|p| p.nick() == f[1])
+        .expect("preset");
+    let mode = LatencyMode::ALL
+        .into_iter()
+        .find(|m| m.nick() == f[2])
+        .expect("mode");
+    let mut p = BroadcastParams::preset(preset, 4);
+    mode.apply(&mut p);
+    for s in &f[3..] {
+        apply_switch(&mut p, s);
+    }
+    let x = at_target(&x, p.target_loudness_lufs as f64);
+    let switches: Vec<String> = f[3..].iter().map(|v| v.to_string()).collect();
+    let mut r = strom_dsp_harness::chain::run_chain_with(&p, x.clone(), Vec::new(), |bp| {
+        for s in &switches {
+            apply_processor_switch(bp, s);
+        }
+    });
+    r.linear = strom_dsp_harness::chain::run_chain(
+        &strom_dsp_harness::chain::linear_params(&p),
+        x,
+        Vec::new(),
+    )
+    .output;
+    let mut frames = Vec::new();
+    strom_dsp_harness::metrics::nmr_frames(
+        &r.linear,
+        &r.output,
+        CH,
+        FS,
+        (SKIP_S * FS) as usize,
+        |fr| frames.push(*fr),
+    );
+    if let Ok(t) = std::env::var("DIAG_AT") {
+        let t: f64 = t.parse().expect("seconds");
+        let s0 = ((t - 0.05) * FS) as usize;
+        let blk = 96;
+        for k in 0..30 {
+            let a = s0 + k * blk;
+            let pk = |x: &[f32]| {
+                x[a * CH..(a + blk) * CH]
+                    .iter()
+                    .fold(0.0f32, |m, &v| m.max(v.abs())) as f64
+            };
+            let gr =
+                r.limiter_gr[(a / strom_dsp_harness::chain::BLOCK).min(r.limiter_gr.len() - 1)];
+            println!(
+                "  {:.3} s  linear {:6.1}  out {:6.1}  limiter GR {:4.1}",
+                a as f64 / FS,
+                20.0 * pk(&r.linear).log10(),
+                20.0 * pk(&r.output).log10(),
+                gr
+            );
+        }
+    }
+    frames.sort_by(|a, b| b.ratio.total_cmp(&a.ratio));
+    let db = |v: f64| 10.0 * v.max(1e-30).log10();
+    for fr in frames.iter().take(4) {
+        let t = fr.start as f64 / FS;
+        println!(
+            "frame at {t:.3} s ch {}: NMR {:+.1} dB",
+            fr.channel,
+            db(fr.ratio)
+        );
+        let mut bands: Vec<usize> = (0..strom_dsp_harness::metrics::BARK_BANDS).collect();
+        bands.sort_by(|&a, &b| {
+            (fr.error[b] / fr.threshold[b]).total_cmp(&(fr.error[a] / fr.threshold[a]))
+        });
+        for &b in bands.iter().take(6) {
+            println!(
+                "  bark {b:2}: ref {:6.1}  err {:6.1}  thr {:6.1}  nmr {:+5.1}",
+                db(fr.reference[b]),
+                db(fr.error[b]),
+                db(fr.threshold[b]),
+                db(fr.error[b] / fr.threshold[b])
+            );
+        }
+        let b0 = fr.start / strom_dsp_harness::chain::BLOCK;
+        let b1 = (fr.start + 2048) / strom_dsp_harness::chain::BLOCK;
+        let gr = r.limiter_gr[b0.min(r.limiter_gr.len())..b1.min(r.limiter_gr.len())]
+            .iter()
+            .fold(0.0f64, |a, &v| a.max(v));
+        let peak = r.output[fr.start * CH..((fr.start + 2048) * CH).min(r.output.len())]
+            .iter()
+            .fold(0.0f32, |a, &v| a.max(v.abs()));
+        let lpeak = r.linear[fr.start * CH..((fr.start + 2048) * CH).min(r.linear.len())]
+            .iter()
+            .fold(0.0f32, |a, &v| a.max(v.abs()));
+        println!(
+            "  limiter GR max {gr:.2} dB; sample peak out {:.1} dBFS, linear {:.1} dBFS",
+            20.0 * (peak as f64).log10(),
+            20.0 * (lpeak as f64).log10()
+        );
+    }
+}
+
+/// `predict`: linear-prediction gain per 5 ms block over every corpus
+/// clip (blocks over −50 dBFS), percentiles per clip.
+fn predict(corpus: &Path) {
+    use strom_dsp::predictability::Predictability;
+    let clips = crackle::manifest(corpus).expect("manifest");
+    for clip in &clips {
+        let Ok(x) = crackle::load(corpus, clip, MAX_SECONDS) else {
+            continue;
+        };
+        let x = at_target(&x, -23.0);
+        let mut p = Predictability::new(FS);
+        let mut guard = strom_dsp::bandwidth_guard::BandwidthGuard::new(FS);
+        let mut edges = [0usize; 4];
+        let mut ab: Vec<[f64; 3]> = Vec::new();
+        let blk = 240;
+        let mut g = Vec::new();
+        for c in x.chunks(blk * CH) {
+            p.push(c, CH);
+            guard.push(c, CH);
+            guard.end_block();
+            edges[guard.edge().unwrap_or(3)] += 1;
+            ab.push([guard.above_db(0), guard.above_db(1), guard.above_db(2)]);
+            let ms = c.iter().map(|&v| v as f64 * v as f64).sum::<f64>() / c.len() as f64;
+            if ms > 1e-5 {
+                g.push(p.gain_db());
+            }
+        }
+        g.sort_by(f64::total_cmp);
+        let q = |f: f64| {
+            g.get(((g.len() as f64 - 1.0) * f) as usize)
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
+        let total: usize = edges.iter().sum();
+        let med = |k: usize| {
+            let mut v: Vec<f64> = ab.iter().map(|a| a[k]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        print!(
+            "above 4/8/12k {:6.1} {:6.1} {:6.1}  ",
+            med(0),
+            med(1),
+            med(2)
+        );
+        println!(
+            "{:<26} {:<42} p10 {:5.1}  p50 {:5.1}  p90 {:5.1}  edge 4k/8k/12k/full {:3.0} {:3.0} {:3.0} {:3.0} %",
+            clip.category,
+            clip.id,
+            q(0.1),
+            q(0.5),
+            q(0.9),
+            100.0 * edges[0] as f64 / total as f64,
+            100.0 * edges[1] as f64 / total as f64,
+            100.0 * edges[2] as f64 / total as f64,
+            100.0 * edges[3] as f64 / total as f64
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let corpus = PathBuf::from(args.get(1).expect("corpus dir"));
@@ -186,6 +398,14 @@ fn main() {
     let jobs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
     let only: Option<String> = args.get(4).cloned();
     std::fs::create_dir_all(&out).unwrap();
+    if only.as_deref() == Some("predict") {
+        predict(&corpus);
+        return;
+    }
+    if let Some(spec) = only.as_deref().and_then(|o| o.strip_prefix("diag:")) {
+        diag(&corpus, spec);
+        return;
+    }
     if let Some(variant) = only.as_deref().and_then(|o| o.strip_prefix("accept")) {
         // Comma-separated stage switches applied to every configuration.
         let names: Vec<String> = variant
@@ -194,32 +414,17 @@ fn main() {
             .filter(|v| !v.is_empty())
             .map(String::from)
             .collect();
-        let tweak = move |p: &mut BroadcastParams| {
+        let tweak = |p: &mut BroadcastParams| {
             for n in &names {
-                match n.as_str() {
-                    "no-spike" => p.spike_guard_enabled = false,
-                    "spike-on" => p.spike_guard_enabled = true,
-                    "spike-la-std" => {
-                        p.spike_guard_enabled = true;
-                        p.spike_guard_lookahead_ms = spike_guard::STANDARD_LOOKAHEAD_MS
-                    }
-                    "no-clipper" => p.clipper_enabled = false,
-                    "clipper-on" => p.clipper_enabled = true,
-                    "no-expander" => p.band_expanders.iter_mut().for_each(|e| e.ratio = 1.0),
-                    "no-limiter" => p.limiter_enabled = false,
-                    "no-agc" => p.agc_enabled = false,
-                    "no-multiband" => p.multiband_enabled = false,
-                    "no-bassclip" => p.bass_clipper_enabled = false,
-                    "no-governor" => p.governor_enabled = false,
-                    "limiter-la-std" => {
-                        p.limiter_lookahead_ms = LatencyMode::Standard.limiter_lookahead_ms()
-                    }
-                    "clipper-std" => p.clipper_latency = ClipperLatency::Standard,
-                    v => panic!("unknown accept switch {v}"),
-                }
+                apply_switch(p, n);
             }
         };
-        let runs = acceptance(&corpus, jobs, tweak).expect("corpus");
+        let setup = |bp: &mut BroadcastProcessor| {
+            for n in &names {
+                apply_processor_switch(bp, n);
+            }
+        };
+        let runs = acceptance_with(&corpus, jobs, tweak, setup).expect("corpus");
         let (table, problems) = verdict(&runs);
         print!("{table}");
         for p in &problems {

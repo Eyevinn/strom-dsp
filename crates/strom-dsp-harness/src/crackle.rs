@@ -58,10 +58,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use strom_dsp::biquad::{Biquad, BiquadCoefficients};
-use strom_dsp::broadcast::{BroadcastParams, LatencyMode};
+use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::presets::BroadcastPreset;
 
-use crate::chain::{linear_params, measure_run, run_chain, Numbers, FS};
+use crate::chain::{linear_params, measure_run, run_chain, run_chain_with, Numbers, FS};
 use crate::listen::{audio, read_manifest, to_stereo, Clip};
 use crate::metrics;
 use crate::signals::CH;
@@ -162,7 +162,12 @@ impl Run {
 
 /// Run `x` through `p` and through its linear reference.
 pub fn run(p: &BroadcastParams, x: &[f32]) -> Run {
-    let mut r = run_chain(p, x.to_vec(), Vec::new());
+    run_with(p, x, |_| {})
+}
+
+/// [`run`], with `setup` applied to the processor (see [`run_chain_with`]).
+pub fn run_with(p: &BroadcastParams, x: &[f32], setup: impl Fn(&mut BroadcastProcessor)) -> Run {
+    let mut r = run_chain_with(p, x.to_vec(), Vec::new(), setup);
     r.linear = run_chain(&linear_params(p), x.to_vec(), Vec::new()).output;
     let numbers = measure_run(None, true, p, &r, SKIP_SECONDS);
     Run {
@@ -352,6 +357,17 @@ pub fn acceptance(
     jobs: usize,
     tweak: impl Fn(&mut BroadcastParams) + Sync,
 ) -> io::Result<Vec<AcceptanceRun>> {
+    acceptance_with(corpus, jobs, tweak, |_| {})
+}
+
+/// [`acceptance`], with `setup` applied to every processor (its stage
+/// switches outside the parameters; see [`run_chain_with`]).
+pub fn acceptance_with(
+    corpus: &Path,
+    jobs: usize,
+    tweak: impl Fn(&mut BroadcastParams) + Sync,
+    setup: impl Fn(&mut BroadcastProcessor) + Sync,
+) -> io::Result<Vec<AcceptanceRun>> {
     let clips: Vec<Clip> = manifest(corpus)?
         .into_iter()
         .filter(|c| SPEECH_CATEGORIES.contains(&c.category.as_str()))
@@ -374,7 +390,7 @@ pub fn acceptance(
         let mut p = params(preset, mode);
         tweak(&mut p);
         let x = at_loudness(&audio[ci], p.target_loudness_lufs as f64);
-        let r = run(&p, &x);
+        let r = run_with(&p, &x, &setup);
         AcceptanceRun {
             preset,
             mode,

@@ -275,9 +275,22 @@ pub fn run_case(
 /// Run `input` through a fresh chain with `params` in [`BLOCK`]-frame
 /// buffers, reading the limiter gain reduction after each.
 pub fn run_chain(params: &BroadcastParams, input: Vec<f32>, marks: Vec<usize>) -> ChainRun {
+    run_chain_with(params, input, marks, |_| {})
+}
+
+/// [`run_chain`], with `setup` applied to the processor before it runs (its
+/// stage switches outside the parameters, e.g.
+/// [`BroadcastProcessor::set_limiter_peak_control`]).
+pub fn run_chain_with(
+    params: &BroadcastParams,
+    input: Vec<f32>,
+    marks: Vec<usize>,
+    setup: impl Fn(&mut BroadcastProcessor),
+) -> ChainRun {
     let mut bp = BroadcastProcessor::new();
     bp.set_params(params);
     bp.configure(FS as f32, CH);
+    setup(&mut bp);
     let latency = bp.latency_frames();
     let mut output = input.clone();
     let blocks = output.len() / (BLOCK * CH) + 1;
