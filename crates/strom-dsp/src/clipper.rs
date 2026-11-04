@@ -65,6 +65,47 @@
 //!
 //! Channels are clipped independently.
 //!
+//! # Depth: content-adaptive and bandwidth guard (both off by default)
+//!
+//! The clippings are scaled by a **depth** `d` (0 … 1) before they are
+//! subtracted: `y = x_delayed − d·c`. `d = 1` is the clipper above; `d = 0`
+//! a pure delay. It is the product of two factors, each decided once per
+//! control block of [`CONTROL_BLOCK`] input frames (on a fixed grid, so the
+//! output does not depend on the buffer size) and ramped linearly:
+//!
+//! - **Content-adaptive depth** ([`FinalClipperParams::adaptive_depth`]):
+//!   less clipping on predictable material (expired US 4,241,266, more
+//!   clipping allowed on less predictable signals; *expired, status not
+//!   legally reviewed*). The predictability is the linear-prediction gain
+//!   `G` of the programme below 3.5 kHz
+//!   ([`crate::predictability::Predictability`]); the factor is
+//!   `1 − p` with `p = clamp((G − 2 dB)/(5 − 2 dB), 0, 1)`
+//!   ([`ADAPT_GAIN_DB`]), `p` held: it rises at once and falls with
+//!   [`ADAPT_RELEASE_MS`], and holds in pauses (blocks under −60 dBFS).
+//!   Ramp: one control block. Speech, tones and sustained music read
+//!   `G` ≥ 5 dB (no clipping); noise, crowd, applause and dense mixes
+//!   1 … 3 dB (clipping in full). The thresholds were chosen on the test
+//!   corpus: clean speech reads a median `G` of 5 … 9 dB, noise and crowd
+//!   1 … 5.5 dB, white noise up to 2.6 dB (the pre-emphasis colours it).
+//!   One control value per block; no masking model and no scoring of
+//!   alternatives.
+//! - **Bandwidth guard** ([`FinalClipperParams::bandwidth_guard`]): while
+//!   the programme is band-limited (nothing above 12 kHz or lower, from
+//!   [`crate::bandwidth_guard::BandwidthGuard`]), the factor is 0: no
+//!   clippings at all. A phone or codec source has nothing above its band
+//!   edge to mask what clipping adds there. Ramp: [`GUARD_FADE_MS`].
+//!   Keeping the clippings below the edge with a shaping filter per edge
+//!   was measured first and rejected: within the clipper's latency the
+//!   41-tap shaping FIR stops about 50 dB, and on the corpus phone and
+//!   codec clips the worst-frame NMR at `streaming` stayed at +5.6 …
+//!   +27 dB (against +0.2 … +1.7 dB with no clippings), and the low
+//!   latency setting's 3-tap FIR cannot band-limit at all.
+//!
+//! What the clipper leaves goes to the true-peak limiter after it, whose
+//! peak control takes it with a slow gain ([`crate::limiter`], "Peak
+//! control"; [`FinalClipper::process_with_control`] reports the depth and
+//! the predictability per frame for that).
+//!
 //! # Latency
 //!
 //! Per pass, the oversampler's round trip (49 frames at 8×, 47 at 4×) plus
@@ -83,7 +124,8 @@
 //!
 //! Every `process` call accumulates the energy of the input (delayed to the
 //! output), the energy of what the clipper removed, and the number of
-//! high-rate samples the first pass's curve touched.
+//! high-rate samples the first pass's curve touched in frames whose depth
+//! is at least ½ (what is subtracted, not what the curve would remove).
 //! [`FinalClipper::activity`] returns these for the most recent `process`
 //! call, [`FinalClipper::take_stats`] the sums since its last call. The clip
 //! depth is `10·log10(removed energy / input energy)` in dB
@@ -92,14 +134,19 @@
 //!
 //! # Real-time safety
 //!
-//! `configure` allocates. `set_params`, `process` and `reset` never do.
+//! `configure` allocates. `set_params`, `process` and `reset` never do; the
+//! predictability (two biquads per frame, an order-10 recursion per 6th
+//! frame, Levinson–Durbin per control block) and the bandwidth guard (six
+//! biquads per frame) have fixed-size state.
 //! A non-finite input sample produces no clipping (it passes through to the
 //! limiter after the clipper, which handles it).
 
+use crate::bandwidth_guard::BandwidthGuard;
 use crate::biquad::{Biquad, BiquadCoefficients};
 use crate::dynamics::DelayLine;
 use crate::filter::MAX_OCTAVES_PER_MS;
 use crate::oversample::{bessel_i0, OversampleFactor, Oversampler};
+use crate::predictability::Predictability;
 use crate::Processor;
 
 /// Most taps of the shaping FIR (odd: linear phase, integer delay).
@@ -177,6 +224,25 @@ pub const LOW_CUT_RANGE_HZ: (f32, f32) = (20.0, 1_000.0);
 const CHUNK: usize = 256;
 /// Glide of the shaping coefficients after a parameter change (ms).
 const GLIDE_MS: f64 = 20.0;
+/// Content-adaptive depth: prediction gains (dB) at which the material
+/// counts as fully unpredictable (clippings in full) and fully
+/// predictable (none), linear in between.
+pub const ADAPT_GAIN_DB: (f64, f64) = (2.0, 5.0);
+/// Content-adaptive depth: release of the held predictability (ms; it
+/// rises at once).
+pub const ADAPT_RELEASE_MS: f64 = 1_000.0;
+/// Content-adaptive depth: blocks quieter than this mean square (−60 dBFS)
+/// hold the reading.
+const ADAPT_MIN_LEVEL: f64 = 1e-6;
+/// Fade of the bandwidth guard's share of the clippings when it engages or
+/// releases (ms).
+pub const GUARD_FADE_MS: f64 = 15.0;
+/// Frames per control block of the content-adaptive depth and the
+/// bandwidth guard: both decide at the end of each block of this many input
+/// frames (counted from `configure`/`reset`, so the result does not depend
+/// on the buffer size), and the depth then moves linearly to its new value
+/// over the next block.
+pub const CONTROL_BLOCK: usize = 64;
 /// Frames of zero clippings after which the low cut's state is cleared and
 /// the stage idles (its 2nd-order low-pass has decayed below 1e-15 by then
 /// for any cut ≥ 20 Hz).
@@ -201,6 +267,13 @@ pub struct FinalClipperParams {
     /// Clip-and-shape passes that act (1 or 2). An inactive pass is a pure
     /// delay, so the latency does not change.
     pub passes: usize,
+    /// Content-adaptive depth: scale the clippings down on predictable
+    /// material (see the module docs). Off: every clipping is subtracted
+    /// in full.
+    pub adaptive_depth: bool,
+    /// Bandwidth guard: subtract no clippings while the programme is
+    /// band-limited (see the module docs).
+    pub bandwidth_guard: bool,
 }
 
 impl Default for FinalClipperParams {
@@ -213,6 +286,8 @@ impl Default for FinalClipperParams {
             low_cut: true,
             overshoot_compensation: true,
             passes: MAX_PASSES,
+            adaptive_depth: false,
+            bandwidth_guard: false,
         }
     }
 }
@@ -252,6 +327,8 @@ impl FinalClipperParams {
             low_cut: self.low_cut,
             overshoot_compensation: self.overshoot_compensation,
             passes: self.passes.clamp(1, MAX_PASSES),
+            adaptive_depth: self.adaptive_depth,
+            bandwidth_guard: self.bandwidth_guard,
         }
     }
 }
@@ -468,8 +545,16 @@ impl Curve {
 /// clippings; `prev` holds each channel's previous input. The curve moves
 /// linearly (in amplitude) from `from` to `to` over the block, so a
 /// threshold glide has no steps. Returns how many samples have a non-zero
-/// clipping.
-fn clip_frames(from: &Curve, to: &Curve, buf: &mut [f32], prev: &mut [f32]) -> u64 {
+/// clipping, counting only frames whose `depth` (one per `per` frames of
+/// `buf`) is at least ½.
+fn clip_frames(
+    from: &Curve,
+    to: &Curve,
+    buf: &mut [f32],
+    prev: &mut [f32],
+    depth: &[f32],
+    per: usize,
+) -> u64 {
     let ch = prev.len();
     let frames = buf.len() / ch;
     let steady = from.k == to.k && from.w == to.w;
@@ -485,6 +570,7 @@ fn clip_frames(from: &Curve, to: &Curve, buf: &mut [f32], prev: &mut [f32]) -> u
             }
         };
         let k = curve.k as f32;
+        let counts = depth.get(i / per).is_none_or(|&d| d >= 0.5);
         for (v, p) in frame.iter_mut().zip(prev.iter_mut()) {
             let u = *v;
             let c = if u.abs() <= k && p.abs() <= k {
@@ -493,11 +579,52 @@ fn clip_frames(from: &Curve, to: &Curve, buf: &mut [f32], prev: &mut [f32]) -> u
                 curve.adaa(u, *p)
             };
             *p = u;
-            touched += (c != 0.0) as u64;
+            touched += (counts && c != 0.0) as u64;
             *v = c;
         }
     }
     touched
+}
+
+/// A value that moves linearly to a new target over a given number of
+/// steps.
+#[derive(Debug, Clone, Copy)]
+struct Ramp {
+    value: f32,
+    target: f32,
+    step: f32,
+}
+
+impl Ramp {
+    fn new(v: f32) -> Self {
+        Self {
+            value: v,
+            target: v,
+            step: 0.0,
+        }
+    }
+
+    /// Move to `target` over `steps` steps.
+    fn set(&mut self, target: f32, steps: usize) {
+        if target != self.target {
+            self.target = target;
+            self.step = (target - self.value) / steps as f32;
+        }
+    }
+
+    /// Advance one step; the new value.
+    #[inline(always)]
+    fn step(&mut self) -> f32 {
+        if self.value != self.target {
+            self.value += self.step;
+            if (self.step >= 0.0 && self.value >= self.target)
+                || (self.step <= 0.0 && self.value <= self.target)
+            {
+                self.value = self.target;
+            }
+        }
+        self.value
+    }
 }
 
 /// One clip-and-shape pass.
@@ -573,6 +700,26 @@ pub struct FinalClipper {
     /// The curve at the start and the end of the current chunk.
     chunk_curves: (Curve, Curve),
     early_out: bool,
+    /// Content-adaptive depth: the predictability estimator, the held
+    /// predictability (0 … 1) and its release per control block.
+    predict: Predictability,
+    predictable: f64,
+    predictable_release: f64,
+    /// The two factors of the depth (share of the clippings subtracted):
+    /// `1 −` the predictability and the bandwidth guard's share, each
+    /// ramping linearly to its new value over a control block; the
+    /// position in the control block and the block's sum of squares; per
+    /// frame of the current chunk the depth and the predictability.
+    adapt_ramp: Ramp,
+    guard_ramp: Ramp,
+    /// Length of the bandwidth guard's fade (frames).
+    guard_fade_frames: usize,
+    block_pos: usize,
+    block_energy: f64,
+    depth_buf: Vec<f32>,
+    predict_buf: Vec<f32>,
+    /// Bandwidth guard: the band edge estimator.
+    guard: BandwidthGuard,
 }
 
 impl Default for FinalClipper {
@@ -651,6 +798,17 @@ impl FinalClipper {
             curve_glide: 0,
             chunk_curves: (Curve { k: 1.0, w: 0.1 }, Curve { k: 1.0, w: 0.1 }),
             early_out: true,
+            predict: Predictability::default(),
+            predictable: 0.0,
+            predictable_release: 0.0,
+            adapt_ramp: Ramp::new(1.0),
+            guard_ramp: Ramp::new(1.0),
+            guard_fade_frames: 1,
+            block_pos: 0,
+            block_energy: 0.0,
+            depth_buf: Vec::new(),
+            predict_buf: Vec::new(),
+            guard: BandwidthGuard::default(),
         };
         s.set_params(&FinalClipperParams::default());
         s
@@ -717,6 +875,16 @@ impl FinalClipper {
                     b.set_coefficients(c);
                 }
             }
+        }
+    }
+
+    /// The bandwidth guard's estimate of the programme's upper band edge
+    /// (Hz; `None`: full band, or the guard is off).
+    pub fn guard_edge_hz(&self) -> Option<f64> {
+        if self.params.bandwidth_guard {
+            self.guard.edge_hz()
+        } else {
+            None
         }
     }
 
@@ -813,11 +981,11 @@ impl FinalClipper {
             }
             let up = &mut self.up[..n * ratio * ch];
             pass.os.upsample(x, up);
-            touched = clip_frames(&from, &to, up, &mut pass.prev);
+            touched = clip_frames(&from, &to, up, &mut pass.prev, &self.depth_buf[..n], ratio);
             pass.os.downsample(up, clip);
         } else {
             clip.copy_from_slice(x);
-            touched = clip_frames(&from, &to, clip, &mut pass.prev);
+            touched = clip_frames(&from, &to, clip, &mut pass.prev, &self.depth_buf[..n], 1);
         }
         if touched > 0 {
             pass.since_clip = 0;
@@ -879,8 +1047,21 @@ impl FinalClipper {
             }
         }
 
-        for ((o, &d), &c) in x.iter_mut().zip(delayed.iter()).zip(clip.iter()) {
-            *o = d - c;
+        let depth = &self.depth_buf[..n];
+        if depth.iter().all(|&a| a == 1.0) {
+            for ((o, &d), &c) in x.iter_mut().zip(delayed.iter()).zip(clip.iter()) {
+                *o = d - c;
+            }
+        } else {
+            for ((of, &a), (df, cf)) in x
+                .chunks_exact_mut(ch)
+                .zip(depth)
+                .zip(delayed.chunks_exact(ch).zip(clip.chunks_exact(ch)))
+            {
+                for ((o, &d), &c) in of.iter_mut().zip(df).zip(cf) {
+                    *o = d - a * c;
+                }
+            }
         }
         touched
     }
@@ -930,8 +1111,10 @@ impl FinalClipper {
                 self.fir = self.fir_target;
             }
         }
+        self.update_depth(x);
         self.reference.write_frames(x);
         let touched = self.run_pass(0, x);
+
         for k in 1..self.n_passes {
             self.run_pass(k, x);
         }
@@ -954,6 +1137,122 @@ impl FinalClipper {
         };
         self.last.accumulate(&s);
         self.total.accumulate(&s);
+    }
+
+    /// Feed the content-adaptive depth and the bandwidth guard the chunk
+    /// `x` (input) and fill the chunk's per-frame depth. Decisions fall on
+    /// the control-block grid ([`CONTROL_BLOCK`]).
+    fn update_depth(&mut self, x: &[f32]) {
+        let ch = self.channels;
+        let n = x.len() / ch;
+        let mut i = 0;
+        while i < n {
+            let take = (CONTROL_BLOCK - self.block_pos).min(n - i);
+            let sub = &x[i * ch..(i + take) * ch];
+            if self.params.adaptive_depth {
+                self.predict.push(sub, ch);
+                self.block_energy += sub.iter().map(|&v| v as f64 * v as f64).sum::<f64>();
+            }
+            if self.params.bandwidth_guard {
+                self.guard.push(sub, ch);
+            }
+            for (d, c) in self.depth_buf[i..i + take]
+                .iter_mut()
+                .zip(&mut self.predict_buf[i..i + take])
+            {
+                let a = self.adapt_ramp.step();
+                *d = a * self.guard_ramp.step();
+                *c = 1.0 - a;
+            }
+            self.block_pos += take;
+            i += take;
+            if self.block_pos == CONTROL_BLOCK {
+                self.block_pos = 0;
+                self.end_control_block();
+            }
+        }
+    }
+
+    /// End of a control block: new predictability and guard edge, and the
+    /// depth's ramp toward the new target over the next block.
+    fn end_control_block(&mut self) {
+        if self.params.bandwidth_guard {
+            self.guard.end_block();
+        }
+        self.predict.flush_denormals();
+        if self.params.adaptive_depth {
+            let ms = self.block_energy / (CONTROL_BLOCK * self.channels) as f64;
+            self.block_energy = 0.0;
+            // Hold the reading in pauses (below the analysis level).
+            if ms > ADAPT_MIN_LEVEL && ms.is_finite() {
+                let g = self.predict.gain_db();
+                let (lo, hi) = ADAPT_GAIN_DB;
+                let c = ((g - lo) / (hi - lo)).clamp(0.0, 1.0);
+                self.predictable = c.max(self.predictable * self.predictable_release);
+            }
+        } else {
+            self.predictable = 0.0;
+        }
+        self.adapt_ramp
+            .set((1.0 - self.predictable) as f32, CONTROL_BLOCK);
+        self.guard_ramp
+            .set(self.guard_depth(), self.guard_fade_frames);
+    }
+
+    /// Share of the clippings the bandwidth guard lets through: none while
+    /// the programme is band-limited (its peaks go to the limiter after the
+    /// clipper), all of them otherwise.
+    fn guard_depth(&self) -> f32 {
+        if self.guard_edge_hz().is_some() {
+            0.0
+        } else {
+            1.0
+        }
+    }
+
+    /// [`Processor::process`], and per output frame the depth (see
+    /// [`FinalClipper::depth`]) into `depth` and the held predictability
+    /// (see [`FinalClipper::predictability`], ramped like the depth) into
+    /// `predictable` (each at least one per frame).
+    pub fn process_with_control(
+        &mut self,
+        samples: &mut [f32],
+        depth: &mut [f32],
+        predictable: &mut [f32],
+    ) {
+        let ch = self.channels;
+        if ch == 0 || self.clip.is_empty() {
+            return;
+        }
+        let usable = samples.len() / ch * ch;
+        if predictable.len() < usable / ch || depth.len() < usable / ch {
+            return;
+        }
+        self.fresh = false;
+        self.last = ClipStats::default();
+        for (k, chunk) in samples[..usable].chunks_mut(CHUNK * ch).enumerate() {
+            let n = chunk.len() / ch;
+            self.process_chunk(chunk);
+            depth[k * CHUNK..k * CHUNK + n].copy_from_slice(&self.depth_buf[..n]);
+            predictable[k * CHUNK..k * CHUNK + n].copy_from_slice(&self.predict_buf[..n]);
+        }
+    }
+
+    /// Depth in force (0 … 1): the share of the clippings subtracted, after
+    /// the content-adaptive depth and the bandwidth guard.
+    pub fn depth(&self) -> f32 {
+        self.adapt_ramp.value * self.guard_ramp.value
+    }
+
+    /// Held predictability (0 … 1) of the content-adaptive depth: 0 for
+    /// noise-like material (clippings subtracted in full), 1 for
+    /// predictable material (none). Always 0 with the adaptive depth off.
+    pub fn predictability(&self) -> f64 {
+        if self.params.adaptive_depth {
+            self.predictable
+        } else {
+            0.0
+        }
     }
 
     /// Clip depth (dB) of the most recent `process` call (−200 when it
@@ -1050,6 +1349,14 @@ impl Processor for FinalClipper {
         self.delayed = vec![0.0; CHUNK * channels];
         self.prime = vec![0.0; prime.max(1) * channels];
         self.low_cut_settle = (LOW_CUT_SETTLE_MS * 0.001 * self.sample_rate).round() as usize;
+        self.predict = Predictability::new(self.sample_rate);
+        self.guard = BandwidthGuard::new(self.sample_rate);
+        self.predictable_release =
+            (-(CONTROL_BLOCK as f64) / (ADAPT_RELEASE_MS * 0.001 * self.sample_rate)).exp();
+        self.guard_fade_frames =
+            ((GUARD_FADE_MS * 0.001 * self.sample_rate).round() as usize).max(1);
+        self.depth_buf = vec![1.0; CHUNK];
+        self.predict_buf = vec![0.0; CHUNK];
         self.fresh = true;
         let p = self.params;
         self.set_params(&p);
@@ -1084,6 +1391,13 @@ impl Processor for FinalClipper {
         self.curve_glide = 0;
         self.last = ClipStats::default();
         self.total = ClipStats::default();
+        self.predict.reset();
+        self.predictable = 0.0;
+        self.guard.reset();
+        self.adapt_ramp = Ramp::new(1.0);
+        self.guard_ramp = Ramp::new(1.0);
+        self.block_pos = 0;
+        self.block_energy = 0.0;
     }
 
     fn latency_frames(&self) -> usize {
