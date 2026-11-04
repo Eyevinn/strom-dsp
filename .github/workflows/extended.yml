@@ -1,8 +1,9 @@
 name: Extended checks
 
 # Slower, specialised checks: minimum Rust versions, RealtimeSanitizer,
-# instruction counts, and the crackle and declipper checks on the test
-# corpus. Weekly and on demand (Actions tab → Run workflow).
+# instruction counts, the crackle and declipper checks on the test corpus,
+# and the long programme runs of the broadcast chain. Weekly and on demand
+# (Actions tab → Run workflow).
 
 on:
   schedule:
@@ -110,3 +111,16 @@ jobs:
       # input, no runaway peaks, speech ΔSDRc kept
       # (crates/strom-dsp-harness/src/declip.rs).
       - run: cargo test --release -p strom-dsp-harness --test declipper_corpus -- --ignored --nocapture
+
+  long-runs:
+    name: Long programme runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Minutes of programme through the broadcast chain over presets, input
+      # levels and latency modes, with hard bounds (loudness, true peak,
+      # governor). The baseline in the default suite guards the same
+      # readings per change (crates/strom-dsp-harness/tests/long_runs/).
+      - run: cargo test --release -p strom-dsp-harness --test long_runs -- --ignored --nocapture

@@ -78,7 +78,8 @@
 //! the loudness error behind the 3 s window. The dead bands (0.5 LU before
 //! density rises, 0.1 dB of budget before it is released under budget) and
 //! the rate limits stop small limit cycles; the 10-minute step test in
-//! `tests/governor.rs` checks for them.
+//! the harness (`strom-dsp-harness/tests/long_runs/governor.rs`) checks for
+//! them.
 
 use crate::clipper::ClipStats;
 use crate::meter::{History, WindowSum, SUB_BLOCK_MS};

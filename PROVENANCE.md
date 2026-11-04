@@ -1252,7 +1252,7 @@ signals through the broadcast chain per preset and compares a fixed set of
 numbers with a checked-in baseline (`baseline.json`). All signals are
 generated in code with fixed seeds. The programme generators of the chain
 tests (`tests/broadcast.rs`, `tests/governor.rs`,
-`tests/broadcast_latency.rs`) live in one place, `tests/programme_support/`,
+`tests/broadcast_latency.rs`, and the harness long runs) live in one place, `tests/programme_support/`,
 and are shared with the harness.
 
 - **Signals:** sine; exponential sweep (A. Farina, "Simultaneous
