@@ -56,9 +56,9 @@ compare runs only on the same, otherwise idle, machine.
 |---|---|---|
 | `strip` | gate / compressor / limiter / strip | 2.19 / 7.91 / 5.72 / 18.3 µs |
 | `strip` | EQ 4-band mono / stereo / 8 ch / stereo automated | 2.06 / 2.16 / 8.26 / 5.91 µs |
-| `broadcast` (complete chain, separate run, load average 3 … 4) | full chain defaults `ebu-r128`, `standard` / `low` latency | 82.6 / 82.0 µs |
-| `broadcast` (same run) | full chain defaults `streaming`, `standard` / `low` latency | 93.4 / 88.6 µs |
-| `broadcast` (same run) | full chain, library defaults (expanders and bass clipper off) | 68.7 µs |
+| `broadcast` (complete chain, separate run, load average 4 … 6) | full chain defaults `ebu-r128`, `standard` / `low` latency | 92.0 / 91.8 µs |
+| `broadcast` (same run) | full chain defaults `streaming`, `standard` / `low` latency | 104.3 / 99.0 µs |
+| `broadcast` (same run) | full chain, library defaults (expanders and bass clipper off) | 78.2 µs |
 | `broadcast` | final clipper alone, standard: idle / clipping | 1.27 / 46.7 µs |
 | `broadcast` | final clipper alone, low latency: idle / clipping | 1.27 / 25.4 µs |
 | `truepeak` | 5 ms lookahead | 18.8 µs |
@@ -146,9 +146,13 @@ cargo bench -p strom-dsp --bench broadcast -- full_chain --warm-up-time 1 --meas
 
 The full chain (spike guard, AGC, 4-band multiband with expanders and bass
 clipper, final clipper, limiter, governor, all meters) with the `ebu-r128`
-defaults takes 82.6 µs per 10 ms stereo buffer in the `standard` latency
-mode (0.83 % of one core) and 82.0 µs in `low` (0.82 %); with the
-`streaming` defaults 93.4 µs (0.93 %) and 88.6 µs (0.89 %). The low mode
+defaults takes 92.0 µs per 10 ms stereo buffer in the `standard` latency
+mode (0.92 % of one core) and 91.8 µs in `low` (0.92 %); with the
+`streaming` defaults 104.3 µs (1.04 %) and 99.0 µs (0.99 %). The final
+clipper's content-adaptive depth and bandwidth guard (eight biquads per
+frame on the mono sum, an order-10 prediction every 64 frames) and the
+limiter's peak control cost about 9.5 µs of that: the same run on the
+chain without them read 82.5 / 82.2 µs and 94.5 / 88.3 µs. The low mode
 is no more expensive: its clipper runs at 4× instead of 8×. The clipper's
 early-out makes it nearly free on programme that does not reach its knee
 (1.27 µs); driven 6 dB over its threshold on every buffer it takes 46.7 µs
