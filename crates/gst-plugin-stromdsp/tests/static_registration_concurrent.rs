@@ -6,7 +6,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-const FACTORIES: [&str; 11] = [
+const FACTORIES: [&str; 12] = [
     "stromdsp-gate",
     "stromdsp-compressor",
     "stromdsp-equalizer",
@@ -16,6 +16,7 @@ const FACTORIES: [&str; 11] = [
     "stromdsp-delay",
     "stromdsp-stereo",
     "stromdsp-cleanup",
+    "stromdsp-declipper",
     "stromdsp-meter",
     "stromdsp-broadcastprocessor",
 ];

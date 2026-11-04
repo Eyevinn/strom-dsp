@@ -4,7 +4,7 @@
 //! Elements: `stromdsp-gate`, `stromdsp-compressor`, `stromdsp-equalizer`,
 //! `stromdsp-limiter`, `stromdsp-ducker`, `stromdsp-deesser`,
 //! `stromdsp-delay`, `stromdsp-stereo`, `stromdsp-cleanup`,
-//! `stromdsp-meter` and `stromdsp-broadcastprocessor`. All work on
+//! `stromdsp-declipper`, `stromdsp-meter` and `stromdsp-broadcastprocessor`. All work on
 //! interleaved F32LE. All except `stromdsp-ducker` are in-place
 //! `BaseTransform`s; the ducker is an `Aggregator` with a `sidechain`
 //! request pad for its key.
@@ -18,6 +18,7 @@ pub mod broadcastprocessor;
 pub mod cleanup;
 mod common;
 pub mod compressor;
+pub mod declipper;
 pub mod deesser;
 pub mod delay;
 pub mod ducker;
@@ -37,6 +38,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     delay::register(plugin)?;
     stereo::register(plugin)?;
     cleanup::register(plugin)?;
+    declipper::register(plugin)?;
     meter::register(plugin)?;
     broadcastprocessor::register(plugin)?;
     Ok(())

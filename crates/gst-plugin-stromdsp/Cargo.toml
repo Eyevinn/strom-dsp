@@ -1,6 +1,6 @@
 [package]
 name = "gst-plugin-stromdsp"
-description = "GStreamer audio elements built on strom-dsp: gate, compressor, equalizer, limiter, ducker, de-esser, delay, stereo, cleanup, meter and broadcast processor"
+description = "GStreamer audio elements built on strom-dsp: gate, compressor, equalizer, limiter, ducker, de-esser, delay, stereo, cleanup, declipper, meter and broadcast processor"
 publish = false
 version.workspace = true
 edition.workspace = true

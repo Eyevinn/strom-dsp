@@ -979,6 +979,172 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
   - stages that are off are skipped, with 10 ms dry/wet crossfades when
     switching and two-bank crossfades for hum changes.
 
+### Declipper (`src/declipper/`)
+
+Real-time repair of hard-clipped runs, inside a fixed delay of 3, 5
+(default) or 10 ms.
+
+- **Reconstruction:** least-squares AR interpolation of missing samples:
+  A. J. E. M. Janssen, R. N. J. Veldhuis, L. B. Vries, "Adaptive
+  interpolation of discrete-time signals that can be modeled as
+  autoregressive processes", IEEE Trans. ASSP 34(2), 1986 (AR estimate and
+  interpolation alternated); S. J. Godsill, P. J. W. Rayner, *Digital Audio
+  Restoration*, Springer 1998, ch. 5 (the LSAR normal equations
+  `(A_Uᵀ A_U)·x_U = −A_Uᵀ e₀`). AR coefficients by the autocorrelation method
+  (Hann window, Levinson–Durbin), as in any linear-prediction textbook
+  (e.g. Rabiner & Schafer, *Digital Processing of Speech Signals*), and
+  Burg's method (J. P. Burg, *Maximum entropy spectral analysis*, PhD
+  thesis, Stanford 1975; S. M. Kay, *Modern Spectral Estimation*,
+  Prentice Hall 1988, ch. 7).
+- **Constraint:** J. S. Abel, J. O. Smith III, "Restoring a clipped signal",
+  ICASSP 1991: a clipped sample's true value lies beyond the clip level, on
+  the same side. Also related: US 8,126,578 (expired; status not legally
+  reviewed).
+- **Evaluation:** the SDR / ΔSDR / ΔSDRc protocol of P. Záviška, P. Rajmic,
+  A. Ozerov, L. Rencker, "A survey and an extensive evaluation of popular
+  audio declipping methods", IEEE JSTSP 15(1), 2021 (metrics only; no code
+  from the survey or its companion repository was used).
+- **Detection is on the waveform only:** runs of consecutive samples on a
+  sign-consistent plateau. It never uses the distribution (histogram) of
+  sample values.
+- **Own choices:**
+  - plateau = samples within `tolerance·|level|` of the run's first sample
+    (default 1e-5), level floor −20 dBFS, edge into and out of the run at
+    least `max(10⁻³·|level|, 4·tol)` and 4× steeper than the run's own
+    slope at that end (corner rule); a *soft corner* (the neighbour lies
+    just inside the level, by more than `2·tol`, and the step one sample
+    further out meets the edge) counts only for runs that need no
+    confirmation;
+  - a flat run of ≥ 4 samples is clipped on its own; runs of 2–3 samples
+    are clipped only at the *known clip level*, or when they repeat the
+    level of the previous short run (same direction, or mirrored for
+    symmetric clipping) within 5 s. A pair takes part only when it lies
+    inside the cubic (Lagrange interpolation, any numerical-analysis
+    textbook) through the two samples on each side of it by at least
+    `max(tol, 10⁻⁴·|level|)`: a smooth peak between two samples lies
+    outside that cubic, because the interpolation error at a peak has the
+    sign of the fourth derivative;
+  - *known clip level* (own design): per direction, set and confirmed by
+    flat runs of ≥ 4 samples and by repeated short runs, expiring 5 s after
+    its last confirmation; a single sample counts as clipped when it is
+    within `tol` of the known level, both neighbours lie inside the level by
+    at least the edge, and it lies inside the cubic through its four
+    neighbours by at least `max(tol, 10⁻⁴·|level|)` (above the rounding
+    noise of 16-bit audio at full scale). Single samples never confirm the
+    level, so it cannot keep itself alive, and a gain change after the
+    clip moves the plateaus to a new level that has to be confirmed again;
+  - optional tolerance for a first-order high-pass after the clip (default
+    50 Hz): slope ≤ `ω_c·|level|` and second difference ≤ `ω_c²·|level|`
+    inside the run, from the exponential decay of a high-passed plateau;
+    the magnitude may only decay (the high-pass removes a local mean that
+    lies inside the clip level), and tilted runs need ≥ 4 samples (a short
+    straight piece of waveform at a peak looks the same);
+  - constrained least squares by a bounded active-set loop (≤ 4 solves; a
+    bound is never released), then projection into the box; the box upper
+    edge is a cap (default +6 dB over the clipped value);
+  - *Burg retry* (own design): when the first round leaves every unknown at
+    its starting value (the model has learnt the flat top, so the solve
+    lands inside the clip level), the first round is done again with a Burg
+    estimate on the known samples from 2.5 ms before the run to the end of
+    the window, if the work budget allows. It fixes runs that otherwise
+    come out unrepaired (synthetic speech clipped 3 dB: 0.3 → 3.3 dB SDR
+    improvement on the clipped samples) and costs nothing measurable on
+    recorded speech;
+  - AR order 48 at 48 kHz (scaled with the rate, 12…64), 10 ms of context
+    before a run and up to 5 ms after it, 2 rounds of the autocorrelation
+    method (first with the run at its clipped values, then with the
+    rebuilt samples); up to 8 samples of later runs in the window solved
+    jointly; Cholesky in f64 with 1e-10 relative diagonal loading, 1e-5
+    white-noise correction on lag 0. Chosen by measurement on synthetic
+    material and the recorded speech of the test corpus (VCTK, LibriSpeech,
+    LibriVox, MUSAN) clipped 3, 6 and 10 dB: the second round is what
+    matters (one round alone gives 11.8/3.1/3.7 dB mean SDR improvement on
+    the clipped samples against 16.4/12.9/9.8 dB with two, without a work
+    limit); Burg on the known samples only (reflection coefficients summed
+    over the stretches between the unknowns) as the first estimate gave the
+    same quality for 1.8 times the work, so under the work budget it lost
+    up to 3 dB; AR orders 24, 32 and 64, a third round and a 5 ms past
+    context were no better overall. Consistency-constrained sparse
+    methods (consistent IHT, SPADE) were not built: they work on frames of
+    tens of milliseconds with many transform iterations each, beyond the
+    5 ms latency and the per-buffer CPU budget;
+  - latency setting 3, 5 (default) or 10 ms; a run is rebuilt once 5 ms of
+    future context has arrived, or when its first sample is about to leave
+    the delay line, whichever comes first;
+  - runs longer than 2 ms (`max-run`) pass through unchanged and are
+    counted;
+  - *work budget* (own design): every step of a rebuild is counted in
+    multiply-adds from its operation count (estimate `N·(p+2) + 1.5p²`,
+    Burg `+5pN`, solve `(m+p)(p+1) + 3m(p+1) + m³/6 + 2m²`); each channel
+    has a token bucket refilled with 50·10⁶ units per second of audio, up
+    to 200 000. A step only starts when it fits: the estimate, then the
+    active-set solves, then the second round. A round whose active-set loop
+    has to stop for the budget is dropped and the round before it kept (a
+    half-finished loop, projected into the box, put some runs at the cap
+    and left others at the clip level: on recorded speech it cost more than
+    the fallback); when the first round does not fit, the cheap fallback
+    rebuilds the run: a cubic Hermite curve (any numerical-analysis
+    textbook) from the value and one-sided slope on each side, projected
+    into the same box. Counted, not timed, so the output is deterministic
+    and independent of the buffer size. The smaller burst and larger rate
+    (against 300 000 and 40·10⁶) keep the same bound per 10 ms buffer and
+    give dense clipping more work per second;
+  - *model reuse* (own design): a run that starts within 10 ms of the run
+    whose first-round AR model a channel keeps uses that model instead of a
+    new estimate (measured: half the work per run on recorded speech
+    clipped 10 dB, under 0.1 dB change in the SDR improvement);
+  - the hot loops (dot products, Burg recursion, Cholesky) use four
+    partial sums so they vectorise; the Hann window is built by a rotation
+    recurrence;
+  - *plausibility check* (own design): a rebuilt run is kept only when it
+    passes two tests, otherwise it keeps its clipped samples (counted).
+    *Spike test*: its largest rise above the clipped values is at most
+    1 × the steeper one-sided edge slope towards the clip (difference of
+    the two samples on each side) × (run length + 1); a sinusoid clipped at
+    any depth rises at most `1/π` times that and a parabola `1/4` (own
+    derivation from the time a sinusoid spends above a level and its slope
+    at the crossing), so the factor leaves room for peakier shapes, and
+    edges that both lead away from the clip allow no rise. *Cap test*: the
+    rebuild reaches the `max-overshoot` cap while the AR model behind it
+    has a prediction gain (`r(0)/E_p` from Levinson–Durbin, `1/Π(1 − k²)`
+    from Burg; textbook quantities, Kay 1988) below 28 dB on its window;
+    the cheap fallback is judged by the channel's kept model when that is
+    reusable, otherwise by the spike test alone. Chosen by measurement on
+    the corpus speech and music clipped 3, 6 and 10 dB as the listening kit
+    prepares them (repair SDR gain per clip, output peak against the
+    original) and on the speech ΔSDRc protocol: music with dense
+    high-frequency content (kmacleod_burn_the_world_waltz at 6 dB) had come
+    out 4.4 dB worse than the clipped input, from clusters of short runs
+    filled with spikes to the cap and long runs filled with humps at the
+    cap. With the 12 dB cap, the spike test alone left it at −0.7 dB and
+    the cap test alone at −0.75 dB; both with the 6 dB cap: every clip
+    ≥ 0 dB. The cap test on every rebuild that reaches a 6 dB cap cost up
+    to 5 dB of speech ΔSDRc at 10 dB (real 10 dB peaks reach it); gated by
+    the prediction gain it costs nothing (thresholds from 20 to 30 dB
+    changed the results by at most 0.15 dB). Judging fallbacks without a model as weak cost
+    0.6 dB at 10 dB. Tried and not kept: a bound from the fraction of
+    clipped samples in the window (the sinusoid relation between duty
+    cycle and depth; isolated speech peaks have almost none, speech ΔSDRc
+    fell by up to 12 dB); a bound from the shape of unclipped peaks of the
+    same polarity in the window (did not reach the overshooting runs, cost
+    up to 3.4 dB at 3 dB of clipping); a uniform shrink of the rebuild
+    towards the clip level (cost 1.6–9 dB of speech ΔSDRc); rejecting on
+    the unconstrained solve's overshoot (no effect on the failures);
+    rejecting every rebuild of a model with a prediction gain below
+    10–18 dB (the waltz at 6 dB: −0.15 to 0.0 dB against +0.02 dB). Curvature against neighbouring short
+    runs, edge-slope bounds with the mean or smaller slope, and the fill's
+    first and second differences against the context's did not separate
+    worse from better runs;
+  - `max-overshoot` default 6 dB (was 12): measured on the speech ΔSDRc
+    protocol without the plausibility check, 16.5 / 13.7 / 8.9 dB at 3, 6
+    and 10 dB against 16.5 / 12.8 / 8.7 dB with 12 dB (8 dB: 12.9 / 10.2;
+    5 dB: 13.5 / 7.8; 4 dB: 11.5 / 6.3). 8 dB gives more at 10 dB, but
+    the waltz at 6 dB stayed 0.7 dB worse than clipped with the spike test
+    (1.9 dB without), since its runaway rebuilds stop at the cap. A smooth rebuild still rises above a
+    flat-topped true peak (glottal pulses of a low voice clipped 3 dB: up
+    to 2.1 dB above the original's peak, vctk_p225); no test found on the
+    clipped signal tells those runs from good ones.
+
 ### Delay and stereo (`src/delay.rs`, `src/stereo.rs`)
 
 - **Delay:** an integer-frame read tap on the shared `DelayLine` circular
@@ -1212,6 +1378,7 @@ deliberately not set (see "Engineering policies").
 | `proptest` 1 (dev) | library tests | MIT OR Apache-2.0 |
 | `criterion` 0.8 (dev) | benchmark | MIT OR Apache-2.0 |
 | `serde_json` 1 | measurement harness only (baseline file; already in the tree through `criterion`) | MIT OR Apache-2.0 |
+| `hound` 3.5 (dev) | WAV I/O in the `declip_render` example | Apache-2.0 |
 | `rtsan-standalone` 0.3 (optional, feature `rtsan`) | real-time-safety tests | Apache-2.0 |
 | RTSan runtime `libclang_rt.rtsan` (LLVM 20, binary downloaded at build time, test binary only) | rtsan tests | Apache-2.0 WITH LLVM-exception |
 | `gungraun` =0.20.0 (optional, feature `gungraun`) | instruction-count benchmark | MIT OR Apache-2.0 |

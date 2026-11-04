@@ -14,6 +14,7 @@ mod util;
 mod broadcastprocessor;
 mod cleanup;
 mod compressor;
+mod declipper;
 mod deesser;
 mod delay;
 mod ducker;

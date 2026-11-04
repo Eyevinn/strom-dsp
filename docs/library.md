@@ -73,6 +73,52 @@ Reusable building blocks are public too:
   friends) and the broadcast presets (`BroadcastPreset`).
 - Processors behind the utility elements: `ducker`, `deesser`, `cleanup`,
   `delay` and `stereo`.
+- `strom_dsp::declipper`: `Declipper`, with its `ClipDetector` and
+  `LsarSolver`; see below.
 
 The behaviour of each processor, as seen through its element, is described in
 the [element pages](elements/README.md).
+
+## Declipper
+
+> Code is the source of truth — this may have drifted; read the code for the
+> current implementation.
+
+`strom_dsp::declipper::Declipper` repairs hard-clipped audio (an overdriven
+microphone, a phone contribution that clipped before it reached us) in real
+time. It finds clipped runs on the waveform and rebuilds them by AR
+interpolation, kept beyond the clip level. The element is
+[`stromdsp-declipper`](elements/declipper.md); its page has the behaviour,
+the latency per setting and the measured quality.
+
+```rust
+use strom_dsp::declipper::{Declipper, DeclipperLatency, DeclipperParams};
+use strom_dsp::Processor;
+
+let mut d = Declipper::new();
+d.set_params(&DeclipperParams {
+    latency: DeclipperLatency::Low, // 3 ms; Normal (default) 5, High 10
+    ..Default::default()
+});
+d.configure(48_000.0, 2); // allocates
+d.process(&mut interleaved_f32); // real-time safe
+let stats = d.take_stats(); // runs repaired, too long, fallbacks, overshoot
+```
+
+- **Latency:** `floor(ms · fs)` frames (at least 16), fixed at `configure`.
+- **Unclipped audio** comes out bit-exact, delayed by the latency.
+- **Parameters:** `enabled` (crossfade to the delayed dry signal),
+  `latency`, `min_level_db` (−20), `tolerance` (1e-5 relative),
+  `max_run_ms` (2), `max_overshoot_db` (6), `tilt_hz` (50).
+- **Headroom:** rebuilt peaks lie beyond the old clip level, so the output
+  is hotter than the input; put a limiter after it before any ceiling.
+- **Work budget:** each channel spends at most 200 000 multiply-adds of
+  saved-up work plus 50·10⁶ per second of audio; past that, runs get a
+  cheap constrained fallback (`DeclipperStats::fallbacks`). The output does
+  not depend on the machine or the buffer size.
+
+`cargo run --release --example declip_render -- IN.wav OUT.wav` declips a
+WAV file and writes a report; `--demo DIR` renders a synthetic A/B set.
+`cargo run --release --example declip_eval -- FILE.wav...` clips recordings
+3, 6 and 10 dB below their peak and reports recall, false detections, the
+SDR improvement on the clipped samples and the time per buffer.

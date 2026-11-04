@@ -79,6 +79,10 @@
 //! annihilator reads far below the bound (a 3 dB/s ramp is about −110 dB),
 //! so the AGC stays on. Its READY-only properties (`num-bands`,
 //! `limiter-lookahead`) are not PLAYING-mutable and so not knobs.
+//!
+//! The declipper runs on the tone clipped 2 dB below its peak, so it
+//! repairs every half-cycle; its scenarios say why their bound is relaxed.
+//! Its READY-only `latency-mode` is not a knob.
 
 use crate::util;
 
@@ -112,13 +116,14 @@ const HARD_LIMIT_DB: f64 = -50.0;
 const TARGET_DB: f64 = -60.0;
 
 /// Elements and the GObject type name of each.
-const ELEMENTS: [&str; 11] = [
+const ELEMENTS: [&str; 12] = [
     "stromdsp-gate",
     "stromdsp-compressor",
     "stromdsp-equalizer",
     "stromdsp-limiter",
     "stromdsp-deesser",
     "stromdsp-cleanup",
+    "stromdsp-declipper",
     "stromdsp-stereo",
     "stromdsp-delay",
     "stromdsp-meter",
@@ -132,12 +137,15 @@ struct Tone {
     freq: f64,
     amp: [f64; CH],
     phase: [f64; CH],
+    /// Hard clip level (0 = none).
+    clip: f64,
 }
 
 const TONE: Tone = Tone {
     freq: 1000.0,
     amp: [0.25, 0.25],
     phase: [0.0, 0.0],
+    clip: 0.0,
 };
 
 impl Tone {
@@ -145,7 +153,15 @@ impl Tone {
         let w = 2.0 * PI * self.freq / RATE as f64;
         (0..frames)
             .flat_map(|n| {
-                (0..CH).map(move |c| (self.amp[c] * (w * n as f64 + self.phase[c]).sin()) as f32)
+                (0..CH).map(move |c| {
+                    let v = self.amp[c] * (w * n as f64 + self.phase[c]).sin();
+                    let v = if self.clip > 0.0 {
+                        v.clamp(-self.clip, self.clip)
+                    } else {
+                        v
+                    };
+                    v as f32
+                })
             })
             .collect()
     }
@@ -274,6 +290,8 @@ fn base_setup(factory: &str) -> Vec<(&'static str, &'static str)> {
         // Tone in the sibilance band, 28 dB above threshold.
         "stromdsp-deesser" => vec![("threshold", "-40"), ("attack", "5")],
         "stromdsp-cleanup" => vec![("highpass", "80"), ("dc-block", "true")],
+        // Repairing: the tone is clipped 2 dB below its peak (base_tone).
+        "stromdsp-declipper" => vec![],
         "stromdsp-stereo" => vec![],
         "stromdsp-delay" => vec![("delay", "5")],
         "stromdsp-meter" => vec![],
@@ -310,6 +328,7 @@ fn base_tone(factory: &str) -> Tone {
             freq: 130.0,
             ..TONE
         },
+        "stromdsp-declipper" => Tone { clip: 0.2, ..TONE },
         _ => TONE,
     }
 }
@@ -671,6 +690,36 @@ fn cases() -> Vec<Case> {
     v.push(case(b, &under_knee, &[("clip-budget", "0")]));
     v.push(case(b, &under_knee, &[("clip-budget", "6")]));
 
+    // ---- declipper ----
+    // The tone is clipped 2 dB below its peak and repaired. The repaired
+    // tone is not an exact sine: the AR model of a pure tone, with its
+    // white-noise correction, leaves a steady residual of about -46 dB, so
+    // the bound is relaxed to -34 dB (still far below a hard switch, which
+    // reads -20 ... 0 dB). Where the change ends repairing, the new steady
+    // state is the clipped tone (about -24 dB).
+    let d = "stromdsp-declipper";
+    let floor = "repaired pure tone: steady residual about -46 dB";
+    let to_clipped = "repairs stop: the steady state is the clipped tone";
+    v.push(
+        case(d, &[], &[("enabled", "false")])
+            .exempt(-34.0, floor)
+            .exempt_steady(to_clipped),
+    );
+    v.push(
+        case(d, &[], &[("max-overshoot", "0")])
+            .exempt(-34.0, floor)
+            .exempt_steady(to_clipped),
+    );
+    v.push(case(d, &[], &[("max-overshoot", "24")]).exempt(-34.0, floor));
+    v.push(
+        case(d, &[], &[("min-level", "0")])
+            .exempt(-34.0, floor)
+            .exempt_steady(to_clipped),
+    );
+    v.push(case(d, &[], &[("min-level", "-60")]).exempt(-34.0, floor));
+    v.push(case(d, &[], &[("meter-interval", "0")]).exempt(-34.0, floor));
+    v.push(case(d, &[], &[("meter-interval", "10000")]).exempt(-34.0, floor));
+
     v
 }
 
@@ -805,6 +854,7 @@ fn run(case: &Case) -> Vec<f32> {
         freq: 1000.0,
         amp: [case.key_amp; CH],
         phase: [0.3; CH],
+        clip: 0.0,
     }
     .samples(BUFFERS * FRAMES);
     h.play();

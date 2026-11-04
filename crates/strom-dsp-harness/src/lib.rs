@@ -13,6 +13,8 @@
 //!   modes.
 //! - [`baseline`]: the checked-in baseline (`baseline.json`) and the
 //!   regression check against it.
+//! - [`declip`]: the declipper on the test corpus, and its acceptance
+//!   check (never worse than the clipped input).
 //! - [`listen`]: the listening kit: processor configurations over the
 //!   test corpus, before/after audio, numbers and a static listening page
 //!   (binary `strom-dsp-listen`).
@@ -24,6 +26,7 @@
 pub mod baseline;
 pub mod chain;
 pub mod crackle;
+pub mod declip;
 pub mod listen;
 pub mod metrics;
 pub mod signals;

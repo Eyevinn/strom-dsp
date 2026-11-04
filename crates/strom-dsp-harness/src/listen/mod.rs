@@ -48,6 +48,7 @@ use serde_json::{json, Value};
 use strom_dsp::broadcast::{BroadcastParams, LatencyMode};
 use strom_dsp::cleanup::{Cleanup, CleanupParams, HumFrequency};
 use strom_dsp::compressor::Compressor;
+use strom_dsp::declipper::{Declipper, DeclipperLatency, DeclipperParams, DeclipperStats};
 use strom_dsp::deesser::{Deesser, DeesserParams};
 use strom_dsp::gate::{Gate, GateMode};
 use strom_dsp::presets::{
@@ -291,6 +292,127 @@ pub fn strip_config<P: Processor + 'static>(
     }
 }
 
+/// Stereo `input` through a [`Declipper`] with `params` in 10 ms buffers:
+/// the output aligned with the input (latency removed, same length), the
+/// declipper's counters over the whole input, and its latency (frames).
+pub fn run_declipper(input: &[f32], params: &DeclipperParams) -> (Vec<f32>, DeclipperStats, usize) {
+    let mut d = Declipper::new();
+    d.set_params(params);
+    d.configure(FS as f32, CH);
+    let latency = d.latency_frames();
+    let mut out = input.to_vec();
+    out.extend(std::iter::repeat_n(0.0, latency * CH));
+    for c in out.chunks_mut(STRIP_BLOCK * CH) {
+        d.process(c);
+    }
+    (out[latency * CH..].to_vec(), d.take_stats(), latency)
+}
+
+/// A declipper configuration at the element defaults with latency setting
+/// `latency`, run in 10 ms buffers. Numbers: `latency_ms`, `change_db` (as
+/// [`strip_config`]), and the declipper's counters over the clip:
+/// `runs_repaired`, `samples_repaired`, `runs_too_long`, `fallbacks`,
+/// `runs_rejected` and `max_overshoot_db`.
+pub fn declipper_config(id: &str, label: &str, about: &str, latency: DeclipperLatency) -> Config {
+    Config {
+        id: id.into(),
+        label: label.into(),
+        about: about.into(),
+        run: Box::new(move |input| {
+            let params = DeclipperParams {
+                latency,
+                ..Default::default()
+            };
+            let (output, st, latency) = run_declipper(input, &params);
+            let mut n = Numbers::new();
+            n.insert("latency_ms".into(), Some(latency as f64 * 1000.0 / FS));
+            let change = metrics::clip_depth(input, &output, CH, FS);
+            n.insert("change_db".into(), Some(change.overall_db));
+            n.insert("runs_repaired".into(), Some(st.runs_repaired as f64));
+            n.insert("samples_repaired".into(), Some(st.samples_repaired as f64));
+            n.insert("runs_too_long".into(), Some(st.runs_too_long as f64));
+            n.insert("fallbacks".into(), Some(st.fallbacks as f64));
+            n.insert("runs_rejected".into(), Some(st.runs_rejected as f64));
+            n.insert(
+                "max_overshoot_db".into(),
+                Some(f64::from(st.max_overshoot_db)),
+            );
+            Rendered { output, numbers: n }
+        }),
+    }
+}
+
+/// `x` hard-clipped `depth_db` below its own sample peak.
+pub fn clip_below_peak(x: &[f32], depth_db: f64) -> Vec<f32> {
+    let c = (sample_peak(x) * db_to_lin(-depth_db)) as f32;
+    x.iter().map(|v| v.clamp(-c, c)).collect()
+}
+
+fn clip_3db(x: &[f32]) -> Vec<f32> {
+    clip_below_peak(x, 3.0)
+}
+
+fn clip_6db(x: &[f32]) -> Vec<f32> {
+    clip_below_peak(x, 6.0)
+}
+
+fn clip_10db(x: &[f32]) -> Vec<f32> {
+    clip_below_peak(x, 10.0)
+}
+
+/// The declipper's three latency settings.
+fn declipper_configs() -> Vec<Config> {
+    vec![
+        declipper_config(
+            "declipper",
+            "declipper (5 ms)",
+            "stromdsp-declipper defaults: standard latency (5 ms), max-overshoot 6 dB, min-level -20 dBFS.",
+            DeclipperLatency::Normal,
+        ),
+        declipper_config(
+            "declipper-low",
+            "declipper low (3 ms)",
+            "stromdsp-declipper with latency-mode low (3 ms): less context after each run.",
+            DeclipperLatency::Low,
+        ),
+        declipper_config(
+            "declipper-high",
+            "declipper high (10 ms)",
+            "stromdsp-declipper with latency-mode high (10 ms): the full context after runs up to 5 ms.",
+            DeclipperLatency::High,
+        ),
+    ]
+}
+
+/// Numbers shown for the declipper groups.
+fn declipper_columns(with_sdr: bool) -> Vec<(&'static str, &'static str)> {
+    let mut v = vec![("latency_ms", "Latency (ms)")];
+    if with_sdr {
+        v.push(("repair_sdr_gain_db", "SDR gain on clipped samples (dB)"));
+    }
+    v.extend([
+        ("runs_repaired", "Runs repaired"),
+        ("fallbacks", "Fallbacks"),
+        ("runs_rejected", "Runs rejected"),
+        ("runs_too_long", "Runs too long"),
+        ("max_overshoot_db", "Largest overshoot (dB)"),
+        ("change_db", "Change (dB)"),
+    ]);
+    v
+}
+
+/// Clean speech and music for the declipper groups that clip on purpose.
+pub const DECLIP_CLEAN_CLIPS: &[&str] = &[
+    "vctk_p225_mic1_concat",
+    "vctk_p245_mic1_concat",
+    "librivox_ssc113_10_mkirkpat",
+    "librispeech_2277-149874-0000",
+    "musan_us-gov-0001_hearing",
+    "kmacleod_boogie_party",
+    "kmacleod_burn_the_world_waltz",
+    "musan_hd-0026_dvorak_quartet10_finale",
+];
+
 /// Every group of the listening kit.
 pub fn groups() -> Vec<Group> {
     let broadcast_columns = vec![
@@ -500,7 +622,70 @@ pub fn groups() -> Vec<Group> {
             pre: None,
             configs: strip,
         },
+        Group {
+            id: "declipper-3db",
+            label: "Declipper: speech and music clipped 3 dB",
+            about: "Clean speech and music hard-clipped 3 dB below their peak, then stromdsp-declipper in its three latency settings. Compare each with the original: the SDR gain is measured on the clipped samples against it. The declipper's output is louder at the peaks than its input; in a chain a limiter follows it.",
+            clips: ClipSet::Ids(DECLIP_CLEAN_CLIPS),
+            columns: declipper_columns(true),
+            pre: Some(Pre {
+                id: "clipped",
+                label: "clipped 3 dB",
+                about: "The original hard-clipped 3 dB below its sample peak.",
+                run: clip_3db,
+            }),
+            configs: declipper_configs(),
+        },
+        Group {
+            id: "declipper-6db",
+            label: "Declipper: speech and music clipped 6 dB",
+            about: "As the 3 dB group, clipped 6 dB below the peak.",
+            clips: ClipSet::Ids(DECLIP_CLEAN_CLIPS),
+            columns: declipper_columns(true),
+            pre: Some(Pre {
+                id: "clipped",
+                label: "clipped 6 dB",
+                about: "The original hard-clipped 6 dB below its sample peak.",
+                run: clip_6db,
+            }),
+            configs: declipper_configs(),
+        },
+        Group {
+            id: "declipper-10db",
+            label: "Declipper: speech and music clipped 10 dB",
+            about: "As the 3 dB group, clipped 10 dB below the peak: heavy clipping, where the work budget runs out on dense passages and some runs get the cheap fallback. A clip level below min-level (-20 dBFS) is left alone: kmacleod_boogie_party, compressed music at -23 LUFS, clips at -20.8 dBFS here.",
+            clips: ClipSet::Ids(DECLIP_CLEAN_CLIPS),
+            columns: declipper_columns(true),
+            pre: Some(Pre {
+                id: "clipped",
+                label: "clipped 10 dB",
+                about: "The original hard-clipped 10 dB below its sample peak.",
+                run: clip_10db,
+            }),
+            configs: declipper_configs(),
+        },
+        Group {
+            id: "declipper-recorded",
+            label: "Declipper: recordings that clipped",
+            about: "Corpus recordings that were clipped or overdriven before they reached us, through stromdsp-declipper. No clean reference exists, so there is no SDR; the counters show what it found. Overdrive that is soft (saturation) rather than flat is not repaired.",
+            clips: ClipSet::Categories(&["5_clipped_overdriven"]),
+            columns: declipper_columns(false),
+            pre: None,
+            configs: declipper_configs(),
+        },
     ]
+}
+
+/// SDR (dB) of `y` against `x` over the samples where `mask` is set.
+pub fn masked_sdr(x: &[f32], y: &[f32], mask: &[bool]) -> f64 {
+    let (mut s, mut e) = (0.0f64, 0.0f64);
+    for ((&a, &b), &m) in x.iter().zip(y).zip(mask) {
+        if m {
+            s += f64::from(a) * f64::from(a);
+            e += (f64::from(a) - f64::from(b)).powi(2);
+        }
+    }
+    10.0 * (s / e.max(1e-30)).log10()
 }
 
 /// What to render.
@@ -572,23 +757,33 @@ fn numbers_json(n: &Numbers) -> Value {
     )
 }
 
-/// Render one set: returns its JSON entry.
-fn render_set(group: &Group, clip: &Clip, opts: &RenderOptions) -> io::Result<Value> {
-    let native = audio::decode(&opts.corpus.join(&clip.file), clip.channels)?;
+/// A set's original: `clip` decoded from `corpus`, cut to `max_seconds`, as
+/// stereo, scaled to [`REFERENCE_LUFS`]. Also returns the clip's own
+/// loudness before scaling (LUFS).
+pub fn set_original(corpus: &Path, clip: &Clip, max_seconds: f64) -> io::Result<(Vec<f32>, f64)> {
+    let native = audio::decode(&corpus.join(&clip.file), clip.channels)?;
     let ch = clip.channels.max(1);
-    let max_frames = (opts.max_seconds * FS) as usize;
+    let max_frames = (max_seconds * FS) as usize;
     let frames = (native.len() / ch).min(max_frames);
     let mut x = to_stereo(&native[..frames * ch], ch);
     let now = metrics::loudness(&x, CH, FS).integrated_lufs;
     if now.is_finite() && now > -70.0 {
         x = scaled(&x, db_to_lin(REFERENCE_LUFS - now));
     }
+    Ok((x, now))
+}
+
+/// Render one set: returns its JSON entry.
+fn render_set(group: &Group, clip: &Clip, opts: &RenderOptions) -> io::Result<Value> {
+    let ch = clip.channels.max(1);
+    let (x, now) = set_original(&opts.corpus, clip, opts.max_seconds)?;
 
     // (id, label, stereo audio, numbers)
     let mut versions: Vec<(String, String, Vec<f32>, Numbers)> = Vec::new();
     let mut n = Numbers::new();
     n.insert("clip_lufs".into(), now.is_finite().then_some(now));
     versions.push(("original".into(), "original".into(), x.clone(), n));
+    let original = x.clone();
     let input = match &group.pre {
         Some(pre) => {
             let y = (pre.run)(&x);
@@ -597,6 +792,17 @@ fn render_set(group: &Group, clip: &Clip, opts: &RenderOptions) -> io::Result<Va
         }
         None => x,
     };
+    // With a pre step: the samples it changed, to measure how much of the
+    // damage each configuration undoes.
+    let damaged: Option<Vec<bool>> = group.pre.as_ref().map(|_| {
+        original
+            .iter()
+            .zip(&input)
+            .map(|(a, b)| a.to_bits() != b.to_bits())
+            .collect()
+    });
+    let damaged = damaged.filter(|m| m.iter().any(|&d| d));
+    let damaged_sdr = damaged.as_ref().map(|m| masked_sdr(&original, &input, m));
     for c in &group.configs {
         let r = (c.run)(&input);
         if r.output.len() != input.len() || r.output.iter().any(|v| !v.is_finite()) {
@@ -605,7 +811,12 @@ fn render_set(group: &Group, clip: &Clip, opts: &RenderOptions) -> io::Result<Va
                 group.id, clip.id, c.id
             )));
         }
-        versions.push((c.id.clone(), c.label.clone(), r.output, r.numbers));
+        let mut numbers = r.numbers;
+        if let (Some(m), Some(before)) = (&damaged, damaged_sdr) {
+            let gain = masked_sdr(&original, &r.output, m) - before;
+            numbers.insert("repair_sdr_gain_db".into(), Some(gain));
+        }
+        versions.push((c.id.clone(), c.label.clone(), r.output, numbers));
     }
 
     let peak = versions
@@ -643,7 +854,7 @@ fn render_set(group: &Group, clip: &Clip, opts: &RenderOptions) -> io::Result<Va
         "group": group.id,
         "clip": clip.id,
         "dir": rel,
-        "seconds": frames as f64 / FS,
+        "seconds": (original.len() / CH) as f64 / FS,
         "gain_db": (gain_db * 100.0).round() / 100.0,
         "versions": out_versions,
     });
@@ -760,6 +971,19 @@ mod tests {
     fn advance_removes_latency() {
         let x: Vec<f32> = (0..10).map(|v| v as f32).collect();
         assert_eq!(advance(&x, 2), vec![4., 5., 6., 7., 8., 9., 0., 0., 0., 0.]);
+    }
+
+    #[test]
+    fn clip_below_peak_and_masked_sdr() {
+        let x = [0.1f32, -0.8, 0.5, 1.0, -0.2];
+        let y = clip_below_peak(&x, 6.0);
+        let c = db_to_lin(-6.0) as f32;
+        assert_eq!(y, vec![0.1, -c, 0.5, c, -0.2]);
+        let mask = [false, true, false, true, false];
+        // Errors 0.8 - c and 1 - c on samples of energy 0.64 + 1.
+        let e = (0.8 - f64::from(c)).powi(2) + (1.0 - f64::from(c)).powi(2);
+        let want = 10.0 * (1.64 / e).log10();
+        assert!((masked_sdr(&x, &y, &mask) - want).abs() < 1e-5);
     }
 
     #[test]

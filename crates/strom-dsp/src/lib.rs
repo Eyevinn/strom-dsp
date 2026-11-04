@@ -8,10 +8,10 @@
 //! - [`Equalizer`]: up to 8 RBJ-cookbook biquad bands in series.
 //! - [`Limiter`]: lookahead sample-peak limiter.
 //!
-//! Further processors live in their modules: [`deesser`], [`ducker`],
-//! [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`] (with its
-//! [`bassclip`]), [`truepeak`] (true-peak limiter), [`spike_guard`],
-//! [`clipper`] (final clipper) and
+//! Further processors live in their modules: [`declipper`], [`deesser`],
+//! [`ducker`], [`delay`], [`stereo`], [`cleanup`], [`agc`], [`multiband`]
+//! (with its [`bassclip`]), [`truepeak`] (true-peak limiter),
+//! [`spike_guard`], [`clipper`] (final clipper) and
 //! [`broadcast`] (the broadcast chain,
 //! with its [`presets`]). Measurement is in [`meter`]; the building blocks
 //! ([`biquad`], [`filter`], [`oversample`], [`resample`], [`stft`],
@@ -39,6 +39,7 @@ pub mod broadcast;
 pub mod cleanup;
 pub mod clipper;
 pub mod compressor;
+pub mod declipper;
 pub mod deesser;
 pub mod delay;
 pub mod ducker;

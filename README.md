@@ -9,7 +9,7 @@ it, built for the [Strom](https://github.com/Eyevinn/strom) live media engine.
   channel count and 8–192 kHz. It uses SIMD with runtime dispatch (NEON,
   SSE4.2/AVX2/AVX-512).
 - **`gst-plugin-stromdsp`** (`crates/gst-plugin-stromdsp`): the GStreamer
-  plugin `stromdsp` with eleven elements. It builds as a `cdylib` (for
+  plugin `stromdsp` with twelve elements. It builds as a `cdylib` (for
   `GST_PLUGIN_PATH`) and as an `rlib` for static linking
   (`gststromdsp::plugin_register_static()`).
 
@@ -28,6 +28,7 @@ dependency with its licence.
 | [`stromdsp-ducker`](docs/elements/ducker.md) | Lowers the programme while a sidechain key is present |
 | [`stromdsp-deesser`](docs/elements/deesser.md) | Sibilance reduction, split-band or wideband |
 | [`stromdsp-cleanup`](docs/elements/cleanup.md) | DC, rumble and hum removal |
+| [`stromdsp-declipper`](docs/elements/declipper.md) | Repairs hard-clipped audio (opt-in per input; put a limiter after it), 3 / 5 / 10 ms latency |
 | [`stromdsp-delay`](docs/elements/delay.md) | Intentional delay for alignment and lip sync |
 | [`stromdsp-stereo`](docs/elements/stereo.md) | Balance, width, mono, swap, M/S and polarity |
 | [`stromdsp-meter`](docs/elements/meter.md) | Loudness (BS.1770), peak, true peak, RMS and correlation meter |
@@ -35,8 +36,8 @@ dependency with its licence.
 
 The first four form the channel strip. Every processing element has an
 `enabled` property that crossfades to a bit-exact bypass, every
-PLAYING-mutable property changes without clicks, and only the limiter and the
-broadcast processor add latency. The shared conventions (bypass, latency,
+PLAYING-mutable property changes without clicks, and only the limiter, the
+declipper and the broadcast processor add latency. The shared conventions (bypass, latency,
 caps, linked channels, defaults) are in the
 [element overview](docs/elements/README.md).
 

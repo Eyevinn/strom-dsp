@@ -11,6 +11,7 @@
 mod agc_support;
 mod clip_metrics;
 mod counting_alloc;
+mod declipper_support;
 mod measure_support;
 mod programme_support;
 
@@ -27,6 +28,9 @@ mod compressor;
 mod compressor_1b;
 mod compressor_auto_makeup;
 mod compressor_thd;
+mod declipper;
+mod declipper_known_level;
+mod declipper_quality;
 mod deesser;
 mod delay;
 mod denormals;
@@ -48,6 +52,7 @@ mod rtsan;
 mod rtsan_agc;
 mod rtsan_broadcast;
 mod rtsan_compressor_1b;
+mod rtsan_declipper;
 mod rtsan_deesser_cleanup;
 mod rtsan_delay_stereo;
 mod rtsan_ducker;
