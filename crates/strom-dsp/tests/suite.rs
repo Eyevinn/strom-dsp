@@ -72,3 +72,12 @@ mod spike_guard;
 mod stereo;
 mod stft;
 mod truepeak;
+
+/// Cases per property test: `default`, or `PROPTEST_CASES` when set (the
+/// extended workflow runs many more).
+fn proptest_cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}

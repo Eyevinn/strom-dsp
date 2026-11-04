@@ -113,7 +113,7 @@ jobs:
       - run: cargo test --release -p strom-dsp-harness --test declipper_corpus -- --ignored --nocapture
 
   long-runs:
-    name: Long programme runs
+    name: Long runs (programme, property tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,3 +124,7 @@ jobs:
       # governor). The baseline in the default suite guards the same
       # readings per change (crates/strom-dsp-harness/tests/long_runs/).
       - run: cargo test --release -p strom-dsp-harness --test long_runs -- --ignored --nocapture
+      # The property tests with many more cases than the default suite's.
+      - run: cargo test --release -p strom-dsp --test suite -- never_amplifies_beyond_makeup prop_ceiling_guarantee prop_true_peak_guarantee
+        env:
+          PROPTEST_CASES: "5000"

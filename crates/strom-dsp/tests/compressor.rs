@@ -477,7 +477,7 @@ fn no_allocation_in_process_or_set_params() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(crate::proptest_cases(64)))]
 
     /// With fixed parameters a downward compressor never raises the level beyond
     /// the makeup gain, and never produces NaN/Inf.
