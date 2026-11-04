@@ -3,7 +3,7 @@
 //! flags, no extra properties, klass, pads, and that the element is never a
 //! BaseTransform passthrough.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

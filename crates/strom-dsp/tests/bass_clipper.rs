@@ -14,12 +14,9 @@
 //!   latency is reported.
 //! - Threshold and enable changes are click-free; no allocation.
 
-mod measure_support;
+use crate::measure_support;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
-use measure_support::{bass_into_highs, db, lin, rms, sine, tone_amplitude};
+use crate::measure_support::{bass_into_highs, db, lin, rms, sine, tone_amplitude};
 use strom_dsp::bassclip::{BassClipper, BassClipperParams, BassEnvelope};
 use strom_dsp::compressor::CompressorDetector;
 use strom_dsp::filter::{Crossover, CrossoverParams, LrOrder};
@@ -28,32 +25,7 @@ use strom_dsp::multiband::{
 };
 use strom_dsp::Processor;
 
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn allocs() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 const FS: f64 = 48_000.0;
 /// The broadcast chain's standard bass lookahead (1 ms).

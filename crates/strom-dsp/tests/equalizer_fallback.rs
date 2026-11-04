@@ -5,5 +5,7 @@
 //! level detected at `configure`; `tests/simd_equivalence.rs` compares the two
 //! paths sample by sample.
 
+// Deliberately a second copy of `equalizer.rs` (the first is `crate::equalizer`).
+#[allow(clippy::duplicate_mod)]
 #[path = "equalizer.rs"]
 mod suite;

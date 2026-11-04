@@ -11,8 +11,6 @@
 //!
 //! "Per-channel peak level" in both documents is the sine amplitude in dBFS.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::f64::consts::PI;
 
 use strom_dsp::meter::{
@@ -20,35 +18,7 @@ use strom_dsp::meter::{
     MonoDetector, MonoDetectorParams, StereoState, MAX_LOUDNESS_CHANNELS,
 };
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Signal helpers.
@@ -642,7 +612,7 @@ fn loudness_meter_never_allocates_after_setup() {
                 .map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 1.0)
                 .collect();
             let total_frames = (if ch <= 2 { 610.0 } else { 30.0 } * rate) as usize;
-            let before = alloc_count();
+            let before = allocs();
             let mut frames = 0;
             let mut i = 0;
             let mut sink = 0.0;
@@ -662,7 +632,7 @@ fn loudness_meter_never_allocates_after_setup() {
                     m.reset();
                 }
             }
-            assert_eq!(alloc_count() - before, 0, "tp={true_peak} ch={ch}");
+            assert_eq!(allocs() - before, 0, "tp={true_peak} ch={ch}");
             assert!(!sink.is_nan());
         }
     }
@@ -681,15 +651,15 @@ fn ebur128_default_mode_allocates_histogram_mode_does_not() {
         .collect();
     let run = |mode: Mode| -> (usize, usize) {
         let mut e = EbuR128::new(1, rate, mode).unwrap();
-        let start = alloc_count();
+        let start = allocs();
         for _ in 0..5_200 {
             e.add_frames_f32(&block).unwrap();
         }
-        let add = alloc_count() - start;
-        let start = alloc_count();
+        let add = allocs() - start;
+        let start = allocs();
         let _ = e.loudness_range().unwrap();
         let _ = e.loudness_global().unwrap();
-        (add, alloc_count() - start)
+        (add, allocs() - start)
     };
     let (add_q, read_q) = run(Mode::I | Mode::LRA);
     let (add_h, read_h) = run(Mode::I | Mode::LRA | Mode::HISTOGRAM);
@@ -986,7 +956,7 @@ fn correlation_and_detector_never_allocate() {
     let mut noise = Noise(5);
     let sig: Vec<f32> = (0..2 * 4096).map(|_| noise.next()).collect();
     let (l, r): (Vec<f32>, Vec<f32>) = sig.as_chunks::<2>().0.iter().map(|f| (f[0], f[1])).unzip();
-    let before = alloc_count();
+    let before = allocs();
     let mut sink = 0.0;
     for i in 0..500 {
         let n = [1usize, 480, 7, 4096][i % 4];
@@ -1005,6 +975,6 @@ fn correlation_and_detector_never_allocate() {
             d.reset();
         }
     }
-    assert_eq!(alloc_count() - before, 0);
+    assert_eq!(allocs() - before, 0);
     assert!(sink.is_finite());
 }

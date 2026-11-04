@@ -7,7 +7,7 @@
 //! `reset` execute inside a real-time scope.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_multiband_expander_bass
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_multiband_expander_bass::
 //! ```
 
 #![cfg(feature = "rtsan")]

@@ -16,13 +16,10 @@
 //!   output reaches the target and the governor reports the budget
 //!   excess, not a deficit.
 
-mod agc_support;
-mod programme_support;
-
 use std::f64::consts::PI;
 
-use agc_support::{noise, pink, scale_to_lufs, Looper};
-use programme_support::peaky_programme;
+use crate::agc_support::{noise, pink, scale_to_lufs, Looper};
+use crate::programme_support::peaky_programme;
 use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor};
 use strom_dsp::governor::{depth_target_db, GovernorState};
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};

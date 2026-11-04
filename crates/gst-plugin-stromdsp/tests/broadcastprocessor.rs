@@ -8,8 +8,9 @@
 //! tests stay meaningful whatever the chain does (including while it is a
 //! passthrough stub).
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
@@ -17,7 +18,6 @@ use gststromdsp::broadcastprocessor::{MESSAGE_NAME, SILENCE_DB};
 use strom_dsp::broadcast::{BroadcastMeters, BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::presets::BroadcastPreset;
 use strom_dsp::Processor;
-use util::{Action, FORMATS, TOL};
 
 const FACTORY: &str = "stromdsp-broadcastprocessor";
 

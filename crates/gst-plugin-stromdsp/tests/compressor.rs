@@ -1,11 +1,11 @@
 //! Harness tests for `stromdsp-compressor`.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use strom_dsp::{presets, Compressor, CompressorParams};
-use util::{Action, FORMATS, TOL};
 
 fn params() -> CompressorParams {
     CompressorParams {

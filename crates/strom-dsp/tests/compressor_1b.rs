@@ -3,39 +3,11 @@
 //! against the documented formulas, RMS timing, switching while running,
 //! and zero allocations.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use strom_dsp::compressor::{CompressorDetector, DEFAULT_RMS_WINDOW_MS, RMS_WINDOW_RANGE};
 use strom_dsp::util::lin_to_db;
 use strom_dsp::{Compressor, CompressorParams, Processor};
 
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 const FS: f32 = 48_000.0;
 
@@ -276,7 +248,7 @@ fn no_allocation_in_new_setters_and_process() {
     let mut buf: Vec<f32> = (0..2 * 1024)
         .map(|i| ((i as f32) * 0.37).sin() * 0.8)
         .collect();
-    let before = alloc_count();
+    let before = allocs();
     for i in 0..60usize {
         c.set_detector(if i.is_multiple_of(3) {
             CompressorDetector::Rms
@@ -296,7 +268,7 @@ fn no_allocation_in_new_setters_and_process() {
             c.reset();
         }
     }
-    assert_eq!(alloc_count() - before, 0);
+    assert_eq!(allocs() - before, 0);
 }
 
 #[test]

@@ -11,7 +11,7 @@
 //!   stops and is unlinked, and a requested but never linked sidechain, never
 //!   stall the programme, which recovers to unity.
 
-mod util;
+use crate::util;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

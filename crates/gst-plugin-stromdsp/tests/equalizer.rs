@@ -1,11 +1,11 @@
 //! Harness tests for `stromdsp-equalizer`.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use strom_dsp::{BandType, Equalizer, EqualizerParams};
-use util::{Action, FORMATS, TOL};
 
 fn params() -> EqualizerParams {
     let mut p = EqualizerParams {

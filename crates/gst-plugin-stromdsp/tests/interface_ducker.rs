@@ -5,7 +5,7 @@
 //! metadata and the pad templates. This is the contract documented in
 //! `docs/elements/ducker.md`; the test fails if anything drifts from it.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

@@ -3,7 +3,7 @@
 //! bit-exact passthrough, the `reset` signal, `true-peak=false`, silence and
 //! the channel-position mapping.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

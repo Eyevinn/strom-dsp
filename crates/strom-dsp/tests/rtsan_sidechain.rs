@@ -9,7 +9,7 @@
 //! lock or blocking call there aborts the test.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_sidechain
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_sidechain::
 //! ```
 //!
 //! Setup (`new`, `configure`, `set_key_channels`, signal generation) happens

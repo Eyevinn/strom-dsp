@@ -3,44 +3,13 @@
 //! at another rate and channel count, the missing-key path, robustness at the
 //! extremes, SIMD-level bit identity and zero allocations.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use strom_dsp::biquad::uses_fma;
 use strom_dsp::ducker::{Ducker, DuckerParams, RangeMode};
 use strom_dsp::gate::DETECTOR_RMS_MS;
 use strom_dsp::simd::{detect, Level};
 use strom_dsp::Processor;
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -472,7 +441,7 @@ fn zero_allocations_after_setup() {
     let prog = sine(0.5, 220.0, 48_000, 2, FS);
     let key = sine(0.5, 1000.0, 16_000, 1, 16_000.0);
     let mut buf = prog.clone();
-    let before = alloc_count();
+    let before = allocs();
     for (i, (pc, kc)) in buf.chunks_mut(960).zip(key.chunks(160)).enumerate() {
         d.set_params(&DuckerParams {
             threshold_db: -20.0 - (i % 30) as f32,
@@ -495,5 +464,5 @@ fn zero_allocations_after_setup() {
         }
         let _ = (d.reduction_db(), d.key_active(), d.key_level_db());
     }
-    assert_eq!(alloc_count() - before, 0, "process path allocated");
+    assert_eq!(allocs() - before, 0, "process path allocated");
 }

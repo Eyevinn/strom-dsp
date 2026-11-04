@@ -9,7 +9,7 @@
 //! the test.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_truepeak
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_truepeak::
 //! ```
 //!
 //! Setup (`new`, `configure`, buffers, signal generation) happens outside the

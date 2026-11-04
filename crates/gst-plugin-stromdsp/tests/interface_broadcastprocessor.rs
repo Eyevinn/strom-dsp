@@ -3,7 +3,7 @@
 //! `crossover-frequencies`, the action signals, metadata and pad templates.
 //! This is the element's public contract: it must fail if anything drifts.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

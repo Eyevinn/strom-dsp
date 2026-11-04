@@ -11,7 +11,7 @@
 //! call or other non-real-time-safe call in that scope aborts the test.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_broadcast
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_broadcast::
 //! ```
 //!
 //! Setup (`new`, `configure`, buffers, signal generation) happens outside the

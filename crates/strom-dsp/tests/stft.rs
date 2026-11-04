@@ -3,38 +3,11 @@
 //! latency by impulse, spectral modifications behave as theory says, the
 //! callback sees the right channel, and zero allocations in `process`.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::f64::consts::PI;
 
 use strom_dsp::stft::{Complex32, Stft, StftHop};
 
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-struct CountingAlloc;
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn allocs() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 const FRAMES: [usize; 5] = [256, 512, 1024, 2048, 4096];
 const HOPS: [StftHop; 2] = [StftHop::Half, StftHop::Quarter];

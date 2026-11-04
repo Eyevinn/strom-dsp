@@ -3,14 +3,14 @@
 //! `enabled=false` are bit-exact, routing modes are bit-exact, caps other than
 //! 2 channels are refused, and the latency query is unchanged.
 
-mod util;
+use crate::util;
 
+use crate::util::Action;
 use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
 use gststromdsp::stereo::{MonoLaw, StereoMode};
 use strom_dsp::stereo::{Stereo, StereoParams};
-use util::Action;
 
 const FORMATS: [u32; 2] = [48_000, 22_050];
 
