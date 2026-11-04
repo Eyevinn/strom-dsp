@@ -365,7 +365,7 @@ lightly (clip depth −50 … −63 dB on the peaky, clicky and speech-like
 programmes, −102 dB on music); the limiter's mean gain reduction stays at
 or under 0.29 dB. A 60 s synthetic programme, and the hot, peaky, sport-like one,
 also meet ±1 LU and the ceiling + 0.1 dB in the chain tests
-(`tests/broadcast.rs`, `ebur128`), and the short-term loudness is back
+(`strom-dsp-harness/tests/long_runs/broadcast.rs`, `ebur128`), and the short-term loudness is back
 within 1 LU of target after a 10 s pause.
 
 **Output-referenced trim:** the multiband stage and the limiter come after the

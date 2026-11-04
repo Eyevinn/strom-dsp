@@ -482,7 +482,7 @@ fn lookahead_cost(la: usize) -> (f64, f64, f64, f64) {
 /// 12.0 dB, none to 12.0 dB; decaying thumps peak 10.4 / 11.4 / 11.4 dB
 /// over. What passes goes on to the final clipper (which leaves bass alone)
 /// and the true-peak limiter; the chain-level cost is measured in
-/// `tests/broadcast_latency.rs`.
+/// the harness (`strom-dsp-harness/tests/long_runs/latency_modes.rs`).
 #[test]
 fn lookahead_cost_is_pinned() {
     // (lookahead ms, onset overshoot dB, thump peak dB over), measured.

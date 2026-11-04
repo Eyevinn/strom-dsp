@@ -13,4 +13,6 @@
 //! on short, pre-levelled cases; each module names the baseline metrics
 //! that stand in for it and what only the long run checks.
 
+mod broadcast;
 mod governor;
+mod latency_modes;
