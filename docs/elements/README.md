@@ -1,6 +1,6 @@
 # Elements
 
-The GStreamer plugin `stromdsp` has eleven elements. Each page below has the
+The GStreamer plugin `stromdsp` has twelve elements. Each page below has the
 full property table, the behaviour, the latency, the reasons for the defaults,
 any message format and a `gst-launch-1.0` example.
 
@@ -13,6 +13,7 @@ any message format and a `gst-launch-1.0` example.
 | [`stromdsp-ducker`](ducker.md) | utility | lowers the programme while a sidechain key is present | none |
 | [`stromdsp-deesser`](deesser.md) | utility | sibilance reduction, split-band or wideband | none |
 | [`stromdsp-cleanup`](cleanup.md) | utility | DC, rumble and hum removal | none |
+| [`stromdsp-declipper`](declipper.md) | utility | repairs hard-clipped audio; opt-in per input, needs a limiter after it | `latency-mode`: `low` 3 ms, `standard` 5 ms, `high` 10 ms |
 | [`stromdsp-delay`](delay.md) | utility | intentional delay for alignment (not reported as latency) | none |
 | [`stromdsp-stereo`](stereo.md) | utility | balance, width, mono, swap, M/S, polarity | none |
 | [`stromdsp-meter`](meter.md) | measurement | loudness, peak, RMS and correlation meter | none |
@@ -27,9 +28,10 @@ The rules every element follows, and the tests that enforce them, are in
 
 Every processing element has an `enabled` property, mutable while PLAYING.
 Toggling `enabled` crossfades between processed and dry (20 ms for most
-elements, 10 ms for the limiter, stereo and broadcast processor), then the
+elements, 10 ms for the limiter, stereo, declipper and broadcast processor), then the
 output is bit-exact, delayed by the element's reported latency (zero for most
-elements; the limiter and the broadcast processor keep their lookahead delay).
+elements; the limiter, the declipper and the broadcast processor keep their
+delay).
 
 `stromdsp-meter` has no `enabled` property: it never changes the samples.
 
@@ -43,6 +45,9 @@ None of the elements adds latency, except:
   `standard` 269 frames (5.60 ms) at 48 kHz, at most 6 ms at 44.1, 48 and
   96 kHz; `low` 133 frames (2.77 ms), at most 3 ms. The formula is on its
   page. The same with `enabled=false` and with any stage bypassed.
+- `stromdsp-declipper`: set by `latency-mode` (READY-only): `low` 3 ms,
+  `standard` 5 ms, `high` 10 ms (`floor(ms · fs)` frames, at most the
+  setting at any rate). The same with `enabled=false`.
 
 The content delay of `stromdsp-delay` is not latency: it is not reported, and
 timestamps pass through unchanged.
@@ -69,7 +74,7 @@ in-place `BaseTransform`s:
 ### Utility and measurement elements
 
 Units are dB, ms and Hz. Every property is mutable while PLAYING unless
-noted. None of these elements adds latency.
+noted. None of these elements adds latency, except the declipper.
 
 ### Linked channels
 
