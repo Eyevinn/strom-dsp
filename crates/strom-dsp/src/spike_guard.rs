@@ -24,9 +24,29 @@
 //!   click) and the ramp after one, so the programme level it tracks is not
 //!   raised by the spikes it judges. It counts as at least
 //!   [`ENVELOPE_FLOOR`] (−60 dBFS).
-//! - **Event (causal).** With `T` the threshold (dB) as a factor, the cap
-//!   is `L = e·T` and the knee is `a = L·K` (`K` = −[`KNEE_DB`]). A frame
-//!   with `p > L` starts an event at once; `L` and `a` are frozen for it.
+//! - **Rise gate.** With `T` the threshold (dB) as a factor, the cap is
+//!   `L = e·T`. A frame with `p > L` is an excursion; it starts an event
+//!   only if it looks like a click in the base-rate input that the
+//!   interpolator's delay already buffers (the 24 frames from the frame
+//!   the detector sees, `n`, to the newest; no added latency). With `j`
+//!   the frame of the largest `|x|` from `n − 1` to the end of the longest
+//!   core ([`EVENT_MAX_MS`]):
+//!   1. the one-sample step `|x[j] − x[j−1]|` exceeds the cap by
+//!      [`RISE_OVER_CAP_DB`] (0 dB): it gets to its peak at once;
+//!   2. the [`RISE_FROM_PROGRAMME_FRAMES`] (2) samples before `j` are at or
+//!      under the cap: it rises from the programme level;
+//!   3. nothing above its core level comes back in the isolation window
+//!      ([`EVENT_MAX_MS`] … [`EVENT_MAX_MS`] + [`ISOLATION_MS`] after `n`).
+//!      Up to 48 kHz the buffer holds all of it; above, where it reaches
+//!      only 0.25 ms, the check covers the last 7 buffered frames.
+//!
+//!   Speech, tones, noise bursts and drum onsets build up over several
+//!   samples or recur, so they fail it; a refused excursion's peak goes
+//!   into the envelope at once, so the rest of it is judged against
+//!   itself. A single-sample click passes.
+//! - **Event (causal).** The knee is `a = L·K` (`K` = −[`KNEE_DB`]). An
+//!   excursion that passes the rise gate starts an event at once; `L` and
+//!   `a` are frozen for it.
 //!   The event's **core** is its frames above `max(a, P·C)`, with `P` its
 //!   largest peak so far and `C` = [`CORE_DB`] (−20 dB, which leaves out
 //!   the interpolator ringing of a large click). The event is
@@ -54,12 +74,14 @@
 //! - **Abandoned events.** An event is abandoned at most `EVENT_MAX_MS +
 //!   ISOLATION_MS` (0.4 ms) after it starts. With the standard 0.5 ms
 //!   lookahead the output has not read any of its dip by then, so the dip
-//!   is lifted completely: programme is never touched, however abruptly it
-//!   rises. With less lookahead the part already read stays: with none,
-//!   programme that rises abruptly more than the threshold above its own
-//!   recent peaks (a drum hit or a word after silence) loses up to 0.4 ms
-//!   of its onset to the cap, plus a ramp. Material that rises within its
-//!   own envelope is never touched.
+//!   is lifted completely. With less lookahead the part already read
+//!   stays, so the rise gate is what keeps programme untouched there: it
+//!   refuses an excursion that will be abandoned before an event starts.
+//!   Measured with no lookahead: a programme of chords, dense drums with
+//!   stick transients and sudden tones is bit-exact at 44.1, 48 and
+//!   96 kHz (without the rise gate 430 samples were cut, by up to
+//!   22.8 dB), and corpus speech through the broadcast chain measures the
+//!   same with the guard as without it.
 //!
 //! **Why a gain dip and not a waveform clipper.** A clipper at the 4× rate
 //! whose clippings are band-limited back to the base rate (US 6,337,999,
@@ -73,7 +95,9 @@
 //! gain times a band-limited signal stays band-limited, so nothing aliases.
 //!
 //! Basis: impulsive-noise detection against a signal envelope (Godsill &
-//! Rayner, *Digital Audio Restoration*, 1998); peak control ahead of the
+//! Rayner, *Digital Audio Restoration*, 1998), with our own rise gate
+//! (rise time and isolation in the buffered base-rate input; see
+//! `PROVENANCE.md`); peak control ahead of the
 //! gain control so it does not react, with a band-limited gain signal
 //! (US 5,737,434, expired); inter-sample peak detection by 4×
 //! interpolation (ITU-R BS.1770 Annex 2).
@@ -84,8 +108,9 @@
 //! ([`Oversampler`]) and the lookahead `La = round(lookahead · fs)`
 //! ([`latency_frames_for`]). Standard ([`STANDARD_LOOKAHEAD_MS`], 0.5 ms):
 //! 24 + 24 = 48 frames (1.0 ms) at 48 kHz; low latency
-//! ([`LOW_LATENCY_LOOKAHEAD_MS`], 0): 24 frames (0.5 ms), at the cost of
-//! the onset nips described above. The lookahead is
+//! ([`LOW_LATENCY_LOOKAHEAD_MS`], 0): 24 frames (0.5 ms); the rise gate
+//! keeps programme untouched there (see Abandoned events), and the dip of
+//! a click starts without a ramp before it. The lookahead is
 //! structural (applied at [`Processor::configure`]); the latency is
 //! constant for a configuration and independent of the parameters.
 //!
@@ -131,6 +156,20 @@ pub const STANDARD_LOOKAHEAD_MS: f32 = 0.5;
 pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.0;
 /// Largest lookahead (ms).
 pub const MAX_LOOKAHEAD_MS: f32 = 2.0;
+
+/// Rise gate: the one-sample step into an excursion's base-rate peak must
+/// exceed the cap by this much (dB) for the excursion to start an event.
+pub const RISE_OVER_CAP_DB: f32 = 0.0;
+/// Rise gate: base-rate samples before that step that must sit at or
+/// under the cap (the excursion rises from the programme level).
+pub const RISE_FROM_PROGRAMME_FRAMES: usize = 2;
+/// Rise gate: shortest isolation window the buffered input is checked over
+/// (frames; the window's length at 48 kHz).
+const PREVIEW_MIN_FRAMES: usize = 7;
+/// Rise gate: base-rate frames before the aligned frame searched for the
+/// excursion's peak (the interpolator's ringing reaches the detector a
+/// frame before the click).
+const RISE_BEFORE: usize = 1;
 
 /// Oversampling factor of the detector.
 const FACTOR: OversampleFactor = OversampleFactor::X4;
@@ -181,21 +220,6 @@ pub fn clamp_lookahead_ms(ms: f32) -> f32 {
     } else {
         ms.clamp(0.0, MAX_LOOKAHEAD_MS)
     }
-}
-
-/// Whether the spike guard is on by default at a lookahead of
-/// `lookahead_ms` (clamped): only when the lookahead covers the longest
-/// event and its isolation window ([`EVENT_MAX_MS`] + [`ISOLATION_MS`],
-/// 0.4 ms). Then an abandoned event (programme: a word or a drum hit
-/// after a pause) is lifted before the output reads any of its dip, and
-/// programme is never touched. With less, every onset that rises more than
-/// the threshold over the recent peaks loses part of its first 0.4 ms;
-/// on speech after pauses that is audible (measured in the chain: worst
-/// frame NMR on corpus speech up to +37 dB with no lookahead, about
-/// −8 dB with the guard off). The final clipper and the true-peak limiter still catch a
-/// click's peak, so the guard only stops clicks pumping the AGC.
-pub fn on_by_default(lookahead_ms: f32) -> bool {
-    clamp_lookahead_ms(lookahead_ms) as f64 >= EVENT_MAX_MS + ISOLATION_MS
 }
 
 fn rate_or_default(sample_rate: f32) -> f64 {
@@ -306,9 +330,19 @@ pub struct SpikeGuard {
     threshold_lin: f32,
     knee_lin: f32,
     core_lin: f32,
+    /// Rise gate factor ([`RISE_OVER_CAP_DB`], linear, re the cap).
+    rise_lin: f32,
+    /// Base-rate input ring (`BASE_LEN` frames × channels), by frame label.
+    base: Vec<f32>,
+    /// The current chunk's input (`CHUNK · channels`).
+    input: Vec<f32>,
     /// Spikes since the last [`take_events`](Self::take_events).
     events: u64,
 }
+
+/// Frames in the base-rate input ring: back to the aligned frame minus
+/// [`RISE_BEFORE`], and [`RISE_FROM_PROGRAMME_FRAMES`] before that.
+const BASE_LEN: usize = UP_LATENCY + RISE_BEFORE + RISE_FROM_PROGRAMME_FRAMES + 1;
 
 impl Default for SpikeGuard {
     fn default() -> Self {
@@ -342,6 +376,9 @@ impl SpikeGuard {
             threshold_lin: db_to_lin(DEFAULT_THRESHOLD_DB as f64) as f32,
             knee_lin: db_to_lin(-KNEE_DB as f64) as f32,
             core_lin: db_to_lin(CORE_DB as f64) as f32,
+            rise_lin: db_to_lin(RISE_OVER_CAP_DB as f64) as f32,
+            base: Vec::new(),
+            input: Vec::new(),
             events: 0,
         }
     }
@@ -488,6 +525,13 @@ impl SpikeGuard {
         }
         let env = (self.env[c].value() as f32).max(ENVELOPE_FLOOR);
         let level = env * self.threshold_lin;
+        if p > level && !self.looks_like_click(c, t, level) {
+            // Programme (it builds up, or recurs): no event, and the
+            // envelope takes this frame's peak at once, so the rest of the
+            // excursion is judged against it.
+            self.env[c].step(p as f64);
+            return;
+        }
         if p > level {
             let knee = level * self.knee_lin;
             let g = soft_knee(p, knee, level) / p;
@@ -511,6 +555,41 @@ impl SpikeGuard {
         }
     }
 
+    /// Rise gate (see the module docs): whether the excursion the detector
+    /// sees at `t` (input frame `n = t − 24`) looks like a click in the
+    /// base-rate input already buffered (`n − 3 … t`). `level` is the cap.
+    #[inline]
+    fn looks_like_click(&self, c: usize, t: u64, level: f32) -> bool {
+        let ch = self.channels;
+        let n = t - UP_LATENCY as u64;
+        let at = |f: u64| self.base[(f % BASE_LEN as u64) as usize * ch + c];
+        // The excursion's base-rate peak within the longest core.
+        let reach = n + self.timing.max_len.min(UP_LATENCY) as u64;
+        let (mut j, mut peak) = (n, 0.0f32);
+        for f in n - RISE_BEFORE as u64..=reach {
+            if at(f).abs() > peak {
+                peak = at(f).abs();
+                j = f;
+            }
+        }
+        // Near-instant: one sample takes it from the programme to the peak.
+        if (at(j) - at(j - 1)).abs() <= self.rise_lin * level {
+            return false;
+        }
+        for k in 1..=RISE_FROM_PROGRAMME_FRAMES as u64 {
+            if at(j - k).abs() > level {
+                return false;
+            }
+        }
+        // Isolated: its core does not come back in the isolation window
+        // (all of it is buffered up to 48 kHz). Above, the window keeps
+        // [`PREVIEW_MIN_FRAMES`] by starting before the longest core ends.
+        let core = (level * self.knee_lin).max(peak * self.core_lin);
+        let from = n + self.timing.max_len.min(UP_LATENCY - PREVIEW_MIN_FRAMES) as u64 + 1;
+        let to = (n + (self.timing.max_len + self.timing.isolation) as u64).min(t);
+        (from..=to).all(|f| at(f).abs() <= core)
+    }
+
     fn process_chunk(&mut self, chunk: &mut [f32]) {
         let ch = self.channels;
         let frames = chunk.len() / ch;
@@ -519,12 +598,15 @@ impl SpikeGuard {
         let ed = (self.timing.env_delay + 1) as u64;
         // Interpolate the new input, then replace it by the delayed input.
         self.os.upsample(chunk, &mut self.hi[..frames * w]);
+        self.input[..frames * ch].copy_from_slice(chunk);
         self.main.write_frames(chunk);
         self.main.read_frames(self.latency, chunk);
         for i in 0..frames {
             let t = self.frame;
             self.frame += 1;
             let slot = (t % ed) as usize;
+            let bslot = (t % BASE_LEN as u64) as usize * ch;
+            self.base[bslot..bslot + ch].copy_from_slice(&self.input[i * ch..(i + 1) * ch]);
             for c in 0..ch {
                 let mut p = 0.0f32;
                 for s in 0..OS {
@@ -575,6 +657,8 @@ impl Processor for SpikeGuard {
         self.latency = UP_LATENCY + self.timing.la;
         self.main.allocate(self.latency + CHUNK, channels);
         self.hi = vec![0.0; CHUNK * OS * channels];
+        self.input = vec![0.0; CHUNK * channels];
+        self.base = vec![0.0; BASE_LEN * channels];
         // Writes reach `ramp` frames past the newest; reads are `la` behind.
         self.gain_len = self.timing.la + self.timing.ramp + 2;
         self.gain = vec![1.0; self.gain_len * channels];
@@ -611,8 +695,9 @@ impl Processor for SpikeGuard {
         self.gain.fill(1.0);
         self.env_p.fill(0.0);
         self.env_skip.fill(false);
+        self.base.fill(0.0);
         // Labels start past every backward reach (lookahead and ramps).
-        self.frame = (self.gain_len + self.timing.ramp + 1) as u64;
+        self.frame = (self.gain_len + self.timing.ramp + 1 + BASE_LEN) as u64;
         self.counted_until = 0;
         for e in &mut self.env {
             e.reset();

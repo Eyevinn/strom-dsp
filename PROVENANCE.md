@@ -500,15 +500,16 @@ a large jump audible.
   `LatencyMode::Low` (none, none, low clipper, 0.6 ms; budget 3 ms). Each
   setting's cost is measured in the tests (overshoot, gain reduction,
   aliasing, onsets); the low limiter lookahead is 0.6 ms because 0.75 ms
-  put 44.1 kHz over the 3 ms budget. The low mode also switches the spike
-  guard off (and presets follow the mode): without lookahead it dips word
-  onsets after pauses, measured on corpus speech as a worst-frame NMR up
-  to +37 dB against about −8 dB with it off; the final clipper and the
-  limiter still take a click's peak.
+  put 44.1 kHz over the 3 ms budget.
 - **Speech preset without the final clipper** (own choice, measured): at
   −18 LUFS the clipper clipped speech peaks, worst-frame NMR up to +35 dB
-  on phone speech, so the `speech` preset leaves the peaks to the
-  limiter.
+  on phone speech (+2.7 dB without it), so the `speech` preset leaves the
+  peaks to the limiter.
+- **Crackle acceptance check** (own test design, `strom-dsp-harness`
+  `crackle`): worst per-frame NMR (the harness's own NMR model, see
+  Measurement harness) under 0 dB over the corpus speech and phone clips
+  for every preset and latency mode, known failures listed with their
+  measured cause.
 - **IM feedback wiring:** the final clipper's touched share is handed to
   the bass clipper once per 512 frames (one chunk late, since the clipper
   runs after the multiband).
@@ -599,7 +600,25 @@ Own design choices:
   standard 0.5 ms lookahead the decision is made before the output reads
   any of the dip, so an abandoned event leaves the programme bit-exact;
   with no lookahead the output keeps up to 0.4 ms of the dip (an onset
-  "nip"), which the tests measure.
+  "nip").
+- **Rise gate** (own refinement of the envelope detection above, not from
+  the textbook): an excursion over the cap starts an event only if, in
+  the base-rate input the 4× interpolator already buffers (24 frames, no
+  added latency), (1) the one-sample step into its peak exceeds the cap,
+  (2) the two samples before that step are at or under the cap (it rises
+  from the programme level), and (3) nothing above its core comes back in
+  the isolation window (0.25 … 0.4 ms after its start; at 88.2 kHz and
+  above, where the buffer reaches only 0.25 ms, the last 7 buffered
+  frames). A refused excursion goes into the envelope at once. Measured
+  thresholds: the step at −3 dB re the cap let plosives through on corpus
+  speech (+2.1 dB worst-frame NMR in the low mode), 0 and +3 dB were
+  clean, and +6 dB lost harness clicks (58 of 78 caught instead of 69);
+  0 dB is used. Each of the three conditions is needed (worst-frame NMR
+  of the low mode on corpus speech, −9.3 dB with all three): without (1)
+  +14.1 dB, without (3) +7.6 dB, without (2) at least −0.7 dB (a
+  high-frequency word onset was dipped). With it the low mode needs no lookahead: corpus speech measures
+  the same with the guard as without it, and the test clicks are caught
+  as before.
 - **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
   interpolator's ringing before a large click) and the ramp after a spike
   stay out of the envelope; an abandoned event's peak goes into it at once.

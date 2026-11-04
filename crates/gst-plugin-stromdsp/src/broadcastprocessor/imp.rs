@@ -710,16 +710,9 @@ fn meter_structure(
 }
 
 /// The structure returned by `get-preset-values` and
-/// `get-preset-values-for-bands` for `preset` at `num_bands`, with the
-/// latency settings of `current` (they decide `spike-guard-enabled`).
-fn preset_structure(
-    preset: BroadcastPreset,
-    num_bands: usize,
-    current: &BroadcastParams,
-) -> gst::Structure {
-    let mut p = BroadcastParams::preset(preset, num_bands);
-    p.spike_guard_lookahead_ms = current.spike_guard_lookahead_ms;
-    p.apply_preset(preset);
+/// `get-preset-values-for-bands` for `preset` at `num_bands`.
+fn preset_structure(preset: BroadcastPreset, num_bands: usize) -> gst::Structure {
+    let p = BroadcastParams::preset(preset, num_bands);
     let mut s = gst::Structure::new_empty(preset.nick());
     for (name, prop) in preset_props() {
         match prop {
@@ -838,8 +831,7 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     "spike-guard-enabled",
                     "Spike guard enabled",
                     "Remove clicks and other short, isolated peaks before the AGC (bypassed: \
-                     unity gain, same delay). latency-mode and presets set it: on in the \
-                     standard latency mode, off in low",
+                     unity gain, same delay)",
                     d.spike_guard_enabled,
                 ),
                 float("spike-threshold"),
@@ -954,9 +946,7 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     "Latency of the whole chain: standard (at most 6 ms) or low (at most \
                      3 ms; shorter lookaheads in the spike guard, bass clipper, clipper and \
                      limiter). Sets limiter-lookahead to the mode's value; a later write of \
-                     limiter-lookahead overrides it. Also sets spike-guard-enabled: on in \
-                     standard, off in low (without lookahead the spike guard dips word onsets), \
-                     and presets follow the mode. Structural: takes effect at the next caps \
+                     limiter-lookahead overrides it. Structural: takes effect at the next caps \
                      negotiation; presets do not change it",
                 )
                 .readwrite()
@@ -1010,8 +1000,8 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                         let nick = args[1].get::<Option<String>>().ok().flatten();
                         let preset = nick.as_deref().and_then(BroadcastPreset::from_nick);
                         let s = preset.map(|p| {
-                            let current = obj.imp().settings.get().params;
-                            preset_structure(p, current.num_bands, &current)
+                            let n = obj.imp().settings.get().params.num_bands;
+                            preset_structure(p, n)
                         });
                         Some(s.to_value())
                     })
@@ -1021,16 +1011,12 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     .param_types([String::static_type(), u32::static_type()])
                     .return_type::<gst::Structure>()
                     .class_handler(|args| {
-                        let obj = args[0]
-                            .get::<super::StromDspBroadcastProcessor>()
-                            .expect("signal emitted on the broadcast processor");
                         let nick = args[1].get::<Option<String>>().ok().flatten();
                         let preset = nick.as_deref().and_then(BroadcastPreset::from_nick);
                         let n = args[2].get::<u32>().unwrap_or(0) as usize;
-                        let current = obj.imp().settings.get().params;
                         let s = preset
                             .filter(|_| (1..=MAX_BANDS).contains(&n))
-                            .map(|p| preset_structure(p, n, &current));
+                            .map(|p| preset_structure(p, n));
                         Some(s.to_value())
                     })
                     .build(),
@@ -1098,7 +1084,6 @@ impl ObjectImpl for StromDspBroadcastProcessor {
                     gst::debug!(CAT, imp = self, "latency-mode set to {v:?}");
                 }
                 self.obj().notify("limiter-lookahead");
-                self.obj().notify("spike-guard-enabled");
                 return;
             }
             Prop::NumBands => {

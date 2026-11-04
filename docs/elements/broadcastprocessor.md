@@ -13,12 +13,14 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → f
 - **Spike guard:** removes clicks and other short, isolated peaks before
   they pump the AGC or count toward the loudness it measures. A peak more
   than `spike-threshold` over the programme's own peak envelope starts an
-  event at once; if the peak recurs within about 0.4 ms (a tone, a noise
-  burst, a drum onset) it is programme and left alone, otherwise a short
-  gain dip with smooth ramps brings it down to the threshold through a
-  soft knee. Each channel on its own; outside its dips the stage is an
-  exact delay. On in the standard latency mode, off in the low mode (see
-  Latency).
+  event only if it looks like a click in the input already buffered: it
+  jumps from the programme level to its peak in one sample, by more than
+  the threshold, and does not come back within about 0.4 ms (the rise
+  gate). Speech, tones, noise bursts and drum onsets build up over
+  several samples or recur, so they never start one. An event whose peak
+  still recurs is programme and is lifted; otherwise a short gain dip with
+  smooth ramps brings it down to the threshold through a soft knee. Each
+  channel on its own; outside its dips the stage is an exact delay.
 - **AGC:** slow and loudness-targeting. Its BS.1770 detector freezes in
   pauses and below `agc-gate`.
 - **Multiband:** LR4 crossover, one compressor per band.
@@ -85,8 +87,8 @@ its true-peak detector delay (32).
 
 | `latency-mode` | Spike guard | Bass clipper | Final clipper `C` | Limiter | 44.1 kHz | 48 kHz | 96 kHz | Budget |
 |---|---|---|---|---|---|---|---|---|
-| `standard` (default) | 0.5 ms, on | 1 ms | 69 | 1.5 ms | 257 frames, 5.83 ms | 269 frames, 5.60 ms | 413 frames, 4.30 ms | 6 ms |
-| `low` | 0, off | 0 | 48 | 0.6 ms | 130 frames, 2.95 ms | 133 frames, 2.77 ms | 162 frames, 1.69 ms | 3 ms |
+| `standard` (default) | 0.5 ms | 1 ms | 69 | 1.5 ms | 257 frames, 5.83 ms | 269 frames, 5.60 ms | 413 frames, 4.30 ms | 6 ms |
+| `low` | 0 | 0 | 48 | 0.6 ms | 130 frames, 2.95 ms | 133 frames, 2.77 ms | 162 frames, 1.69 ms | 3 ms |
 
 A test fails if either mode exceeds its budget at 44.1, 48 or 96 kHz.
 The stages share the work: the spike guard takes clicks before the AGC,
@@ -122,21 +124,20 @@ never uses BaseTransform passthrough.
   decaying 60 Hz thumps peak 10.4 / 11.4 / 11.4 dB over. In the chain the
   difference does not show: limiter mean reduction 0.82 dB with 3, 1 and
   0 ms on the hot peaky programme.
-- **Spike guard: off in the low mode.** With no lookahead, programme
-  that jumps more than `spike-threshold` over its own recent peaks (a
-  drum hit, a word after a pause) loses up to 0.4 ms of its onset to the
-  threshold before the guard can tell it is programme. On speech that is
-  audible: over the corpus speech and phone clips the worst-frame NMR
-  reached +37 dB with the guard on and no lookahead, against −8 dB with
-  it off (crackle check, `strom-dsp-harness` `crackle`). So writing
-  `latency-mode` low also sets `spike-guard-enabled` false, and presets
-  follow the mode. The clicks themselves are still caught: the final
-  clipper and the true-peak limiter take their peaks; what is lost is
-  that clicks can pump the AGC (the clicky programme case lands
-  −16.44 … −16.32 LUFS at `streaming`, see the click table). An operator
-  can switch it on again, accepting the onset dips. Harness NMR of the
-  music-like programme in the low mode: −24.3 dB with the guard on,
-  −43.3 dB off (standard −42.8 dB).
+- **Spike guard:** with no lookahead the guard cannot lift an event once
+  it has started, so the rise gate decides before one starts, from the
+  input the 4× interpolator already buffers (0.5 ms at 48 kHz; at 88.2 kHz
+  and above the isolation check is shortened to what is buffered). On the
+  corpus speech and phone clips every preset in the low mode measures the
+  same with the guard as without it, clip for clip (crackle check below);
+  before the rise gate it reached +37 dB, from word onsets after pauses
+  capped for up to 0.4 ms. The clicky programme lands within
+  0.02 LU of the standard mode (click table below). Harness NMR of the
+  music-like programme: −42.8 dB standard, −43.3 dB low (−24.3 dB before
+  the rise gate). The alternative, a 0.5 ms lookahead in the low mode,
+  costs 24 frames (157 frames, 3.27 ms at 48 kHz, over the 3 ms budget),
+  and with the old event rule still took plosives for clicks, as the
+  standard mode did.
 
 ## Properties
 
@@ -191,9 +192,7 @@ the next caps negotiation.
 **`latency-mode` and `limiter-lookahead`.** Writing `latency-mode` sets the
 spike guard and bass clipper lookaheads, the final clipper's structure and
 `limiter-lookahead` to the mode's values (see Latency); `limiter-lookahead`
-then reads 1.5 or 0.6. It also sets `spike-guard-enabled` (on in
-`standard`, off in `low`); a later write of `spike-guard-enabled`
-overrides it. A later write of `limiter-lookahead` changes only
+then reads 1.5 or 0.6. A later write of `limiter-lookahead` changes only
 the limiter's lookahead, and `latency-mode` keeps reading the mode that
 was written; writing `latency-mode` again sets all four again. Set
 `latency-mode` first and `limiter-lookahead` after it, if at all. Presets
@@ -214,9 +213,7 @@ Setting `preset` sets every property except `enabled`, `meter-interval`,
 `num-bands`.
 - **`latency-mode` and `limiter-lookahead`:** they set the element's
   latency, so they are READY-only and not part of a preset. Every preset
-  works in both modes. A preset sets `spike-guard-enabled` to the
-  current mode's value (off in `low`), and `get-preset-values` reports
-  that value.
+  works in both modes.
 - **Writing another property afterwards:** a write that changes a value
   changes only that property, and `preset` then reads `custom`. Writing
   `custom` changes nothing.
@@ -234,7 +231,7 @@ and deliberately gentle:
 | `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 | 2 |
 
 All presets: `input-gain` 0, all stages on (governor too; the clipper
-except at `speech`; the spike guard except in the low latency mode),
+except at `speech`),
 `spike-threshold` 8 dB, `multiband-drive` 0, band makeup 0,
 `clipper-bandwidth` 20000 Hz, `expander-hold` 100 ms,
 `bass-clipper-enabled` true, `bass-clip-threshold` = target + 9 dB.
@@ -261,16 +258,17 @@ except at `speech`; the spike guard except in the low latency mode),
   quiet one. The others sit further from typical delivery levels, so they
   use 3/6 dB/s to reach target within 10 s from −35 or −10 LUFS.
 - **Spike threshold 8 dB:** gentle. Only peaks more than 8 dB over the
-  programme's own recent peaks, that do not recur within about 0.4 ms,
-  count; they come down to that level, not to the programme's.
+  programme's own recent peaks, reached in one sample and not recurring
+  within about 0.4 ms, count; they come down to that level, not to the
+  programme's.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, a
   150 ms limiter release, and **no final clipper**. At −18 LUFS the
   clipper clips the peaks of loud syllables and plosives, audibly on
   phone and codec speech: over the corpus speech and phone clips the
   worst-frame NMR at `speech` reached +35 dB with the clipper and
-  +4.1 dB without it (standard mode; what remains is the limiter and the
-  spike guard, see the crackle check). The governor stays on but frozen
-  (it budgets the clipper's work).
+  +2.7 dB without it (standard mode; what remains is the limiter, see the
+  crackle check). The governor stays on but frozen (it budgets the
+  clipper's work).
 - **Expander:** target − 24 dB, 1:1.5, at most 4 dB for programme; target
   − 22 dB, 1:2, at most 6 dB for speech. After the AGC, room tone and noise
   between words sit near or below target − 25 dB, while quiet word endings
@@ -379,8 +377,35 @@ around a single click is 2.3 dB (a click that lands on a loud hit gets the
 hit's own reduction).
 
 **Spike guard limits:** a spike is at most 0.25 ms long at its core
-(single-sample clicks and glitches; a longer microphone bump or plosive
-is programme to it). See Latency for what the low mode costs it.
+and jumps to its peak in one sample (single-sample clicks and glitches;
+a longer microphone bump, a plosive, or a click spread over several
+samples by a filter or a codec is programme to it). A click that lands
+on a loud passage, where the samples just before it are already over
+the threshold, is left to the clipper and the limiter.
+
+**Measured case: crackle on speech.** The corpus speech and phone clips
+(18 clips, 30 s each, at the preset's target) through every preset and
+latency mode, worst per-frame NMR against the linear reference over all
+clips (`strom-dsp-harness` `tests/crackle.rs`, extended workflow). The
+bound is 0 dB, where the error reaches the masked threshold; the dynamics
+alone (AGC, multiband, expander, bass clipper) stay under −8 dB.
+
+| Preset | Mode | Before | Now | Cause of what remains |
+|---|---|---|---|---|
+| `ebu-r128` | standard | +10.8 dB | +10.8 dB (−8.3 without the shortwave clip) | clipper on the shortwave clip's static crashes |
+| `ebu-r128` | low | +37.6 | +5.6 (−9.3) | the same |
+| `atsc-a85` | standard | +17.5 | +17.5 (−5.6) | the same |
+| `atsc-a85` | low | +37.0 | +14.4 (−7.3) | the same |
+| `streaming` | standard | +35.7 | +35.7 | clipper on speech peaks at −16 LUFS; limiter +6.3 without it |
+| `streaming` | low | +43.1 | +35.7 | the same; limiter (0.6 ms) +13.9 without it |
+| `speech` | standard | +35.4 | +2.7 | limiter on one clip's peaks at −18 LUFS |
+| `speech` | low | +41.2 | +7.6 | limiter (0.6 ms) on three clips |
+
+Before: the spike guard without the rise gate and the clipper at
+`speech`. In the standard mode the old event rule also took plosive
+bursts and mouth clicks for clicks (+0.8 … +4.1 dB on clean speech); the
+rise gate leaves them too. What remains is listed in the check as known
+failures, with these causes.
 
 **Measured case: bass into highs.** A loud 50 Hz with a 3 kHz tone 20 dB
 under it, the band compressors neutral, the bass clip threshold at the

@@ -25,8 +25,8 @@
 //! of every speech clip sits between −18.5 and −8.3 dB, so 0 dB leaves
 //! 8 dB of margin for the dynamics doing their work, while the defects
 //! found (an onset dipped by the spike guard without lookahead, speech
-//! peaks in the final clipper, plosives taken for clicks) reach
-//! +1 … +37 dB.
+//! peaks in the final clipper, plosives taken for clicks, speech peaks in
+//! the limiter at −16 and −18 LUFS) reach +1 … +37 dB.
 //!
 //! **Known failures** ([`KNOWN_FAILURES`]) are listed with their cause,
 //! for a whole configuration or for named clips: they are reported, not
@@ -99,43 +99,44 @@ impl KnownFailure {
 }
 
 const SHORTWAVE: &[&str] = &["fs259175_shortwave_websdr"];
+const CLIPPER_ON_STATIC: &str = "final clipper on the static crashes of the shortwave clip";
 
 /// The known failures (see the module docs). Measured with
 /// `cargo run --release --example crackle -- corpus/data <out> 8 accept`
-/// and its stage switches (`accept:no-spike,no-clipper`, …).
+/// and its stage switches (`accept:no-clipper`, `accept:no-limiter`, …).
+/// The spike guard is not among the causes: with it off every number is
+/// the same.
 pub const KNOWN_FAILURES: &[KnownFailure] = &[
     KnownFailure {
         preset: BroadcastPreset::EbuR128,
         mode: LatencyMode::Standard,
-        clips: None,
-        reason: "spike guard takes plosive bursts and mouth clicks for clicks (+0.8 … +4.1 dB); \
-                 final clipper on the shortwave clip's static crashes (+10.8 dB)",
+        clips: Some(SHORTWAVE),
+        reason: CLIPPER_ON_STATIC,
     },
     KnownFailure {
         preset: BroadcastPreset::EbuR128,
         mode: LatencyMode::Low,
         clips: Some(SHORTWAVE),
-        reason: "final clipper on static crashes (+5.6 dB)",
+        reason: CLIPPER_ON_STATIC,
     },
     KnownFailure {
         preset: BroadcastPreset::AtscA85,
         mode: LatencyMode::Standard,
-        clips: None,
-        reason: "spike guard takes plosive bursts and mouth clicks for clicks (+0.7 … +4.0 dB); \
-                 final clipper on the shortwave clip's static crashes (+17.5 dB)",
+        clips: Some(SHORTWAVE),
+        reason: CLIPPER_ON_STATIC,
     },
     KnownFailure {
         preset: BroadcastPreset::AtscA85,
         mode: LatencyMode::Low,
         clips: Some(SHORTWAVE),
-        reason: "final clipper on static crashes (+14.4 dB)",
+        reason: CLIPPER_ON_STATIC,
     },
     KnownFailure {
         preset: BroadcastPreset::Streaming,
         mode: LatencyMode::Standard,
         clips: None,
         reason: "final clipper clips speech peaks at −16 LUFS (up to +35.7 dB; pending clipper \
-                 work); without it the spike guard and the limiter (up to +6.3 dB)",
+                 work); without it the limiter (up to +6.3 dB)",
     },
     KnownFailure {
         preset: BroadcastPreset::Streaming,
@@ -147,9 +148,8 @@ pub const KNOWN_FAILURES: &[KnownFailure] = &[
     KnownFailure {
         preset: BroadcastPreset::Speech,
         mode: LatencyMode::Standard,
-        clips: None,
-        reason: "spike guard takes plosive bursts for clicks (up to +4.1 dB); limiter on \
-                 librispeech_2035 (+2.7 dB)",
+        clips: Some(&["librispeech_2035-152373-0005"]),
+        reason: "limiter on loud speech peaks at −18 LUFS (+2.7 dB)",
     },
     KnownFailure {
         preset: BroadcastPreset::Speech,
@@ -159,7 +159,7 @@ pub const KNOWN_FAILURES: &[KnownFailure] = &[
             "fs259175_shortwave_websdr",
             "fs524806_frs_walkie_kids",
         ]),
-        reason: "limiter at 0.6 ms lookahead on loud speech peaks (up to +7.6 dB)",
+        reason: "limiter at 0.6 ms lookahead on loud speech peaks at −18 LUFS (up to +7.6 dB)",
     },
 ];
 

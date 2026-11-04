@@ -74,10 +74,6 @@
 //! `latency-mode` keeps reading the mode written. Writing `latency-mode`
 //! again sets all four again. So set `latency-mode` first and
 //! `limiter-lookahead` after it, if at all. Presets change neither.
-//! Writing `latency-mode` also sets `spike-guard-enabled` (on in
-//! `standard`, off in `low`: without lookahead the spike guard dips word
-//! onsets), and a preset sets `spike-guard-enabled` to the current mode's
-//! value.
 //!
 //! **Crossovers** are kept strictly ascending, at least
 //! [`MIN_CROSSOVER_GAP_HZ`] apart. A write of `crossoverN-frequency` that

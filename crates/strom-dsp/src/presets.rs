@@ -146,13 +146,13 @@ impl LimiterParams {
 /// | Field | Value | Why |
 /// |---|---|---|
 /// | `input_gain_db` | 0 dB | the AGC does the levelling; the input is not touched |
-/// | `spike_guard_enabled` | true with a lookahead of at least 0.4 ms (the standard latency mode), false with less (the low mode) | clicks and other short, isolated peaks are removed before they pump the AGC or count toward the loudness; without lookahead the guard cannot tell a click from a word onset before the output reads it, and dips onsets ([`crate::spike_guard::on_by_default`]) |
+/// | `spike_guard_enabled` | true | clicks and other short, isolated peaks are removed before they pump the AGC or count toward the loudness |
 /// | `spike_threshold_db` | 8 dB | gentle: only peaks more than 8 dB over the programme's own peak envelope, and at most 1 ms long, count as spikes; they are brought down to that level, so a real transient that happens to qualify loses at most what is above it |
 /// | `agc_enabled` | true | the AGC is what makes the output land on the target |
 /// | `multiband_enabled` | true | |
 /// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
 /// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
-/// | `clipper_enabled` | true, `Speech` false | the final clipper takes the last peaks cleanly, so the limiter mostly catches inter-sample residue and bass. On speech at −18 LUFS it clips the peaks of loud syllables and plosives, audibly on phone and codec speech (worst-frame NMR on corpus speech and phone clips up to +35 dB with it, +4.1 dB without), so `Speech` leaves the peaks to the limiter |
+/// | `clipper_enabled` | true, `Speech` false | the final clipper takes the last peaks cleanly, so the limiter mostly catches inter-sample residue and bass. On speech at −18 LUFS it clips the peaks of loud syllables and plosives, audibly on phone and codec speech (worst-frame NMR on corpus speech and phone clips up to +35 dB with it, +2.7 dB without), so `Speech` leaves the peaks to the limiter |
 /// | `clipper_bandwidth_hz` | 20 000 Hz | [`BROADCAST_CLIPPER_BANDWIDTH_HZ`] |
 /// | `governor_enabled` | true | keeps the clipper and the limiter within the clip budget |
 /// | band `makeup_db` | 0 dB | the AGC sets the level; makeup would only move the loudness away from the target |
@@ -411,7 +411,7 @@ impl BroadcastParams {
         let (target, ceiling, gate, offset, ratio, limiter_release) = preset.row();
         let times = broadcast_band_times(self.num_bands);
         self.input_gain_db = 0.0;
-        self.spike_guard_enabled = crate::spike_guard::on_by_default(self.spike_guard_lookahead_ms);
+        self.spike_guard_enabled = true;
         self.spike_threshold_db = SPIKE_THRESHOLD_DB;
         self.target_loudness_lufs = target;
         self.true_peak_ceiling_dbtp = ceiling;
@@ -541,7 +541,7 @@ mod tests {
                     preset != BroadcastPreset::Speech,
                     "{ctx}: the clipper is off for speech"
                 );
-                assert!(p.spike_guard_enabled, "{ctx}: on at the standard lookahead");
+                assert!(p.spike_guard_enabled, "{ctx}");
                 assert!(r(p.clip_budget_db, 0.0, 6.0), "{ctx}");
                 assert!(r(p.clipper_bandwidth_hz, 8000.0, 22_000.0), "{ctx}");
                 assert!(r(p.crossover_hz[0], 20.0, 20_000.0), "{ctx}");
@@ -571,26 +571,6 @@ mod tests {
         let e = BroadcastParams::preset(BroadcastPreset::EbuR128, 4);
         assert!(s.bands[0].ratio < e.bands[0].ratio);
         assert!(s.agc_gate_lufs > e.agc_gate_lufs, "faster AGC gate");
-    }
-
-    /// The spike guard is off in the low latency mode, whichever is set
-    /// first, the mode or the preset; on in the standard mode.
-    #[test]
-    fn spike_guard_follows_latency_mode() {
-        use crate::broadcast::LatencyMode;
-        for preset in BroadcastPreset::ALL {
-            for mode in LatencyMode::ALL {
-                let on = mode == LatencyMode::Standard;
-                let mut a = BroadcastParams::preset(preset, 4);
-                mode.apply(&mut a);
-                assert_eq!(a.spike_guard_enabled, on, "{preset:?} then {mode:?}");
-                let mut b = BroadcastParams::default();
-                mode.apply(&mut b);
-                b.apply_preset(preset);
-                assert_eq!(b.spike_guard_enabled, on, "{mode:?} then {preset:?}");
-                assert_eq!(mode.spike_guard_enabled(), on);
-            }
-        }
     }
 
     /// Targets and ceilings are those of the standards.
