@@ -51,10 +51,38 @@
 //! # Headroom
 //!
 //! The rebuilt peaks lie beyond the clip level, so the output is hotter than
-//! the input: by up to `max_overshoot_db` over the clip level in the worst
-//! case. In float this is harmless; the stage that converts to a fixed-point
+//! the input: by up to `max_overshoot_db` (default 6 dB) over the clip level
+//! in the worst case. In float this is harmless; the stage that converts to a fixed-point
 //! format (or that must meet a ceiling) needs a limiter after the declipper.
 //! [`DeclipperStats::max_overshoot_db`] reports what was actually used.
+//!
+//! # Plausibility
+//!
+//! A rebuild is only kept when it is plausible; otherwise the run keeps its
+//! clipped samples (counted in [`DeclipperStats::runs_rejected`]), so a
+//! repair is never a guess wilder than the clipping it replaces. On music
+//! with dense high-frequency content a long run could otherwise be filled
+//! with a hump at the cap, or a cluster of short runs with spikes: the
+//! output was further from the original than the clipped input. Two tests:
+//!
+//! - **Spike test:** the run rises above its clipped values by at most
+//!   [`SPIKE_SLOPE_FACTOR`] × (steeper edge slope towards the clip) ×
+//!   (length + 1). A sinusoid clipped at any depth rises at most `1/π` times
+//!   that, a parabola `1/4`; a rise far beyond it is not supported by the
+//!   samples around the run (a run whose edges both lead away from the clip
+//!   supports none).
+//! - **Cap test:** the rebuild reaches the `max_overshoot_db` cap while the
+//!   AR model behind it predicts its window with less than
+//!   [`MIN_PREDICTION_GAIN_DB`]: the model is too weak to say the true peak
+//!   lies that far out. The cheap fallback is judged by the model the
+//!   channel keeps when that one is recent enough to be reused; without one
+//!   only the spike test applies.
+//!
+//! Measured on the test corpus (speech and music clipped 3, 6 and 10 dB):
+//! with the tests and the 6 dB default cap every clip comes out at least as
+//! close to the original on its clipped samples as the clipped input, and
+//! the SDR improvement on recorded speech stays the same or rises. The
+//! harness check is `strom-dsp-harness/tests/declipper_corpus.rs`.
 //!
 //! # CPU budget
 //!
@@ -214,6 +242,19 @@ pub const WORK_BURST: f64 = 200.0e3;
 /// the known samples only; the short context keeps the retry cheap.
 pub const BURG_RETRY_PAST_MS: f32 = 2.5;
 
+/// Plausibility check, spike test: a rebuilt run may rise above its clip
+/// level by at most this factor times the steeper of its two edge slopes
+/// (towards the clip, per sample) times its length + 1. A sinusoid clipped
+/// anywhere rises at most `1/π ≈ 0.32` times that; the factor leaves room
+/// for peakier shapes. See "Plausibility" in the module docs.
+pub const SPIKE_SLOPE_FACTOR: f64 = 1.0;
+
+/// Plausibility check, cap test: a rebuild that reaches the
+/// `max_overshoot_db` cap is rejected when the AR model behind it predicts
+/// its window with less than this gain (dB, signal over prediction error
+/// power). See "Plausibility" in the module docs.
+pub const MIN_PREDICTION_GAIN_DB: f64 = 28.0;
+
 /// Bypass crossfade (ms), the same as the other elements with latency
 /// (limiter, broadcast processor).
 pub const XFADE_MS: f32 = 10.0;
@@ -238,7 +279,11 @@ pub struct DeclipperParams {
     /// through unchanged. AR interpolation of a gap of a few ms is poor, and
     /// the solve cost grows with the cube of the run length.
     pub max_run_ms: f32,
-    /// How far beyond the clip level a rebuilt sample may go (dB). Default 12.
+    /// How far beyond the clip level a rebuilt sample may go (dB). Default
+    /// 6: on recorded speech clipped 3, 6 and 10 dB it gives the same or a
+    /// larger SDR improvement than 12 dB (a rebuild that runs away is
+    /// stopped sooner), and with the plausibility check it keeps every
+    /// corpus clip at or above its clipped input.
     pub max_overshoot_db: f32,
     /// Also find plateaus that droop like the output of a first-order
     /// high-pass with a corner up to this frequency, applied after the clip
@@ -255,7 +300,7 @@ impl Default for DeclipperParams {
             min_level_db: -20.0,
             tolerance: 1e-5,
             max_run_ms: 2.0,
-            max_overshoot_db: 12.0,
+            max_overshoot_db: 6.0,
             tilt_hz: 50.0,
         }
     }
@@ -280,6 +325,9 @@ pub struct DeclipperStats {
     /// Runs rebuilt by the cheap fallback because the work budget was spent
     /// (included in `runs_repaired`).
     pub fallbacks: u64,
+    /// Runs whose rebuild failed the plausibility check and were left at
+    /// their clipped values (not included in `runs_repaired`).
+    pub runs_rejected: u64,
     /// Work spent on rebuilding (multiply-adds, see [`lsar::work_units`]).
     pub work: f64,
 }
@@ -302,6 +350,7 @@ struct Channel {
     /// First-round AR model of a recent run, its order, and the start of
     /// the run it was estimated for.
     model: Vec<f64>,
+    model_gain: f64,
     model_order: usize,
     model_at: Option<u64>,
 }
@@ -338,6 +387,8 @@ pub struct Declipper {
     /// A run starting at most this many frames after the run whose
     /// first-round model is kept reuses that model.
     reuse: u64,
+    /// [`MIN_PREDICTION_GAIN_DB`] as a power ratio.
+    min_gain: f64,
     /// Fade position 0 … xfade_len (xfade_len = fully wet).
     fade: usize,
     fade_set: bool,
@@ -547,7 +598,7 @@ impl Declipper {
         let result = if order < 2 {
             Err(LsarError::WindowTooShort)
         } else {
-            let first = reuse.then_some(&ch.model[..=order]);
+            let first = reuse.then_some((&ch.model[..=order], ch.model_gain));
             match self.solver.interpolate(
                 &mut self.w[..len],
                 &self.unknown,
@@ -563,6 +614,7 @@ impl Declipper {
                     self.stats.work += work;
                     if !reuse {
                         ch.model[..=order].copy_from_slice(self.solver.first_model(order));
+                        ch.model_gain = self.solver.first_model_gain();
                         ch.model_order = order;
                         ch.model_at = Some(s);
                     }
@@ -588,6 +640,28 @@ impl Declipper {
             self.stats.runs_failed += 1;
             return;
         }
+        // The fallback has no model of its own: the cap test judges it by the
+        // model the channel keeps when that is recent enough to be reused;
+        // without one only the spike test applies.
+        let gain = if !fallback {
+            self.solver.prediction_gain()
+        } else if reuse {
+            ch.model_gain
+        } else {
+            f64::INFINITY
+        };
+        if implausible(
+            &self.w[..len],
+            (s - ws) as usize,
+            &self.lo[..run.len],
+            &self.hi[..run.len],
+            run.dir,
+            gain < self.min_gain,
+        ) {
+            // The run keeps its clipped samples (`work` holds the input).
+            self.stats.runs_rejected += 1;
+            return;
+        }
         let level = f64::from(run.level).abs();
         let mut peak = 0.0f64;
         for i in s..=e {
@@ -606,6 +680,54 @@ impl Declipper {
         }
         self.stats.max_repaired_peak = self.stats.max_repaired_peak.max(peak as f32);
     }
+}
+
+/// The plausibility check of a rebuilt run `w[off .. off + lo.len()]` with
+/// boxes `lo`, `hi` (see "Plausibility" in the module docs): `true` when
+/// the run should keep its clipped samples instead.
+///
+/// - **Cap test** (`weak_model`): some sample reached the cap of its box
+///   (`max_overshoot_db` beyond its clipped value).
+/// - **Spike test**: the largest rise above the clipped values exceeds
+///   [`SPIKE_SLOPE_FACTOR`] times the steeper edge slope towards the clip
+///   (one-sided difference of the two samples on each side) times the run
+///   length + 1. A missing neighbour counts as a flat edge.
+fn implausible(w: &[f64], off: usize, lo: &[f64], hi: &[f64], dir: i8, weak_model: bool) -> bool {
+    let len = lo.len();
+    let d = f64::from(dir);
+    let mut rise = 0.0f64;
+    let mut at_cap = false;
+    for k in 0..len {
+        let y = d * w[off + k];
+        // Clipped value and cap, both on the clipped side.
+        let (clipped, cap) = if dir > 0 {
+            (lo[k], hi[k])
+        } else {
+            (-hi[k], -lo[k])
+        };
+        rise = rise.max(y - clipped);
+        if cap > clipped && y >= cap - 1e-6 * cap.abs() {
+            at_cap = true;
+        }
+    }
+    if rise <= 0.0 {
+        return false;
+    }
+    if at_cap && weak_model {
+        return true;
+    }
+    let before = if off >= 2 {
+        d * (w[off - 1] - w[off - 2])
+    } else {
+        0.0
+    };
+    let e1 = off + len;
+    let after = if e1 + 1 < w.len() {
+        d * (w[e1] - w[e1 + 1])
+    } else {
+        0.0
+    };
+    rise > SPIKE_SLOPE_FACTOR * before.max(after).max(0.0) * (len + 1) as f64
 }
 
 /// The cheap fallback: cubic Hermite interpolation across the run
@@ -688,6 +810,7 @@ impl Processor for Declipper {
                 p_len: 0,
                 credit: WORK_BURST,
                 model: vec![0.0; AR_ORDER_MAX + 1],
+                model_gain: 0.0,
                 model_order: 0,
                 model_at: None,
             })
@@ -711,6 +834,7 @@ impl Processor for Declipper {
         self.xfade_len = ms_frames(XFADE_MS, sample_rate).max(1);
         self.refill = WORK_RATE / f64::from(sample_rate);
         self.reuse = ms_frames(MODEL_REUSE_MS, sample_rate) as u64;
+        self.min_gain = 10f64.powf(MIN_PREDICTION_GAIN_DB / 10.0);
         self.configured = true;
         self.apply_params();
         self.reset();
@@ -820,5 +944,61 @@ impl Processor for Declipper {
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::implausible;
+
+    /// Window with a positive run of `fill` at index 4 between edges
+    /// `[a, b]` before and `[c, d]` after; boxes from the clip level 1 to
+    /// `cap`.
+    fn check(edges: [f64; 4], fill: &[f64], cap: f64, weak: bool) -> bool {
+        let mut w = vec![0.0, 0.0, edges[0], edges[1]];
+        w.extend_from_slice(fill);
+        w.extend_from_slice(&[edges[2], edges[3], 0.0]);
+        let lo = vec![1.0; fill.len()];
+        let hi = vec![cap; fill.len()];
+        let neg: Vec<f64> = w.iter().map(|v| -v).collect();
+        let (nlo, nhi): (Vec<f64>, Vec<f64>) = (
+            hi.iter().map(|v| -v).collect(),
+            lo.iter().map(|v| -v).collect(),
+        );
+        let pos = implausible(&w, 4, &lo, &hi, 1, weak);
+        // The same run mirrored (negative clip) gives the same answer.
+        assert_eq!(pos, implausible(&neg, 4, &nlo, &nhi, -1, weak));
+        pos
+    }
+
+    #[test]
+    fn rise_the_edges_support_is_kept() {
+        // Edge slope 0.15 per sample, 3 samples: up to 1 · 0.15 · 4 = 0.6.
+        let edges = [0.8, 0.95, 0.95, 0.8];
+        assert!(!check(edges, &[1.05, 1.1, 1.05], 2.0, true));
+        assert!(!check(edges, &[1.3, 1.55, 1.3], 2.0, true));
+        // Nothing rebuilt above the clip: always kept.
+        assert!(!check([1.0, 0.9, 0.9, 1.0], &[1.0, 1.0, 1.0], 2.0, true));
+    }
+
+    #[test]
+    fn spike_is_rejected() {
+        let edges = [0.8, 0.95, 0.95, 0.8];
+        assert!(check(edges, &[1.2, 1.7, 1.2], 2.0, false));
+        // Edges that both lead away from the clip support no rise at all.
+        assert!(check([0.99, 0.9, 0.9, 0.99], &[1.0, 1.01, 1.0], 2.0, false));
+    }
+
+    #[test]
+    fn cap_with_weak_model_is_rejected() {
+        // Steep edges (0.5 per sample) support the rise; it reaches the cap.
+        let edges = [0.5, 1.0, 1.0, 0.5];
+        let fill = [1.5, 2.0, 1.5];
+        assert!(check(edges, &fill, 2.0, true));
+        assert!(!check(edges, &fill, 2.0, false));
+        // Below the cap the model's gain does not matter.
+        assert!(!check(edges, &fill, 2.5, true));
+        // A zero cap (max-overshoot 0) leaves nothing to reach.
+        assert!(!check(edges, &[1.0, 1.0, 1.0], 1.0, true));
     }
 }

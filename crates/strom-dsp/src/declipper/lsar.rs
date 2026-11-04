@@ -114,6 +114,11 @@ pub struct LsarSolver {
     free_slot: Vec<usize>,
     /// Values of the unknowns after the last round that finished.
     kept: Vec<f64>,
+    /// Prediction gain of the last estimate, of the first round's model, and
+    /// of the model behind the kept values (0: not known).
+    gain_est: f64,
+    gain0: f64,
+    gain: f64,
     /// Work of the last [`interpolate`](Self::interpolate) call, also when
     /// it returned [`LsarError::Budget`].
     spent: f64,
@@ -163,6 +168,9 @@ impl LsarSolver {
             free: Vec::with_capacity(m_max),
             free_slot: Vec::with_capacity(m_max),
             kept: vec![0.0; m_max],
+            gain_est: 0.0,
+            gain0: 0.0,
+            gain: 0.0,
             spent: 0.0,
         }
     }
@@ -220,6 +228,7 @@ impl LsarSolver {
             // Silence (or non-finite): the trivial predictor.
             self.a[..=p].fill(0.0);
             self.a[0] = 1.0;
+            self.gain_est = 0.0;
             return if self.r[0] == 0.0 {
                 Ok(p)
             } else {
@@ -255,6 +264,7 @@ impl LsarSolver {
                 break;
             }
         }
+        self.gain_est = if err > 0.0 { self.r[0] / err } else { 0.0 };
         Ok(p)
     }
 
@@ -288,9 +298,12 @@ impl LsarSolver {
                 energy += v * v;
             }
         }
+        self.gain_est = 0.0;
         if energy == 0.0 || self.segs.is_empty() {
             return Ok(p);
         }
+        // Prediction error power relative to the signal: Π (1 − k²).
+        let mut rel_err = 1.0;
         if !energy.is_finite() {
             return Err(LsarError::Numerical);
         }
@@ -329,7 +342,9 @@ impl LsarSolver {
                 self.a[j] = self.tmp[j] + k * self.tmp[m - j];
             }
             self.a[m] = k;
+            rel_err *= 1.0 - k * k;
         }
+        self.gain_est = if rel_err > 0.0 { 1.0 / rel_err } else { 0.0 };
         Ok(p)
     }
 
@@ -345,7 +360,8 @@ impl LsarSolver {
     /// that would take the work past it. The first round uses
     /// [`method`](Self::method), or the cheaper autocorrelation estimate when
     /// that and one solve do not fit, or the coefficients in `first` when
-    /// given (they must have `order + 1` entries, `first[0] = 1`). A later
+    /// given (they must have `order + 1` entries, `first[0] = 1`; with their
+    /// prediction gain, see [`prediction_gain`](Self::prediction_gain)). A later
     /// round that does not fit, or whose active-set loop has to stop for
     /// the limit, is dropped and the last finished round's values are kept.
     /// When the first round does not fit (not even its estimate and one
@@ -365,7 +381,7 @@ impl LsarSolver {
         order: usize,
         rounds: usize,
         limit: f64,
-        first: Option<&[f64]>,
+        first: Option<(&[f64], f64)>,
     ) -> Result<f64, LsarError> {
         let n = w.len();
         let m = unknown.len();
@@ -376,7 +392,7 @@ impl LsarSolver {
         if p == 0 || n < 2 * p + 1 {
             return Err(LsarError::WindowTooShort);
         }
-        if first.is_some_and(|a| a.len() != p + 1) {
+        if first.is_some_and(|(a, _)| a.len() != p + 1) {
             return Err(LsarError::TooLarge);
         }
         if w.iter().any(|v| !v.is_finite()) {
@@ -386,6 +402,7 @@ impl LsarSolver {
             return Ok(0.0);
         }
         self.spent = 0.0;
+        self.gain = 0.0;
         let mut work = 0.0;
         let first_solve = solve_units(m, p);
         for (slot, &i) in unknown.iter().enumerate() {
@@ -399,8 +416,9 @@ impl LsarSolver {
         let mut use_first = first;
         loop {
             let auto = estimate_units(n, p, false);
-            if let Some(a) = use_first {
+            if let Some((a, g)) = use_first {
                 self.a[..=p].copy_from_slice(a);
+                self.gain_est = g;
                 work += 1.5 * (p * p) as f64;
             } else if burg && work + self.burg_units(n, unknown, p) + first_solve <= limit {
                 work += self.burg_units(n, unknown, p);
@@ -416,6 +434,7 @@ impl LsarSolver {
                 return Err(LsarError::Budget);
             }
             self.a0[..=p].copy_from_slice(&self.a[..=p]);
+            self.gain0 = self.gain_est;
             if self.active_set(w, unknown, lo, hi, p, &mut work, limit)? {
                 for (slot, &i) in unknown.iter().enumerate() {
                     w[i] = self.kept[slot];
@@ -444,6 +463,7 @@ impl LsarSolver {
         for (slot, &i) in unknown.iter().enumerate() {
             self.kept[slot] = w[i];
         }
+        self.gain = self.gain_est;
         for _ in 1..rounds.max(1) {
             let est = estimate_units(n, p, false);
             if work + est + first_solve > limit {
@@ -463,6 +483,7 @@ impl LsarSolver {
             for (slot, &i) in unknown.iter().enumerate() {
                 self.kept[slot] = w[i];
             }
+            self.gain = self.gain_est;
         }
         self.spent = work;
         Ok(work)
@@ -531,10 +552,25 @@ impl LsarSolver {
         Ok(false)
     }
 
+    /// Prediction gain (signal power over prediction error power, linear)
+    /// of the AR model behind the values the last successful
+    /// [`interpolate`](Self::interpolate) left in the unknowns: how well the
+    /// model predicts the window. For a model passed in as `first`, the gain
+    /// given with it; 0 for a silent window.
+    pub fn prediction_gain(&self) -> f64 {
+        self.gain
+    }
+
     /// The first round's AR coefficients of the last successful
     /// [`interpolate`](Self::interpolate) (`order + 1` entries, `a[0] = 1`).
     pub fn first_model(&self, order: usize) -> &[f64] {
         &self.a0[..=order.min(self.p_max)]
+    }
+
+    /// Prediction gain of [`first_model`](Self::first_model) on its window
+    /// (see [`prediction_gain`](Self::prediction_gain)).
+    pub fn first_model_gain(&self) -> f64 {
+        self.gain0
     }
 
     /// `R_a(d) = Σ_t a_t·a_{t+d}`.

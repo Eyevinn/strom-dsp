@@ -953,7 +953,7 @@ Real-time repair of hard-clipped runs, inside a fixed delay of 3, 5
     straight piece of waveform at a peak looks the same);
   - constrained least squares by a bounded active-set loop (≤ 4 solves; a
     bound is never released), then projection into the box; the box upper
-    edge is a cap (default +12 dB over the clipped value);
+    edge is a cap (default +6 dB over the clipped value);
   - *Burg retry* (own design): when the first round leaves every unknown at
     its starting value (the model has learnt the flat top, so the solve
     lands inside the clip level), the first round is done again with a Burg
@@ -1007,7 +1007,55 @@ Real-time repair of hard-clipped runs, inside a fixed delay of 3, 5
     clipped 10 dB, under 0.1 dB change in the SDR improvement);
   - the hot loops (dot products, Burg recursion, Cholesky) use four
     partial sums so they vectorise; the Hann window is built by a rotation
-    recurrence.
+    recurrence;
+  - *plausibility check* (own design): a rebuilt run is kept only when it
+    passes two tests, otherwise it keeps its clipped samples (counted).
+    *Spike test*: its largest rise above the clipped values is at most
+    1 × the steeper one-sided edge slope towards the clip (difference of
+    the two samples on each side) × (run length + 1); a sinusoid clipped at
+    any depth rises at most `1/π` times that and a parabola `1/4` (own
+    derivation from the time a sinusoid spends above a level and its slope
+    at the crossing), so the factor leaves room for peakier shapes, and
+    edges that both lead away from the clip allow no rise. *Cap test*: the
+    rebuild reaches the `max-overshoot` cap while the AR model behind it
+    has a prediction gain (`r(0)/E_p` from Levinson–Durbin, `1/Π(1 − k²)`
+    from Burg; textbook quantities, Kay 1988) below 28 dB on its window;
+    the cheap fallback is judged by the channel's kept model when that is
+    reusable, otherwise by the spike test alone. Chosen by measurement on
+    the corpus speech and music clipped 3, 6 and 10 dB as the listening kit
+    prepares them (repair SDR gain per clip, output peak against the
+    original) and on the speech ΔSDRc protocol: music with dense
+    high-frequency content (kmacleod_burn_the_world_waltz at 6 dB) had come
+    out 4.4 dB worse than the clipped input, from clusters of short runs
+    filled with spikes to the cap and long runs filled with humps at the
+    cap. With the 12 dB cap, the spike test alone left it at −0.7 dB and
+    the cap test alone at −0.75 dB; both with the 6 dB cap: every clip
+    ≥ 0 dB. The cap test on every rebuild that reaches a 6 dB cap cost up
+    to 5 dB of speech ΔSDRc at 10 dB (real 10 dB peaks reach it); gated by
+    the prediction gain it costs nothing (thresholds from 20 to 30 dB
+    changed the results by at most 0.15 dB). Judging fallbacks without a model as weak cost
+    0.6 dB at 10 dB. Tried and not kept: a bound from the fraction of
+    clipped samples in the window (the sinusoid relation between duty
+    cycle and depth; isolated speech peaks have almost none, speech ΔSDRc
+    fell by up to 12 dB); a bound from the shape of unclipped peaks of the
+    same polarity in the window (did not reach the overshooting runs, cost
+    up to 3.4 dB at 3 dB of clipping); a uniform shrink of the rebuild
+    towards the clip level (cost 1.6–9 dB of speech ΔSDRc); rejecting on
+    the unconstrained solve's overshoot (no effect on the failures);
+    rejecting every rebuild of a model with a prediction gain below
+    10–18 dB (the waltz at 6 dB: −0.15 to 0.0 dB against +0.02 dB). Curvature against neighbouring short
+    runs, edge-slope bounds with the mean or smaller slope, and the fill's
+    first and second differences against the context's did not separate
+    worse from better runs;
+  - `max-overshoot` default 6 dB (was 12): measured on the speech ΔSDRc
+    protocol without the plausibility check, 16.5 / 13.7 / 8.9 dB at 3, 6
+    and 10 dB against 16.5 / 12.8 / 8.7 dB with 12 dB (8 dB: 12.9 / 10.2;
+    5 dB: 13.5 / 7.8; 4 dB: 11.5 / 6.3). 8 dB gives more at 10 dB, but
+    the waltz at 6 dB stayed 0.7 dB worse than clipped with the spike test
+    (1.9 dB without), since its runaway rebuilds stop at the cap. A smooth rebuild still rises above a
+    flat-topped true peak (glottal pulses of a low voice clipped 3 dB: up
+    to 2.1 dB above the original's peak, vctk_p225); no test found on the
+    clipped signal tells those runs from good ones.
 
 ### Delay and stereo (`src/delay.rs`, `src/stereo.rs`)
 

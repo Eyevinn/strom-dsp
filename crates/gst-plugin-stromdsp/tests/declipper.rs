@@ -107,7 +107,7 @@ fn interface() {
     }
 
     for (name, min, max, def) in [
-        ("max-overshoot", 0.0f32, 24.0f32, 12.0f32),
+        ("max-overshoot", 0.0f32, 24.0f32, 6.0f32),
         ("min-level", -60.0, 0.0, -20.0),
     ] {
         let ps = flags(&e, name, PLAYING);
@@ -505,11 +505,12 @@ fn meter_message_counts_repairs() {
     assert!(sum("samples-repaired") >= sum("runs-repaired"));
     assert!(sum("fallbacks") <= sum("runs-repaired"));
     let _ = sum("runs-too-long");
+    let _ = sum("runs-rejected");
     let over = msgs
         .iter()
         .map(|s| s.get::<f64>("largest-overshoot").unwrap())
         .fold(0.0f64, f64::max);
-    assert!(over > 0.0 && over <= 12.0 + 1e-6, "overshoot {over}");
+    assert!(over > 0.0 && over <= 6.0 + 1e-6, "overshoot {over}");
     let times: Vec<u64> = msgs
         .iter()
         .map(|s| s.get::<u64>("running-time").unwrap())

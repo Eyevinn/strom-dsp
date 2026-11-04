@@ -106,6 +106,7 @@ fn meter_structure(
         .field("samples-repaired", st.samples_repaired)
         .field("runs-too-long", st.runs_too_long)
         .field("fallbacks", st.fallbacks)
+        .field("runs-rejected", st.runs_rejected)
         .field(
             "largest-overshoot",
             if over.is_finite() { over.max(0.0) } else { 0.0 },

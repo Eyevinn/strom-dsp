@@ -109,7 +109,7 @@ let stats = d.take_stats(); // runs repaired, too long, fallbacks, overshoot
 - **Unclipped audio** comes out bit-exact, delayed by the latency.
 - **Parameters:** `enabled` (crossfade to the delayed dry signal),
   `latency`, `min_level_db` (−20), `tolerance` (1e-5 relative),
-  `max_run_ms` (2), `max_overshoot_db` (12), `tilt_hz` (50).
+  `max_run_ms` (2), `max_overshoot_db` (6), `tilt_hz` (50).
 - **Headroom:** rebuilt peaks lie beyond the old clip level, so the output
   is hotter than the input; put a limiter after it before any ceiling.
 - **Work budget:** each channel spends at most 200 000 multiply-adds of

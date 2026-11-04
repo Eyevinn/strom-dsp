@@ -16,8 +16,8 @@ processor does not contain it.
 
 **Put a limiter after it.** The rebuilt peaks lie beyond the old clip level,
 so the output can be louder than the input's peak: by up to `max-overshoot`
-over the clip level, in practice about the clip depth (3 dB of clipping gives
-about 3 dB more peak). In a float chain that is harmless. Before anything
+(6 dB) over the clip level, in practice about the clip depth (3 dB of
+clipping gives about 3 dB more peak). In a float chain that is harmless. Before anything
 with a ceiling (integer conversion, an encoder, a transmission limit) put
 `stromdsp-limiter` or the broadcast processor after it. Lowering the gain
 before the declipper does not help: the overshoot is relative to the clip
@@ -29,7 +29,7 @@ level.
 |---|---|---|---|---|---|
 | `enabled` | bool | | | `true` | PLAYING |
 | `latency-mode` | enum | | `low` (3 ms), `standard` (5 ms), `high` (10 ms) | `standard` | READY |
-| `max-overshoot` | float | dB | 0 … 24 | 12 | PLAYING |
+| `max-overshoot` | float | dB | 0 … 24 | 6 | PLAYING |
 | `min-level` | float | dBFS | −60 … 0 | −20 | PLAYING |
 | `meter-interval` | uint | ms | 0 … 10000 (0 = off) | 1000 | PLAYING |
 
@@ -67,6 +67,20 @@ clipped value and within `max-overshoot`. The work per channel is bounded:
 when it is spent, a run is rebuilt by a cheap curve that keeps the same
 limits, and counted in `fallbacks`.
 
+**Never worse than the input.** A rebuild is kept only when it is
+plausible; otherwise the run keeps its clipped samples and is counted in
+`runs-rejected`. It is rejected when it rises further above the clip level
+than the slope of the samples around the run allows for a run of its
+length (a spike), or when it reaches `max-overshoot` while the signal
+around the run is too noise-like to predict (music with dense
+high-frequency content, where long runs were otherwise filled with humps
+at the cap). On the test corpus (speech and music clipped 3, 6 and 10 dB)
+no clip comes out further from the original on its clipped samples than
+the clipped input, and no output peak lies more than 2.1 dB above the
+original's (none above it at 6 and 10 dB). Heavy clipping stays heavily
+distorted: on speech clipped 10 dB the repair takes back about 9 dB of
+the error on the clipped samples.
+
 **CPU.** Grows with the amount of clipping. On an Apple M5 Pro, 48 kHz
 stereo in 10 ms buffers: about 0.1 % of the buffer duration on clean audio,
 0.3–0.8 % on speech and music clipped 6–10 dB, 2.6 % on dense tones clipped
@@ -91,8 +105,8 @@ the test fails if any rate gives more.
 
 What a shorter setting costs (recorded speech from the test corpus, nine
 clips, clipped 3, 6 and 10 dB below their peak; mean SDR improvement on the
-clipped samples): `low` 16.6 / 12.9 / 8.8 dB, `standard` 16.5 / 12.8 / 8.7 dB,
-`high` 16.4 / 12.8 / 9.0 dB. The detection is the same in every setting;
+clipped samples): `low` 16.6 / 13.9 / 9.0 dB, `standard` 16.5 / 13.7 / 8.9 dB,
+`high` 16.4 / 13.9 / 8.9 dB. The detection is the same in every setting;
 `low` gives a long run less context after it.
 
 ## Meter message
@@ -108,6 +122,7 @@ Every `meter-interval` ms of stream time an element message named
 | `samples-repaired` | `guint64` | | samples rebuilt |
 | `runs-too-long` | `guint64` | | runs too long to repair, passed through |
 | `fallbacks` | `guint64` | | runs rebuilt by the cheap fallback because the work budget was spent (included in `runs-repaired`) |
+| `runs-rejected` | `guint64` | | runs whose rebuild was not plausible, left at their clipped samples (not in `runs-repaired`) |
 | `largest-overshoot` | `gdouble` | dB | largest rebuilt peak over its clip level (0 when nothing was rebuilt) |
 
 ## Why these defaults
@@ -115,8 +130,12 @@ Every `meter-interval` ms of stream time an element message named
 - `latency-mode` `standard` (5 ms): the context after a run that a speech
   peak needs, at a latency that fits a live chain; `low` costs little and
   suits commentary, talkback and calls; `high` only helps long runs.
-- `max-overshoot` 12 dB: well above the overshoot real clipping needs (about
-  the clip depth), so it only catches a rebuild that runs away.
+- `max-overshoot` 6 dB: covers the overshoot of clipping up to about 6 dB
+  deep and limits a rebuild that runs away. Measured on the recorded speech
+  of the test corpus it repairs as well as 12 dB at 3 dB of clipping and
+  better at 6 and 10 dB (13.7 against 12.8 dB, 8.9 against 8.7 dB of SDR
+  improvement on the clipped samples): a deeper clip is rebuilt to 6 dB
+  rather than guessed further. Its cap also feeds the plausibility check.
 - `min-level` −20 dBFS: covers up to 20 dB of gain applied after the clip,
   and keeps quiet flat stretches (digital silence steps, test tones) out.
 - `meter-interval` 1000 ms: the fields are event counts, not levels; one

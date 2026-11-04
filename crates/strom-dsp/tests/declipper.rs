@@ -1,6 +1,7 @@
 //! Declipper behaviour: latency, bit-exactness on unclipped material, the
-//! repair constraints, robustness to processing after the clip, channel
-//! independence, long runs, bypass, extreme inputs and real-time safety.
+//! repair constraints, the plausibility check, robustness to processing
+//! after the clip, channel independence, long runs, bypass, extreme inputs
+//! and real-time safety.
 //!
 //! Quality per clip depth is in `declipper_quality.rs`.
 
@@ -298,6 +299,44 @@ fn repairs_respect_sign_and_cap() {
 /// Gain, DC, and requantisation applied after the clip keep the plateau flat,
 /// so detection and repair still work. The reference is the original with
 /// the same processing.
+/// A low tone under broadband noise (like music with a bass line and dense
+/// high-frequency content), clipped 6 dB: long runs whose edges say little
+/// about the hidden peak. Before the plausibility check and the 6 dB
+/// default cap, the rebuild filled such runs with humps at the 12 dB cap:
+/// on these seeds 1.1 dB further from the original on the clipped samples
+/// than the clipped input, and output peaks 6 dB above the original's. Now
+/// no seed comes out worse than its clipped input, no output peak lies more
+/// than 1 dB above the original's, and runs are rejected.
+#[test]
+fn noisy_long_runs_are_never_worse_than_clipped() {
+    for seed in [1u32, 2, 3] {
+        let mut rng = Rng(0x5eed_0100 + seed);
+        let mut x: Vec<f64> = (0..24_000)
+            .map(|i| (2.0 * PI * 110.0 * i as f64 / FS).sin() + 0.1 * rng.gauss())
+            .collect();
+        normalize(&mut x, 1.0);
+        let (xc, c) = clip(&x, 6.0);
+        let xc32 = to_f32(&xc);
+        let truth = truth_mask(&x, c);
+        let (y, mut d) = declip(&xc32, &DeclipperParams::default());
+        let st = d.take_stats();
+        let gain = sdr(&x, &y, Some(&truth)) - sdr(&x, &xc32, Some(&truth));
+        let peak = y.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            gain >= 0.0,
+            "seed {seed}: SDR gain on the clipped samples {gain} dB"
+        );
+        assert!(
+            20.0 * f64::from(peak).log10() <= 1.0,
+            "seed {seed}: output peak {peak} over the original's 1.0"
+        );
+        assert!(
+            st.runs_rejected > 0 && st.runs_repaired > 0,
+            "seed {seed}: {st:?}"
+        );
+    }
+}
+
 #[test]
 fn robust_to_gain_dc_and_requantisation_after_clip() {
     let x = multitone(3.0, 31);
