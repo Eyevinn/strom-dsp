@@ -116,7 +116,7 @@ fn per_buffer(cases: &[(&'static str, Vec<f32>)]) {
             // that is the buffer's own cost, without preemption by other
             // processes on the machine.
             for pass in 0..2 {
-                for chunk in src.chunks_exact(FRAMES * 2) {
+                for chunk in src.as_chunks::<{ FRAMES * 2 }>().0 {
                     if pass == 1 {
                         let mut best = f64::INFINITY;
                         for _ in 0..TRIALS {
