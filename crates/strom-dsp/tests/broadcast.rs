@@ -31,6 +31,7 @@ use strom_dsp::multiband::MAX_BANDS;
 use strom_dsp::Processor;
 
 use crate::counting_alloc::allocs;
+use crate::measure_support::{lowpass, white};
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -993,6 +994,44 @@ fn no_allocation() {
         if i % 70 == 69 {
             bp.reset();
         }
+    }
+    assert_eq!(allocs() - before, 0, "allocations in the processing path");
+}
+
+/// No allocation either on hot programme that the final clipper's
+/// content-adaptive depth, its bandwidth guard and the limiter's peak
+/// control act on (defaults: all on): a two-tone mix (predictable), 3.4 kHz
+/// band-limited noise and full-band noise, each 6 dB over the ceiling, in
+/// buffers of varying size.
+#[test]
+fn no_allocation_on_programme_for_the_adaptive_clipper() {
+    let ch = 2;
+    let n = FS as usize;
+    let amp = 10f64.powf((BroadcastParams::default().true_peak_ceiling_dbtp as f64 + 6.0) / 20.0);
+    let mut mono: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / FS as f64;
+            (amp * 0.5 * ((2.0 * PI * 220.0 * t).sin() + (2.0 * PI * 1_330.0 * t).sin())) as f32
+        })
+        .collect();
+    let mut band = white(2 * n, 1.0, 31);
+    lowpass(&mut band, FS as f64, 3_400.0, 8);
+    let peak = band.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    mono.extend(band.iter().map(|&v| v * (amp as f32 / peak)));
+    mono.extend(white(n, amp, 32));
+    let mut buf: Vec<f32> = mono.iter().flat_map(|&v| [v; 2]).collect();
+    let mut bp = processor(FS, ch, &BroadcastParams::default());
+    let sizes = [480usize, 1, 3000, 37, 1024];
+    let mut rest = &mut buf[..];
+    let before = allocs();
+    let mut i = 0;
+    while !rest.is_empty() {
+        let k = (sizes[i % sizes.len()] * ch).min(rest.len());
+        let (b, tail) = rest.split_at_mut(k);
+        bp.process(b);
+        let _ = bp.take_meters();
+        rest = tail;
+        i += 1;
     }
     assert_eq!(allocs() - before, 0, "allocations in the processing path");
 }

@@ -18,6 +18,7 @@
 use std::f64::consts::PI;
 
 use crate::agc_support::pink;
+use crate::counting_alloc::allocs;
 use crate::measure_support::{channel, db, lin, lowpass, white};
 use strom_dsp::bandwidth_guard::BandwidthGuard;
 use strom_dsp::clipper::{FinalClipper, FinalClipperParams};
@@ -337,4 +338,61 @@ fn peak_control_reduction_is_the_smaller_gain_not_the_product() {
     );
     assert!((last - want).abs() < 0.3, "settles at {last:.2} dB");
     assert!(max_gr < want + 0.5, "overshoots to {max_gr:.2} dB");
+}
+
+/// The content-adaptive depth, the bandwidth guard and the peak control
+/// do not allocate, on programme that drives each of them: a vowel
+/// (predictable: the depth falls), 3.4 kHz band-limited noise (the guard
+/// finds an edge), after full-band pink noise (full depth), all over the clipper
+/// threshold, in buffers of varying size, with a parameter update before
+/// each. The test checks that every path was taken, so a change that stops
+/// exercising one fails here instead of passing vacuously.
+#[test]
+fn no_allocation_on_programme_that_drives_every_path() {
+    let mut x = vowel(FS as usize);
+    let mut band = white((2.5 * FS) as usize, 1.0, 21);
+    lowpass(&mut band, FS, 3_400.0, 8);
+    let mut full = channel(&pink(FS as usize, 1, FS, 22), 1, 0);
+    drive(&mut x, 3.0);
+    drive(&mut band, 3.0);
+    drive(&mut full, 3.0);
+    // Full band first: the guard reopens slowly after band-limited input.
+    let x = [full, x, band].concat();
+    let params = FinalClipperParams {
+        threshold_db: THRESHOLD_DB,
+        adaptive_depth: true,
+        bandwidth_guard: true,
+        ..FinalClipperParams::default()
+    };
+    let mut c = clipper(true, true);
+    let mut l = limiter(true);
+    let drive_ramp: Vec<f32> = (0..3_000).map(|n| (n % 1_000) as f32 / 999.0).collect();
+    let sizes = [480usize, 1, 3_000, 37, 1_024];
+    let (mut max_pred, mut min_depth, mut max_depth) = (0.0f64, 1.0f32, 0.0f32);
+    let mut edge_seen = false;
+    let mut y = x.clone();
+    let mut rest = &mut y[..];
+    let before = allocs();
+    let mut i = 0;
+    while !rest.is_empty() {
+        let n = sizes[i % sizes.len()].min(rest.len());
+        let (b, tail) = rest.split_at_mut(n);
+        c.set_params(&params);
+        c.process(b);
+        l.process_with_drive(b, &drive_ramp[..n]);
+        max_pred = max_pred.max(c.predictability());
+        min_depth = min_depth.min(c.depth());
+        max_depth = max_depth.max(c.depth());
+        edge_seen |= c.guard_edge_hz().is_some();
+        rest = tail;
+        i += 1;
+    }
+    let n = allocs() - before;
+    assert_eq!(n, 0, "allocations in the clipper / peak control path");
+    assert!(max_pred > 0.9, "adaptive depth not exercised: {max_pred}");
+    assert!(edge_seen, "bandwidth guard never found an edge");
+    assert!(
+        min_depth < 0.1 && max_depth > 0.9,
+        "depth {min_depth} … {max_depth}"
+    );
 }

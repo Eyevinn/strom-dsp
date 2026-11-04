@@ -1788,11 +1788,7 @@ impl BroadcastProcessor {
         self.limiter_gr_max = self.limiter_gr_max.max(gr);
         // The budget counts the limiter's fast work, not the peak control's
         // slow gain (a compressor's, which costs no distortion).
-        self.sub_gr += if std::env::var("GOVFAST").is_ok() {
-            self.limiter.fast_gain_reduction_db()
-        } else {
-            gr
-        } * frames as f64;
+        self.sub_gr += self.limiter.fast_gain_reduction_db() * frames as f64;
         self.sub_frames += frames;
 
         self.chain_fade.mix(chunk, &self.chain_dry[..len], ch);

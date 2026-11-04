@@ -48,6 +48,7 @@ mod meter;
 mod multiband;
 mod multiband_expander;
 mod oversample;
+mod rt_source;
 mod rtsan;
 mod rtsan_agc;
 mod rtsan_broadcast;
