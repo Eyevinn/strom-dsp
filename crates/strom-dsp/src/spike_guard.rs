@@ -183,6 +183,21 @@ pub fn clamp_lookahead_ms(ms: f32) -> f32 {
     }
 }
 
+/// Whether the spike guard is on by default at a lookahead of
+/// `lookahead_ms` (clamped): only when the lookahead covers the longest
+/// event and its isolation window ([`EVENT_MAX_MS`] + [`ISOLATION_MS`],
+/// 0.4 ms). Then an abandoned event (programme: a word or a drum hit
+/// after a pause) is lifted before the output reads any of its dip, and
+/// programme is never touched. With less, every onset that rises more than
+/// the threshold over the recent peaks loses part of its first 0.4 ms;
+/// on speech after pauses that is audible (measured in the chain: worst
+/// frame NMR on corpus speech up to +37 dB with no lookahead, about
+/// −8 dB with the guard off). The final clipper and the true-peak limiter still catch a
+/// click's peak, so the guard only stops clicks pumping the AGC.
+pub fn on_by_default(lookahead_ms: f32) -> bool {
+    clamp_lookahead_ms(lookahead_ms) as f64 >= EVENT_MAX_MS + ISOLATION_MS
+}
+
 fn rate_or_default(sample_rate: f32) -> f64 {
     if sample_rate.is_finite() && sample_rate > 0.0 {
         sample_rate as f64

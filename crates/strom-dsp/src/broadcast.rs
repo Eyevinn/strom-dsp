@@ -263,6 +263,7 @@ pub const LOW_LATENCY_LOOKAHEAD_MS: f32 = 0.6;
 /// | bass clipper lookahead | 1 ms | 0 |
 /// | final clipper | [`ClipperLatency::Standard`] (69 frames) | [`ClipperLatency::Low`] (48 frames) |
 /// | limiter lookahead | 1.5 ms | 0.6 ms |
+/// | spike guard on | yes | no ([`spike_guard::on_by_default`]) |
 /// | budget | 6 ms | 3 ms |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LatencyMode {
@@ -328,13 +329,23 @@ impl LatencyMode {
         }
     }
 
+    /// Whether the spike guard is on in this mode
+    /// ([`spike_guard::on_by_default`] of its lookahead): on in
+    /// `Standard`, off in `Low`, where the guard has no lookahead to tell
+    /// a click from a word onset before the output reads it.
+    pub fn spike_guard_enabled(self) -> bool {
+        spike_guard::on_by_default(self.spike_guard_lookahead_ms())
+    }
+
     /// Set the four latency settings of `p` to this mode's (structural:
-    /// they take effect at the next `configure`).
+    /// they take effect at the next `configure`), and switch the spike
+    /// guard to the mode's default ([`Self::spike_guard_enabled`]).
     pub fn apply(self, p: &mut BroadcastParams) {
         p.spike_guard_lookahead_ms = self.spike_guard_lookahead_ms();
         p.bass_clipper_lookahead_ms = self.bass_clipper_lookahead_ms();
         p.clipper_latency = self.clipper_latency();
         p.limiter_lookahead_ms = self.limiter_lookahead_ms();
+        p.spike_guard_enabled = self.spike_guard_enabled();
     }
 }
 

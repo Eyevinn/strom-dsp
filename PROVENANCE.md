@@ -500,7 +500,15 @@ a large jump audible.
   `LatencyMode::Low` (none, none, low clipper, 0.6 ms; budget 3 ms). Each
   setting's cost is measured in the tests (overshoot, gain reduction,
   aliasing, onsets); the low limiter lookahead is 0.6 ms because 0.75 ms
-  put 44.1 kHz over the 3 ms budget.
+  put 44.1 kHz over the 3 ms budget. The low mode also switches the spike
+  guard off (and presets follow the mode): without lookahead it dips word
+  onsets after pauses, measured on corpus speech as a worst-frame NMR up
+  to +37 dB against about −8 dB with it off; the final clipper and the
+  limiter still take a click's peak.
+- **Speech preset without the final clipper** (own choice, measured): at
+  −18 LUFS the clipper clipped speech peaks, worst-frame NMR up to +35 dB
+  on phone speech, so the `speech` preset leaves the peaks to the
+  limiter.
 - **IM feedback wiring:** the final clipper's touched share is handed to
   the bass clipper once per 512 frames (one chunk late, since the clipper
   runs after the multiband).

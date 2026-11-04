@@ -9,8 +9,8 @@
 //!   target loudness (pre-levelled, so the AGC need not travel and the run
 //!   can stay short), then the preset runs as it is.
 //! - **Low-latency cases** (`*_low_latency`): the same in the low latency
-//!   mode ([`LatencyMode::Low`]: no spike guard or bass clipper lookahead,
-//!   the clipper's low setting, 0.6 ms limiter lookahead). Every other case
+//!   mode ([`LatencyMode::Low`]: the spike guard off, no bass clipper
+//!   lookahead, the clipper's low setting, 0.6 ms limiter lookahead). Every other case
 //!   runs in the standard mode.
 //! - **Drive cases** (AGC off): the signal's sample peak is set this many dB
 //!   over the true-peak ceiling, so the multiband and the limiter work hard

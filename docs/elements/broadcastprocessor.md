@@ -17,7 +17,8 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → f
   burst, a drum onset) it is programme and left alone, otherwise a short
   gain dip with smooth ramps brings it down to the threshold through a
   soft knee. Each channel on its own; outside its dips the stage is an
-  exact delay.
+  exact delay. On in the standard latency mode, off in the low mode (see
+  Latency).
 - **AGC:** slow and loudness-targeting. Its BS.1770 detector freezes in
   pauses and below `agc-gate`.
 - **Multiband:** LR4 crossover, one compressor per band.
@@ -84,8 +85,8 @@ its true-peak detector delay (32).
 
 | `latency-mode` | Spike guard | Bass clipper | Final clipper `C` | Limiter | 44.1 kHz | 48 kHz | 96 kHz | Budget |
 |---|---|---|---|---|---|---|---|---|
-| `standard` (default) | 0.5 ms | 1 ms | 69 | 1.5 ms | 257 frames, 5.83 ms | 269 frames, 5.60 ms | 413 frames, 4.30 ms | 6 ms |
-| `low` | 0 | 0 | 48 | 0.6 ms | 130 frames, 2.95 ms | 133 frames, 2.77 ms | 162 frames, 1.69 ms | 3 ms |
+| `standard` (default) | 0.5 ms, on | 1 ms | 69 | 1.5 ms | 257 frames, 5.83 ms | 269 frames, 5.60 ms | 413 frames, 4.30 ms | 6 ms |
+| `low` | 0, off | 0 | 48 | 0.6 ms | 130 frames, 2.95 ms | 133 frames, 2.77 ms | 162 frames, 1.69 ms | 3 ms |
 
 A test fails if either mode exceeds its budget at 44.1, 48 or 96 kHz.
 The stages share the work: the spike guard takes clicks before the AGC,
@@ -121,11 +122,21 @@ never uses BaseTransform passthrough.
   decaying 60 Hz thumps peak 10.4 / 11.4 / 11.4 dB over. In the chain the
   difference does not show: limiter mean reduction 0.82 dB with 3, 1 and
   0 ms on the hot peaky programme.
-- **Spike guard:** with no lookahead, programme that jumps more than
-  `spike-threshold` over its own recent peaks (a drum hit, a word after
-  silence) loses up to 0.4 ms of its onset to the threshold; in the
-  standard mode programme is never touched. Harness NMR of the music-like
-  programme: −42.8 dB standard, −24.3 dB low.
+- **Spike guard: off in the low mode.** With no lookahead, programme
+  that jumps more than `spike-threshold` over its own recent peaks (a
+  drum hit, a word after a pause) loses up to 0.4 ms of its onset to the
+  threshold before the guard can tell it is programme. On speech that is
+  audible: over the corpus speech and phone clips the worst-frame NMR
+  reached +37 dB with the guard on and no lookahead, against −8 dB with
+  it off (crackle check, `strom-dsp-harness` `crackle`). So writing
+  `latency-mode` low also sets `spike-guard-enabled` false, and presets
+  follow the mode. The clicks themselves are still caught: the final
+  clipper and the true-peak limiter take their peaks; what is lost is
+  that clicks can pump the AGC (the clicky programme case lands
+  −16.44 … −16.32 LUFS at `streaming`, see the click table). An operator
+  can switch it on again, accepting the onset dips. Harness NMR of the
+  music-like programme in the low mode: −24.3 dB with the guard on,
+  −43.3 dB off (standard −42.8 dB).
 
 ## Properties
 
@@ -180,7 +191,9 @@ the next caps negotiation.
 **`latency-mode` and `limiter-lookahead`.** Writing `latency-mode` sets the
 spike guard and bass clipper lookaheads, the final clipper's structure and
 `limiter-lookahead` to the mode's values (see Latency); `limiter-lookahead`
-then reads 1.5 or 0.6. A later write of `limiter-lookahead` changes only
+then reads 1.5 or 0.6. It also sets `spike-guard-enabled` (on in
+`standard`, off in `low`); a later write of `spike-guard-enabled`
+overrides it. A later write of `limiter-lookahead` changes only
 the limiter's lookahead, and `latency-mode` keeps reading the mode that
 was written; writing `latency-mode` again sets all four again. Set
 `latency-mode` first and `limiter-lookahead` after it, if at all. Presets
@@ -201,7 +214,9 @@ Setting `preset` sets every property except `enabled`, `meter-interval`,
 `num-bands`.
 - **`latency-mode` and `limiter-lookahead`:** they set the element's
   latency, so they are READY-only and not part of a preset. Every preset
-  works in both modes.
+  works in both modes. A preset sets `spike-guard-enabled` to the
+  current mode's value (off in `low`), and `get-preset-values` reports
+  that value.
 - **Writing another property afterwards:** a write that changes a value
   changes only that property, and `preset` then reads `custom`. Writing
   `custom` changes nothing.
@@ -218,7 +233,8 @@ and deliberately gentle:
 | `streaming` | −16 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −50 | −11 | 2 | 200 | 3 |
 | `speech` | −18 LUFS | −1 dBTP | 24 / 24 | 3 / 6 | −40 | −11 | 1.5 | 150 | 2 |
 
-All presets: `input-gain` 0, all stages on (clipper and governor too),
+All presets: `input-gain` 0, all stages on (governor too; the clipper
+except at `speech`; the spike guard except in the low latency mode),
 `spike-threshold` 8 dB, `multiband-drive` 0, band makeup 0,
 `clipper-bandwidth` 20000 Hz, `expander-hold` 100 ms,
 `bass-clipper-enabled` true, `bass-clip-threshold` = target + 9 dB.
@@ -247,8 +263,14 @@ All presets: `input-gain` 0, all stages on (clipper and governor too),
 - **Spike threshold 8 dB:** gentle. Only peaks more than 8 dB over the
   programme's own recent peaks, that do not recur within about 0.4 ms,
   count; they come down to that level, not to the programme's.
-- **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, and a
-  150 ms limiter release.
+- **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, a
+  150 ms limiter release, and **no final clipper**. At −18 LUFS the
+  clipper clips the peaks of loud syllables and plosives, audibly on
+  phone and codec speech: over the corpus speech and phone clips the
+  worst-frame NMR at `speech` reached +35 dB with the clipper and
+  +4.1 dB without it (standard mode; what remains is the limiter and the
+  spike guard, see the crackle check). The governor stays on but frozen
+  (it budgets the clipper's work).
 - **Expander:** target − 24 dB, 1:1.5, at most 4 dB for programme; target
   − 22 dB, 1:2, at most 6 dB for speech. After the AGC, room tone and noise
   between words sit near or below target − 25 dB, while quiet word endings

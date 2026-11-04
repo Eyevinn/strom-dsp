@@ -102,9 +102,11 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "input-gain" | "multiband-drive" => f(0.0),
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
+        // The clipper is off for speech; the spike guard is on in the
+        // standard latency mode (the element default).
+        "clipper-enabled" => (nick != "speech").to_value(),
         "agc-enabled"
         | "multiband-enabled"
-        | "clipper-enabled"
         | "governor-enabled"
         | "limiter-enabled"
         | "spike-guard-enabled" => true.to_value(),
@@ -936,7 +938,8 @@ fn latency_mode_query_budget_and_delay() {
 /// limiter lookahead to the mode's value (1.5 ms standard, 0.6 ms low); a
 /// later write of `limiter-lookahead` overrides it (the mode keeps reading
 /// what was written); writing the mode again sets the lookahead again.
-/// Presets change neither.
+/// Presets change neither. The mode also sets `spike-guard-enabled` (off
+/// in low), and presets, and the preset values, follow the mode.
 #[test]
 fn latency_mode_sets_limiter_lookahead() {
     util::init();
@@ -952,9 +955,11 @@ fn latency_mode_sets_limiter_lookahead() {
     assert_eq!(mode(&e), "standard");
     assert_eq!(e.property::<f32>("limiter-lookahead"), 1.5);
 
+    assert!(e.property::<bool>("spike-guard-enabled"));
     e.set_property_from_value("latency-mode", &latency_mode_value("low"));
     assert_eq!(mode(&e), "low");
     assert_eq!(e.property::<f32>("limiter-lookahead"), 0.6);
+    assert!(!e.property::<bool>("spike-guard-enabled"));
 
     e.set_property("limiter-lookahead", 2.0f32);
     assert_eq!(mode(&e), "low");
@@ -968,6 +973,9 @@ fn latency_mode_sets_limiter_lookahead() {
         .emit_by_name::<Option<gst::Structure>>("get-preset-values", &[&"speech"])
         .unwrap();
     assert!(!s.has_field("latency-mode") && !s.has_field("limiter-lookahead"));
+    assert!(!e.property::<bool>("spike-guard-enabled"));
+    assert!(!s.get::<bool>("spike-guard-enabled").unwrap());
+    assert_eq!(preset_nick(&e), "speech", "the preset follows the mode");
 
     // The override is what gets configured: low settings, 2 ms lookahead.
     let mut h = Harness::with_element(&e, Some("sink"), Some("src"));
@@ -980,6 +988,7 @@ fn latency_mode_sets_limiter_lookahead() {
 
     e.set_property_from_value("latency-mode", &latency_mode_value("standard"));
     assert_eq!(e.property::<f32>("limiter-lookahead"), 1.5);
+    assert!(e.property::<bool>("spike-guard-enabled"));
 }
 
 /// A `latency-mode` write while playing changes nothing until the next
