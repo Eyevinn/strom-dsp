@@ -9,8 +9,8 @@ use std::f64::consts::PI;
 
 use crate::agc_support::{pink, Rng};
 use strom_dsp::spike_guard::{
-    latency_frames_for, SpikeGuard, SpikeGuardParams, DEFAULT_THRESHOLD_DB, EVENT_MAX_MS,
-    LOW_LATENCY_LOOKAHEAD_MS, RAMP_MS, STANDARD_LOOKAHEAD_MS, THRESHOLD_RANGE_DB,
+    latency_frames_for, SpikeGuard, SpikeGuardParams, DEFAULT_THRESHOLD_DB,
+    LOW_LATENCY_LOOKAHEAD_MS, STANDARD_LOOKAHEAD_MS, THRESHOLD_RANGE_DB,
 };
 use strom_dsp::Processor;
 
@@ -117,15 +117,17 @@ fn impulse_latency_when_disabled() {
 /// 20 dB over the bed, a dense drum pattern with sharp stick transients,
 /// and sudden 2 kHz and 200 Hz tones 20 dB over the bed. None is a spike:
 /// no event is counted, and the output is the input delayed by the latency,
-/// bit for bit, except within an abandoned event's reach after each onset
-/// (`EVENT_MAX_MS − lookahead` plus a ramp, where the onset is nipped). With
-/// a lookahead of 2 ms an event is abandoned before the output reaches it,
-/// and the output is bit-exact everywhere.
+/// bit for bit, in both latency modes and with a 2 ms lookahead, at 48,
+/// 44.1 and 96 kHz (the samples are the same; only the configured rate
+/// differs).
 ///
-/// Guard: every section rises far more than the threshold above the
+/// Guards: every section rises far more than the threshold above the
 /// envelope (checked below), so a spike guard that capped everything above
 /// `envelope + threshold` (no event gate: no "short" test) would change
-/// whole sections and fail.
+/// whole sections and fail. And without the rise gate the low mode, with no
+/// lookahead, starts events on the drum hits' stick transients and loses
+/// part of each onset before it can abandon them (measured with the rise
+/// gate taken out: 430 samples changed at 48 kHz, cuts up to 22.8 dB).
 #[test]
 fn clean_programme_is_bit_exact() {
     let ch = 2;
@@ -184,48 +186,34 @@ fn clean_programme_is_bit_exact() {
         );
     }
 
-    for (name, la) in [MODES[0], MODES[1], ("2 ms", 2.0)] {
-        // Frames after an onset (input time) an abandoned dip can reach.
-        let reach = if la as f64 > EVENT_MAX_MS + 0.03 {
-            0
-        } else {
-            ms(EVENT_MAX_MS - la as f64 + RAMP_MS + 0.2)
-        };
-        for block in [480usize, 1, 1024] {
-            let mut g = guard_la(FS, ch, &SpikeGuardParams::default(), la);
-            let lat = g.latency_frames();
-            let y = run(&mut g, &x, ch, block);
-            assert_eq!(g.take_events(), 0, "{name} block {block}: events counted");
-            let mut nipped = 0;
-            let mut max_cut_db = 0.0f64;
-            for f in lat..frames {
-                let n = f - lat;
-                let near = onsets.iter().any(|&o| n + ms(0.6) >= o && n < o + reach);
-                for c in 0..ch {
-                    let (got, want) = (y[f * ch + c], x[n * ch + c]);
-                    if got.to_bits() != want.to_bits() {
-                        let o = onsets
-                            .iter()
-                            .map(|&o| n as i64 - o as i64)
-                            .min_by_key(|d| d.abs());
-                        assert!(
-                            near,
-                            "{name} block {block}: frame {f} ch {c} {got} vs {want}, \
-                             nearest onset {o:?} frames away"
-                        );
-                        nipped += 1;
-                        let cut = (want.abs() as f64 / got.abs().max(1e-12) as f64).log10() * 20.0;
-                        max_cut_db = max_cut_db.max(cut);
+    for fs_cfg in [48_000.0f32, 44_100.0, 96_000.0] {
+        for (name, la) in [MODES[0], MODES[1], ("2 ms", 2.0)] {
+            for block in [480usize, 1, 1024] {
+                let mut g = guard_la(fs_cfg, ch, &SpikeGuardParams::default(), la);
+                let lat = g.latency_frames();
+                let y = run(&mut g, &x, ch, block);
+                let events = g.take_events();
+                let mut nipped = 0;
+                let mut max_cut_db = 0.0f64;
+                for f in lat..frames {
+                    for c in 0..ch {
+                        let (got, want) = (y[f * ch + c], x[(f - lat) * ch + c]);
+                        if got.to_bits() != want.to_bits() {
+                            nipped += 1;
+                            let cut =
+                                (want.abs() as f64 / got.abs().max(1e-12) as f64).log10() * 20.0;
+                            max_cut_db = max_cut_db.max(cut);
+                        }
                     }
                 }
-            }
-            if block == 480 {
-                println!(
-                    "{name}: {nipped} samples changed at onsets, largest cut {max_cut_db:.1} dB"
-                );
-            }
-            if reach == 0 {
-                assert_eq!(nipped, 0, "{name}");
+                if block == 480 {
+                    println!(
+                        "{fs_cfg} Hz, {name}: {events} events, {nipped} samples changed, \
+                         largest cut {max_cut_db:.1} dB"
+                    );
+                }
+                assert_eq!(events, 0, "{fs_cfg} Hz, {name}, block {block}: events");
+                assert_eq!(nipped, 0, "{fs_cfg} Hz, {name}, block {block}: changed");
             }
         }
     }
@@ -255,8 +243,14 @@ fn clicks_are_caught_and_confined() {
         }
     }
     let p = SpikeGuardParams::default();
-    for (name, la) in MODES {
-        let mut g = guard_la(FS, ch, &p, la);
+    // The samples are the same at every configured rate.
+    for (name, la, fs) in [
+        (MODES[0].0, MODES[0].1, FS),
+        (MODES[1].0, MODES[1].1, FS),
+        ("low at 44.1 kHz", MODES[1].1, 44_100.0),
+        ("low at 96 kHz", MODES[1].1, 96_000.0),
+    ] {
+        let mut g = guard_la(fs, ch, &p, la);
         let lat = g.latency_frames();
         let y = run(&mut g, &x, ch, 480);
         assert_eq!(g.take_events() as usize, clicks.len(), "{name}");
@@ -302,8 +296,8 @@ fn crest_db(x: &[f32]) -> f64 {
 }
 
 /// A dense percussive signal at programme level (hits every 60 … 100 ms,
-/// sharp stick transients, no bed) loses at most 1 dB of crest factor with
-/// the standard lookahead, at the default threshold and at the lowest one.
+/// sharp stick transients, no bed) loses at most 1 dB of crest factor in
+/// both latency modes, at the default threshold and at the lowest one.
 #[test]
 fn dense_percussion_keeps_crest_factor() {
     let ch = 2;
@@ -327,10 +321,7 @@ fn dense_percussion_keeps_crest_factor() {
         }
         at += (0.06 * fs + 0.04 * fs * rng.uniform()) as usize;
     }
-    // Standard lookahead: within 1 dB (the requirement). No lookahead: the
-    // hits' onsets lose up to 0.4 ms to the cap; the loss is reported and
-    // bounded at 3 dB so it cannot grow unnoticed.
-    for (name, la, bound) in [(MODES[0].0, MODES[0].1, 1.0), (MODES[1].0, MODES[1].1, 3.0)] {
+    for (name, la, bound) in [(MODES[0].0, MODES[0].1, 1.0), (MODES[1].0, MODES[1].1, 1.0)] {
         for threshold_db in [DEFAULT_THRESHOLD_DB, THRESHOLD_RANGE_DB.0] {
             let p = SpikeGuardParams {
                 enabled: true,

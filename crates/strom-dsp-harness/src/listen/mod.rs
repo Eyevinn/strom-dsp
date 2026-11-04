@@ -524,7 +524,7 @@ pub struct RenderOptions {
 
 /// Mono or multichannel `x` as stereo (mono duplicated, beyond two
 /// channels the first two).
-fn to_stereo(x: &[f32], ch: usize) -> Vec<f32> {
+pub fn to_stereo(x: &[f32], ch: usize) -> Vec<f32> {
     let mut y = Vec::with_capacity(x.len() / ch * 2);
     for f in x.chunks_exact(ch) {
         let (l, r) = if ch == 1 { (f[0], f[0]) } else { (f[0], f[1]) };

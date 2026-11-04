@@ -102,9 +102,10 @@ fn documented(nick: &str, n: u32, name: &str) -> glib::Value {
         "input-gain" | "multiband-drive" => f(0.0),
         "target-loudness" => f(target),
         "true-peak-ceiling" => f(ceiling),
+        // The clipper is off for speech.
+        "clipper-enabled" => (nick != "speech").to_value(),
         "agc-enabled"
         | "multiband-enabled"
-        | "clipper-enabled"
         | "governor-enabled"
         | "limiter-enabled"
         | "spike-guard-enabled" => true.to_value(),

@@ -221,6 +221,13 @@ fn bypass_exact_and_no_allocation() {
 /// 3 kHz 20 dB under it) through the chain with `p`, with or without the
 /// IM feedback; also the feedback's threshold reduction at the end (dB).
 fn im_sidebands(p: &BroadcastParams, bass: f64, feedback: bool) -> (f64, f64) {
+    im_sidebands_with(p, bass, feedback, true)
+}
+
+/// [`im_sidebands`]; `adaptive` false switches the final clipper's
+/// content-adaptive depth and bandwidth guard off (a pair of tones is
+/// predictable, so with them on the clipper leaves it to the limiter).
+fn im_sidebands_with(p: &BroadcastParams, bass: f64, feedback: bool, adaptive: bool) -> (f64, f64) {
     let mono = measure_support::bass_into_highs(
         8 * FS as usize,
         FS as f64,
@@ -232,6 +239,8 @@ fn im_sidebands(p: &BroadcastParams, bass: f64, feedback: bool) -> (f64, f64) {
     let mut x = to_channels(&mono, 2);
     let mut bp = processor(p, 2);
     bp.set_bass_im_feedback(feedback);
+    bp.set_clipper_adaptive_depth(adaptive);
+    bp.set_clipper_bandwidth_guard(adaptive);
     for c in x.chunks_mut(960) {
         bp.process(c);
     }
@@ -274,8 +283,13 @@ fn im_feedback_end_to_end() {
     let clip_threshold_db = p.true_peak_ceiling_dbtp - strom_dsp::broadcast::CLIPPER_MARGIN_DB;
     p.bass_clip_threshold_db = clip_threshold_db;
     let bass = lin(clip_threshold_db as f64 + 3.0);
-    let (without, im_off) = im_sidebands(&p, bass, false);
-    let (with, im_on) = im_sidebands(&p, bass, true);
+    let (without, im_off) = im_sidebands_with(&p, bass, false, false);
+    let (with, im_on) = im_sidebands_with(&p, bass, true, false);
+    // With the defaults the clipper takes nothing from the predictable pair
+    // and the limiter's slow peak control holds it: no chopping at all.
+    let (adaptive, _) = im_sidebands(&p, bass, true);
+    eprintln!("with the content-adaptive depth: sidebands {adaptive:.1} dBc");
+    assert!(adaptive <= with + 1.0, "adaptive {adaptive:.1} dBc");
     eprintln!(
         "bass into highs at a fixed clipper drive: sidebands without feedback {without:.1} dBc, \
          with {with:.1} dBc ({:.1} dB lower); bass threshold lowered by {im_on:.2} dB",

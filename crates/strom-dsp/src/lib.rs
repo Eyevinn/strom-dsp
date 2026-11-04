@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 
 pub mod agc;
+pub mod bandwidth_guard;
 pub mod bassclip;
 pub mod biquad;
 pub mod broadcast;
@@ -50,6 +51,7 @@ pub mod limiter;
 pub mod meter;
 pub mod multiband;
 pub mod oversample;
+pub mod predictability;
 pub mod presets;
 pub mod resample;
 pub mod simd;

@@ -152,7 +152,7 @@ impl LimiterParams {
 /// | `multiband_enabled` | true | |
 /// | `multiband_drive_db` | 0 dB | modest: no extra drive into the bands |
 /// | `limiter_enabled` | true | the true-peak ceiling is a hard delivery requirement |
-/// | `clipper_enabled` | true | the final clipper takes the last peaks cleanly, so the limiter mostly catches inter-sample residue and bass |
+/// | `clipper_enabled` | true, `Speech` false | the final clipper takes the last peaks cleanly, so the limiter mostly catches inter-sample residue and bass. On speech at −18 LUFS it clips the peaks of loud syllables and plosives, audibly on phone and codec speech (worst-frame NMR on corpus speech and phone clips up to +35 dB with it, +2.7 dB without), so `Speech` leaves the peaks to the limiter |
 /// | `clipper_bandwidth_hz` | 20 000 Hz | [`BROADCAST_CLIPPER_BANDWIDTH_HZ`] |
 /// | `governor_enabled` | true | keeps the clipper and the limiter within the clip budget |
 /// | band `makeup_db` | 0 dB | the AGC sets the level; makeup would only move the loudness away from the target |
@@ -320,6 +320,11 @@ impl BroadcastPreset {
         }
     }
 
+    /// Whether the preset runs the final clipper. See the type docs.
+    fn clipper_enabled(self) -> bool {
+        !matches!(self, Self::Speech)
+    }
+
     /// Clip budget (dB) of the preset. See the type docs.
     fn clip_budget_db(self) -> f32 {
         match self {
@@ -428,7 +433,7 @@ impl BroadcastParams {
             makeup_db: 0.0,
             knee_db: BROADCAST_BAND_KNEE_DB,
         });
-        self.clipper_enabled = true;
+        self.clipper_enabled = preset.clipper_enabled();
         self.clipper_bandwidth_hz = BROADCAST_CLIPPER_BANDWIDTH_HZ;
         self.clip_budget_db = preset.clip_budget_db();
         self.governor_enabled = true;
@@ -530,7 +535,13 @@ mod tests {
                 assert!(p.agc_gate_lufs < p.target_loudness_lufs - 15.0, "{ctx}");
                 assert_eq!(p.multiband_drive_db, 0.0, "{ctx}: modest drive");
                 assert!(r(p.limiter_release_ms, 1.0, 2000.0), "{ctx}");
-                assert!(p.clipper_enabled && p.governor_enabled, "{ctx}");
+                assert!(p.governor_enabled, "{ctx}");
+                assert_eq!(
+                    p.clipper_enabled,
+                    preset != BroadcastPreset::Speech,
+                    "{ctx}: the clipper is off for speech"
+                );
+                assert!(p.spike_guard_enabled, "{ctx}");
                 assert!(r(p.clip_budget_db, 0.0, 6.0), "{ctx}");
                 assert!(r(p.clipper_bandwidth_hz, 8000.0, 22_000.0), "{ctx}");
                 assert!(r(p.crossover_hz[0], 20.0, 20_000.0), "{ctx}");

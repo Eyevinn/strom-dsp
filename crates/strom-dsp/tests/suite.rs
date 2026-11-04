@@ -22,6 +22,7 @@ mod broadcast_expander_bass;
 mod broadcast_latency;
 mod cleanup;
 mod clipper;
+mod clipper_adaptive;
 mod compressor;
 mod compressor_1b;
 mod compressor_auto_makeup;

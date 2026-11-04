@@ -302,7 +302,7 @@ const MASK_OFFSET_DB: f64 = 10.0;
 const SPREAD_UP_DB: f64 = 10.0;
 const SPREAD_DOWN_DB: f64 = 25.0;
 /// Bark bands 0 … 24.
-const BARK_BANDS: usize = 25;
+pub const BARK_BANDS: usize = 25;
 /// Frames whose reference is quieter than this (dBFS, mean square) are
 /// left out.
 const NMR_MIN_LEVEL_DB: f64 = -70.0;
@@ -349,6 +349,48 @@ pub fn bark(f: f64) -> f64 {
 /// 4. Frame NMR = mean over bands of error/threshold; the result is the
 ///    mean over frames, in dB.
 pub fn nmr(reference: &[f32], processed: &[f32], ch: usize, fs: f64, from: usize) -> Nmr {
+    let mut ratio_sum = 0.0;
+    let mut n_frames = 0usize;
+    let mut max_frame = NONE_DB;
+    nmr_frames(reference, processed, ch, fs, from, |f| {
+        ratio_sum += f.ratio;
+        n_frames += 1;
+        max_frame = max_frame.max(db10(f.ratio));
+    });
+    Nmr {
+        mean_db: if n_frames > 0 {
+            db10(ratio_sum / n_frames as f64)
+        } else {
+            NONE_DB
+        },
+        max_frame_db: max_frame,
+    }
+}
+
+/// One frame of [`nmr`] (for diagnostics).
+#[derive(Debug, Clone, Copy)]
+pub struct NmrFrame {
+    /// First frame (sample frame index) and channel.
+    pub start: usize,
+    pub channel: usize,
+    /// Frame NMR (linear ratio, mean over bands).
+    pub ratio: f64,
+    /// Per Bark band: gain-matched reference energy, error energy and
+    /// masked threshold (energies relative to the frame mean square).
+    pub reference: [f64; BARK_BANDS],
+    pub error: [f64; BARK_BANDS],
+    pub threshold: [f64; BARK_BANDS],
+}
+
+/// Every frame of [`nmr`], in order (channel by channel), to `each`.
+pub fn nmr_frames(
+    reference: &[f32],
+    processed: &[f32],
+    ch: usize,
+    fs: f64,
+    from: usize,
+    mut each: impl FnMut(&NmrFrame),
+) {
     use realfft::RealFftPlanner;
     let frames = (reference.len().min(processed.len())) / ch;
     let mut planner = RealFftPlanner::<f64>::new();
@@ -384,9 +426,6 @@ pub fn nmr(reference: &[f32], processed: &[f32], ch: usize, fs: f64, from: usize
     let floor = 0.5 * 10f64.powf(MASK_FLOOR_DB / 10.0);
     let min_level = 10f64.powf(NMR_MIN_LEVEL_DB / 10.0);
 
-    let mut ratio_sum = 0.0;
-    let mut n_frames = 0usize;
-    let mut max_frame = NONE_DB;
     let mut rb = fft.make_input_vec();
     let mut pb = fft.make_input_vec();
     let mut rs = fft.make_output_vec();
@@ -426,24 +465,23 @@ pub fn nmr(reference: &[f32], processed: &[f32], ch: usize, fs: f64, from: usize
                 nb[b] = (y2[b] - g * yr[b]).max(0.0) * norm;
             }
             let mut frame = 0.0;
+            let mut th = [0.0f64; BARK_BANDS];
             for b in 0..BARK_BANDS {
                 let t: f64 = (0..BARK_BANDS).map(|j| mb[j] * spread[b][j]).sum();
-                frame += nb[b] / t.max(floor);
+                th[b] = t.max(floor);
+                frame += nb[b] / th[b];
             }
             frame /= BARK_BANDS as f64;
-            ratio_sum += frame;
-            n_frames += 1;
-            max_frame = max_frame.max(db10(frame));
+            each(&NmrFrame {
+                start,
+                channel: c,
+                ratio: frame,
+                reference: mb,
+                error: nb,
+                threshold: th,
+            });
             start += NMR_HOP;
         }
-    }
-    Nmr {
-        mean_db: if n_frames > 0 {
-            db10(ratio_sum / n_frames as f64)
-        } else {
-            NONE_DB
-        },
-        max_frame_db: max_frame,
     }
 }
 

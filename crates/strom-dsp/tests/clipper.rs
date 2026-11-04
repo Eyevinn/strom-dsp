@@ -718,6 +718,8 @@ fn robust() {
             low_cut: rng.uniform() < 0.5,
             overshoot_compensation: rng.uniform() < 0.5,
             passes: (rng.uniform() * 4.0) as usize,
+            adaptive_depth: rng.uniform() < 0.5,
+            bandwidth_guard: rng.uniform() < 0.5,
         };
         c.set_params(&p);
         let amp = 10f64.powf(rng.uniform() * 12.0 - 6.0);

@@ -309,6 +309,17 @@ basics from J. O. Smith III. No code listing was used.
   - **Result:** THD below 0.00005 % from 50 to 440 Hz. The release starts H
     frames later.
   - **Guard test:** `tests/limiter_thd.rs`.
+- **Peak control (crate-internal hook, off unless set; used by the
+  broadcast chain's true-peak limiter).** The compressor gain computer
+  (Giannoulis et al. 2012: static curve with soft knee, branching one-pole
+  attack/release in dB) on the frame peak, with its threshold under the
+  ceiling and its slope scaled by a per-frame drive; the static reduction
+  held for 20 ms (own choice: longer than a pitch period, so the smoothed
+  reduction rises continuously on speech; the same reasoning as the gain
+  hold above, after Giannoulis et al. on fast time constants). The required
+  gain becomes `min(r[j], g_pc[j])`, so the proof above is unchanged (own
+  derivation; a two-stage limiter is textbook, the min form keeps the
+  stages from adding up). Guard tests: `tests/clipper_adaptive.rs`.
 
 ### Loudness detector (`src/meter/kweighting.rs`)
 
@@ -433,6 +444,23 @@ No commercial-processor material and no patent-driven method was used.
   touched high-rate samples) for the clip budget and for stages before the
   clipper.
 
+**Depth (both parts off by default; on in the broadcast chain).** The
+clippings are scaled by a depth before they are subtracted.
+- Content-adaptive depth: less clipping on more predictable material, the
+  idea of expired US 4,241,266 (*expired; status not legally reviewed*).
+  One control value per 64-frame block from the linear-prediction gain
+  (`src/predictability.rs`, below); thresholds 2 and 5 dB chosen on the
+  test corpus. No masking model, no scoring of alternatives.
+- Bandwidth guard: no clippings while the programme is band-limited
+  (`src/bandwidth_guard.rs`, below). Own choice, by measurement: shaping
+  the clippings below the edge with precomputed filters (the window method
+  above, per edge) stopped about 50 dB within the clipper's latency, too
+  little against an empty band (corpus phone clips +5.6 … +27 dB
+  worst-frame NMR at `streaming`, against +0.2 … +1.7 dB with no
+  clippings).
+- Both decide on a fixed grid of input frames and ramp linearly (64 frames;
+  the guard 15 ms), so the output does not depend on the buffer size.
+
 **Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −94.0
 dBFS (standard), −75.8 dBFS (low); worst sample peak over the threshold on
 band-limited signals driven 2 and 4 dB +0.77 dB (standard), +2.17 dB
@@ -442,6 +470,31 @@ equal or higher loudness than the true-peak limiter alone and than a
 base-rate hard clip at drives 0 … 4 dB. The NMR is a test metric only (own
 Bark-band model after Brandenburg 1987 and Zwicker & Fastl); nothing in the
 processing path uses a masking model.
+
+### Linear-prediction gain (`src/predictability.rs`)
+
+- Autocorrelation method of linear prediction and the Levinson–Durbin
+  recursion: J. Makhoul, "Linear prediction: a tutorial review", Proc.
+  IEEE 63(4), 1975; the prediction gain `r₀/E_P`.
+- Recursive (exponential) autocorrelation window: T. P. Barnwell,
+  "Recursive windowing for generating autocorrelation coefficients for
+  LPC analysis", IEEE Trans. ASSP 29(5), 1981.
+- Pre-emphasis `1 − 0.9 z⁻¹`, order 10 at an 8 kHz analysis rate, white-noise
+  correction of r₀: the textbook narrowband speech LPC setup (Rabiner &
+  Schafer, *Digital Processing of Speech Signals*, ch. 8).
+- Own choices: analysis below 3.5 kHz (4th-order Butterworth, decimated),
+  so the reading does not depend on the programme's upper band edge; a
+  reflection coefficient at or over 1 (the recursive window is not always
+  positive definite) reads as fully predictable (a sum of tones).
+
+### Bandwidth guard (`src/bandwidth_guard.rs`)
+
+- Short-time band energies from a filter bank (4th-order Butterworth
+  high-passes at 4, 8 and 12 kHz) against the full band, one-pole
+  averages per block: textbook spectral analysis (Oppenheim & Schafer;
+  Zölzer, *DAFX*, filter banks). Hysteresis thresholds (−40 / −46 dB),
+  the faster fall (0.25 s against 1 s) and the hold in quiet blocks are
+  own choices, set on the test corpus (see the module docs).
 
 ### Clip budget governor (`src/governor.rs`)
 
@@ -486,6 +539,14 @@ neither pump it nor count toward the loudness it measures. Levelling comes
 first, so the band dynamics work on programme at the target loudness, and
 the true-peak ceiling comes last, so no later stage can push a peak over it.
 
+The clipper's depth (content-adaptive and bandwidth guard) and the
+limiter's peak control are coupled per frame (own design): the peak
+control's drive is what the clipper's depth leaves, or with the clipper
+off the clipper's predictability. Measured on the corpus speech and phone
+clips (crackle check), each part is needed: without the peak control,
+the adaptive depth or the guard the worst frame reaches +12.6, +17.8 and
++32.9 dB.
+
 With the clipper taking the peaks, the limiter's default lookahead dropped
 from 5 ms to 1.5 ms, justified by measurement: the true-peak ceiling holds
 within +0.008 dB on the nasty-signal set at 44.1, 48 and 96 kHz, and the
@@ -501,6 +562,15 @@ a large jump audible.
   setting's cost is measured in the tests (overshoot, gain reduction,
   aliasing, onsets); the low limiter lookahead is 0.6 ms because 0.75 ms
   put 44.1 kHz over the 3 ms budget.
+- **Speech preset without the final clipper** (own choice, measured): at
+  −18 LUFS the clipper clipped speech peaks, worst-frame NMR up to +35 dB
+  on phone speech (+2.7 dB without it), so the `speech` preset leaves the
+  peaks to the limiter.
+- **Crackle acceptance check** (own test design, `strom-dsp-harness`
+  `crackle`): worst per-frame NMR (the harness's own NMR model, see
+  Measurement harness) under 0 dB over the corpus speech and phone clips
+  for every preset and latency mode, known failures listed with their
+  measured cause.
 - **IM feedback wiring:** the final clipper's touched share is handed to
   the bass clipper once per 512 frames (one chunk late, since the clipper
   runs after the multiband).
@@ -591,7 +661,25 @@ Own design choices:
   standard 0.5 ms lookahead the decision is made before the output reads
   any of the dip, so an abandoned event leaves the programme bit-exact;
   with no lookahead the output keeps up to 0.4 ms of the dip (an onset
-  "nip"), which the tests measure.
+  "nip").
+- **Rise gate** (own refinement of the envelope detection above, not from
+  the textbook): an excursion over the cap starts an event only if, in
+  the base-rate input the 4× interpolator already buffers (24 frames, no
+  added latency), (1) the one-sample step into its peak exceeds the cap,
+  (2) the two samples before that step are at or under the cap (it rises
+  from the programme level), and (3) nothing above its core comes back in
+  the isolation window (0.25 … 0.4 ms after its start; at 88.2 kHz and
+  above, where the buffer reaches only 0.25 ms, the last 7 buffered
+  frames). A refused excursion goes into the envelope at once. Measured
+  thresholds: the step at −3 dB re the cap let plosives through on corpus
+  speech (+2.1 dB worst-frame NMR in the low mode), 0 and +3 dB were
+  clean, and +6 dB lost harness clicks (58 of 78 caught instead of 69);
+  0 dB is used. Each of the three conditions is needed (worst-frame NMR
+  of the low mode on corpus speech, −9.3 dB with all three): without (1)
+  +14.1 dB, without (3) +7.6 dB, without (2) at least −0.7 dB (a
+  high-frequency word onset was dipped). With it the low mode needs no lookahead: corpus speech measures
+  the same with the guard as without it, and the test clicks are caught
+  as before.
 - **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
   interpolator's ringing before a large click) and the ramp after a spike
   stay out of the envelope; an abandoned event's peak goes into it at once.
@@ -1033,6 +1121,8 @@ and are shared with the harness.
     per-band least-squares gain matching, a spreading function of
     −10/−25 dB per Bark and a 10 dB offset. **The masking model is a test
     metric only**; nothing in the processing or control path uses it.
+    `metrics::nmr_frames` exposes the per-frame, per-band numbers for
+    diagnosis (the crackle example's `diag:` mode).
 
 ### Listening kit and test corpus (`crates/strom-dsp-harness/src/listen/`, `scripts/`, `corpus/`)
 
