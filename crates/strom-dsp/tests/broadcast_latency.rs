@@ -281,7 +281,10 @@ fn true_peak_ceiling_holds_at_short_lookahead() {
 /// input, and the same peaky programme hot (AGC off, −10 LUFS, 6 dB over
 /// the target into the multiband, clipper and limiter). The bounds: true
 /// peak ≤ ceiling + 0.1 dB and mean limiter gain reduction ≤ 2 dB in every
-/// configuration.
+/// configuration. "Clipper off" measures the plain limiter: its peak
+/// control is off too (with the clipper off it would otherwise take every
+/// peak with its slow gain, 3 dB under the ceiling, which is what it is
+/// for, not limiter work).
 #[test]
 fn limiter_work_on_programme() {
     let fs = 48_000.0f64;
@@ -344,6 +347,7 @@ fn limiter_work_on_programme() {
             let mut bp = BroadcastProcessor::new();
             bp.set_params(&params(cfg, base));
             bp.configure(fs as f32, 2);
+            bp.set_limiter_peak_control(cfg.clipper);
             let lat_ms = bp.latency_frames() as f64 / fs * 1000.0;
             let mut m = LoudnessMeter::new(&LoudnessConfig {
                 sample_rate: fs as f32,

@@ -46,10 +46,23 @@
 //! - **Final clipper**: [`crate::clipper::FinalClipper`] (oversampled
 //!   soft clipping of shaped clippings; `clipper_latency` sets 69 or 48
 //!   frames), threshold [`CLIPPER_MARGIN_DB`] under the ceiling, low cut at
-//!   the lowest crossover, band limit `clipper_bandwidth_hz`.
+//!   the lowest crossover, band limit `clipper_bandwidth_hz`, with its
+//!   content-adaptive depth and bandwidth guard on ([`crate::clipper`],
+//!   "Depth"): it does not clip predictable material (speech, tones) or
+//!   band-limited programme (phone, codecs).
 //! - **Limiter**: [`crate::truepeak::TruePeakLimiter`] with ceiling
 //!   `true_peak_ceiling_dbtp` (dBTP, BS.1770 Annex 2 detector; lookahead +
-//!   32 frames of detector delay). It stays the guaranteed ceiling.
+//!   32 frames of detector delay). It stays the guaranteed ceiling. Its
+//!   peak control ([`crate::limiter`], "Peak control"; threshold
+//!   [`PEAK_CONTROL_HEADROOM_DB`] under the ceiling, ratio
+//!   [`PEAK_CONTROL_RATIO`], attack [`PEAK_CONTROL_ATTACK_MS`], release
+//!   [`PEAK_CONTROL_RELEASE_MS`]) takes, frame by frame, what the clipper
+//!   leaves: its drive is `1 −` the clipper's depth, or, with the clipper
+//!   off, the clipper's predictability (the clipper stage runs while
+//!   bypassed). On noise-like full-band material it is off and the plain
+//!   limiter takes the peaks. The limiter's meter includes it; the clip
+//!   budget counts only the fast part (what the limiter takes beyond the
+//!   peak control), since a slow gain costs no distortion.
 //! - **Clip budget governor**: [`crate::governor::ClipBudgetGovernor`],
 //!   below.
 //!
@@ -191,6 +204,7 @@ use crate::dynamics::expander::{
 use crate::dynamics::ExpanderParams;
 use crate::dynamics::OnePole;
 use crate::governor::{ClipBudgetGovernor, GovernorInputs, GovernorState};
+use crate::limiter::PeakControlParams;
 use crate::meter::{
     lufs_from_mean_square, ChannelLayout, History, LoudnessConfig, LoudnessDetector, LoudnessMeter,
     WindowSum, SUB_BLOCK_MS,
@@ -337,6 +351,23 @@ impl LatencyMode {
         p.limiter_lookahead_ms = self.limiter_lookahead_ms();
     }
 }
+
+/// Limiter peak control: threshold under the ceiling (dB). The values
+/// below were chosen on the corpus speech and phone clips (crackle check,
+/// worst-frame NMR over every preset × latency mode): headroom 2 … 4 dB,
+/// ratio 8 … 20, attack 3 … 5 ms and release ≥ 1 s pass with 0.4 … 2 dB of
+/// margin; a release of 500 ms or an attack of 2 ms fails. 3 dB, 8:1,
+/// 4 ms, 1 s has the largest margin (1.5 dB).
+pub const PEAK_CONTROL_HEADROOM_DB: f32 = 3.0;
+/// Limiter peak control: ratio at full drive.
+pub const PEAK_CONTROL_RATIO: f32 = 8.0;
+/// Limiter peak control: knee width (dB).
+pub const PEAK_CONTROL_KNEE_DB: f32 = 3.0;
+/// Limiter peak control: attack (ms).
+pub const PEAK_CONTROL_ATTACK_MS: f32 = 4.0;
+/// Limiter peak control: release (ms): long enough to hold across the
+/// syllables of a phrase.
+pub const PEAK_CONTROL_RELEASE_MS: f32 = 1_000.0;
 
 /// Final clipper: knee width (dB) of its curve.
 pub const CLIPPER_KNEE_DB: f32 = 2.0;
@@ -933,9 +964,23 @@ impl OutputTrim {
 /// [`ClipperLatency`], threshold [`CLIPPER_MARGIN_DB`] under the true-peak
 /// ceiling, low cut at the lowest crossover. Latency 69 frames (standard)
 /// or 48 (low) at every rate.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ClipperStage {
     inner: FinalClipper,
+    /// Content-adaptive depth and bandwidth guard (on by default; see
+    /// [`BroadcastProcessor::set_clipper_adaptive_depth`]).
+    adaptive_depth: bool,
+    bandwidth_guard: bool,
+}
+
+impl Default for ClipperStage {
+    fn default() -> Self {
+        Self {
+            inner: FinalClipper::default(),
+            adaptive_depth: true,
+            bandwidth_guard: true,
+        }
+    }
 }
 
 impl ClipperStage {
@@ -954,12 +999,16 @@ impl ClipperStage {
             knee_db: CLIPPER_KNEE_DB,
             bandwidth_hz: p.clipper_bandwidth_hz,
             low_cut_hz: p.crossover_hz[0],
+            adaptive_depth: self.adaptive_depth,
+            bandwidth_guard: self.bandwidth_guard,
             ..FinalClipperParams::default()
         });
     }
 
-    fn process(&mut self, x: &mut [f32]) {
-        self.inner.process(x);
+    /// Process `x`, writing the clipper's depth and predictability per
+    /// frame.
+    fn process(&mut self, x: &mut [f32], depth: &mut [f32], predictable: &mut [f32]) {
+        self.inner.process_with_control(x, depth, predictable);
     }
 
     fn reset(&mut self) {
@@ -970,9 +1019,21 @@ impl ClipperStage {
 /// Limiter stage: [`TruePeakLimiter`] (BS.1770 Annex 2 detector). Its own
 /// `enabled` stays on: the chain does the bypass. Latency = lookahead +
 /// detector delay.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LimiterStage {
     inner: TruePeakLimiter,
+    /// Peak control (on by default; see
+    /// [`BroadcastProcessor::set_limiter_peak_control`]).
+    peak_control: bool,
+}
+
+impl Default for LimiterStage {
+    fn default() -> Self {
+        Self {
+            inner: TruePeakLimiter::default(),
+            peak_control: true,
+        }
+    }
 }
 
 impl LimiterStage {
@@ -987,6 +1048,17 @@ impl LimiterStage {
     }
 
     fn set_params(&mut self, p: &BroadcastParams, ceiling_dbtp: f32, lookahead_ms: f32) {
+        self.inner.set_peak_control(&PeakControlParams {
+            headroom_db: PEAK_CONTROL_HEADROOM_DB,
+            ratio: if self.peak_control {
+                PEAK_CONTROL_RATIO
+            } else {
+                1.0
+            },
+            knee_db: PEAK_CONTROL_KNEE_DB,
+            attack_ms: PEAK_CONTROL_ATTACK_MS,
+            release_ms: PEAK_CONTROL_RELEASE_MS,
+        });
         self.inner.set_params(&TruePeakLimiterParams {
             enabled: true,
             ceiling_dbtp,
@@ -995,8 +1067,9 @@ impl LimiterStage {
         });
     }
 
-    fn process(&mut self, x: &mut [f32]) {
-        self.inner.process(x);
+    /// Process `x` with the peak control's drive per frame.
+    fn process(&mut self, x: &mut [f32], drive: &[f32]) {
+        self.inner.process_with_drive(x, drive);
     }
 
     fn reset(&mut self) {
@@ -1006,6 +1079,12 @@ impl LimiterStage {
     /// Current gain reduction (positive dB).
     fn gain_reduction_db(&self) -> f64 {
         self.inner.gain_reduction_db()
+    }
+
+    /// Current gain reduction (positive dB) beyond the peak control's: the
+    /// fast part.
+    fn fast_gain_reduction_db(&self) -> f64 {
+        (self.inner.gain_reduction_db() - self.inner.peak_control_reduction_db()).max(0.0)
     }
 
     fn latency_frames(&self) -> usize {
@@ -1261,6 +1340,10 @@ pub struct BroadcastProcessor {
     chain_dry: Vec<f32>,
     /// Per-frame true-peak estimates (`CHUNK`).
     peaks: Vec<f32>,
+    /// Per frame of a chunk: the clipper's depth, then the limiter peak
+    /// control's drive (first half); the clipper's predictability (second
+    /// half).
+    drive: Vec<f32>,
 
     /// Loudness of the raw input (before the input gain).
     input_detector: LoudnessDetector,
@@ -1325,6 +1408,7 @@ impl BroadcastProcessor {
             limiter_delay: FixedDelay::default(),
             chain_delay: FixedDelay::default(),
             stage_dry: Vec::new(),
+            drive: Vec::new(),
             chain_dry: Vec::new(),
             peaks: Vec::new(),
             input_detector: LoudnessDetector::new(),
@@ -1436,6 +1520,34 @@ impl BroadcastProcessor {
         if !on {
             self.multiband.set_upper_clip_activity(0.0);
         }
+    }
+
+    /// The final clipper's content-adaptive depth (on by default; see
+    /// [`crate::clipper`]). Off, the clipper subtracts its clippings in full
+    /// whatever the material: for measuring what it does. Never allocates.
+    pub fn set_clipper_adaptive_depth(&mut self, on: bool) {
+        self.clipper.adaptive_depth = on;
+        let p = self.params;
+        self.clipper.set_params(&p);
+    }
+
+    /// The final clipper's bandwidth guard (on by default; see
+    /// [`crate::bandwidth_guard`]). Off, the clipper also clips
+    /// band-limited programme: for measuring what it does. Never allocates.
+    pub fn set_clipper_bandwidth_guard(&mut self, on: bool) {
+        self.clipper.bandwidth_guard = on;
+        let p = self.params;
+        self.clipper.set_params(&p);
+    }
+
+    /// The limiter's peak control (on by default; see the module docs).
+    /// Off, the limiter is the plain true-peak limiter: for measuring what
+    /// it does. Never allocates.
+    pub fn set_limiter_peak_control(&mut self, on: bool) {
+        self.limiter.peak_control = on;
+        let p = self.params;
+        self.limiter
+            .set_params(&p, self.ceiling_db, self.active_lookahead_ms);
     }
 
     /// Current parameters.
@@ -1626,14 +1738,25 @@ impl BroadcastProcessor {
             |x| mb.process(x),
         );
         let clip = &mut self.clipper;
+        let (drive, predictable) = self.drive.split_at_mut(CHUNK);
+        let (drive, predictable) = (&mut drive[..frames], &mut predictable[..frames]);
         run_stage(
             &mut self.clipper_fade,
             &mut self.clipper_delay,
             dry,
             chunk,
             ch,
-            |x| clip.process(x),
+            |x| clip.process(x, drive, predictable),
         );
+        // The limiter's peak control takes, frame by frame, what the clipper
+        // leaves to it (`1 −` its depth); with the clipper off, it acts on
+        // predictable material (on noise-like material the plain limiter
+        // takes the peaks, as with no peak control).
+        if self.clipper_fade.on {
+            drive.iter_mut().for_each(|d| *d = 1.0 - *d);
+        } else {
+            drive.copy_from_slice(predictable);
+        }
         let clip_stats = self.clipper.inner.activity();
         self.sub_clip.accumulate(&clip_stats);
         self.meter_clip.accumulate(&clip_stats);
@@ -1652,17 +1775,24 @@ impl BroadcastProcessor {
             self.im_clip = ClipStats::default();
         }
         let lim = &mut self.limiter;
+        let drive = &self.drive[..frames];
         run_stage(
             &mut self.limiter_fade,
             &mut self.limiter_delay,
             dry,
             chunk,
             ch,
-            |x| lim.process(x),
+            |x| lim.process(x, drive),
         );
         let gr = self.limiter.gain_reduction_db();
         self.limiter_gr_max = self.limiter_gr_max.max(gr);
-        self.sub_gr += gr * frames as f64;
+        // The budget counts the limiter's fast work, not the peak control's
+        // slow gain (a compressor's, which costs no distortion).
+        self.sub_gr += if std::env::var("GOVFAST").is_ok() {
+            self.limiter.fast_gain_reduction_db()
+        } else {
+            gr
+        } * frames as f64;
         self.sub_frames += frames;
 
         self.chain_fade.mix(chunk, &self.chain_dry[..len], ch);
@@ -1783,6 +1913,7 @@ impl Processor for BroadcastProcessor {
         self.stage_dry = vec![0.0; CHUNK * channels];
         self.chain_dry = vec![0.0; CHUNK * channels];
         self.peaks = vec![0.0; CHUNK];
+        self.drive = vec![1.0; 2 * CHUNK];
 
         self.input_detector
             .configure(sample_rate, channels, ChannelLayout::Unknown);

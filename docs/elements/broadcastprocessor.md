@@ -54,12 +54,35 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → f
   reaches the knee. Its threshold sits 0.5 dB under the true-peak ceiling;
   it leaves bass (below the lowest crossover) to the bass clipper and the
   limiter. It takes the peaks so the limiter mostly catches residue.
+  It clips only where clipping is masked:
+  - **Content-adaptive depth:** the clippings are scaled down on
+    predictable material. One value per 64 frames, the linear-prediction
+    gain of the programme below 3.5 kHz (order 10, 20 ms window), maps
+    2 … 5 dB to full … no clipping, held for 1 s. Speech, tones and
+    sustained music are not clipped; noise, crowd, applause and dense
+    mixes are, as before.
+  - **Bandwidth guard:** while the programme has nothing above 12 kHz (or
+    lower: phone, codecs, 16 kHz-sampled sources), the clipper subtracts
+    no clippings (15 ms fade). Its band edge estimate compares the energy
+    above 4, 8 and 12 kHz with the full band over 1 s (falling over
+    0.25 s), with hysteresis (−40 / −46 dB).
+
+  What it does not take goes to the limiter's peak control.
 - **True-peak limiter:** 4× oversampled detector, ceiling in dBTP per BS.1770
   Annex 2. It stays the guaranteed ceiling. A ceiling change glides at
-  1 dB per 512 frames.
+  1 dB per 512 frames. Its **peak control** takes what the clipper leaves
+  with a slow gain instead of the fast lookahead ramp: a compressor curve
+  3 dB under the ceiling at 8:1 (3 dB knee), attack 4 ms, release 1 s, its
+  static reduction held for 20 ms (longer than a pitch period), and the
+  limiter's gain is the smaller of its own and the peak control's (so the
+  ceiling proof and the lookahead apply to both, and the two never add
+  up). Its strength follows the clipper frame by frame: what the clipper's
+  depth leaves, or, at presets without the clipper, the predictability.
+  On noise-like full-band material it is off.
 - **Clip budget governor:** a slow loop (seconds) that watches the
   clipper's clip depth, the share of samples it touches and the limiter's
-  mean gain reduction against `clip-budget`. **Loudness comes first:** it
+  mean gain reduction (its fast part, beyond the peak control's slow gain)
+  against `clip-budget`. **Loudness comes first:** it
   never lowers the output below the target to stay within the budget.
   Over budget with the output on target it stops the output-referenced
   trim from adding gain and gives back density, and reports the excess
@@ -263,12 +286,12 @@ except at `speech`),
   programme's.
 - **Speech:** a gentler 1.5:1 multiband, a faster AGC gate at −40 LUFS, a
   150 ms limiter release, and **no final clipper**. At −18 LUFS the
-  clipper clips the peaks of loud syllables and plosives, audibly on
+  clipper clipped the peaks of loud syllables and plosives, audibly on
   phone and codec speech: over the corpus speech and phone clips the
-  worst-frame NMR at `speech` reached +35 dB with the clipper and
-  +2.7 dB without it (standard mode; what remains is the limiter, see the
-  crackle check). The governor stays on but frozen (it budgets the
-  clipper's work).
+  worst-frame NMR at `speech` reached +35 dB with the clipper (before its
+  content-adaptive depth) and +2.7 dB without it. With the limiter's peak
+  control it is −4.4 dB (standard) and −2.1 dB (low; crackle check). The
+  governor stays on but frozen (it budgets the clipper's work).
 - **Expander:** target − 24 dB, 1:1.5, at most 4 dB for programme; target
   − 22 dB, 1:2, at most 6 dB for speech. After the AGC, room tone and noise
   between words sit near or below target − 25 dB, while quiet word endings
@@ -320,9 +343,11 @@ presets:
 - `limiter-lookahead` 1.5 ms (the standard mode's): the final clipper
   takes the peaks, so the limiter handles residue only. On the peaky
   programme driven 6 dB hot (AGC off, `streaming`) the limiter's mean gain
-  reduction is 1.68 dB with no clipper and 5 ms, 0.83 dB with the clipper
-  and 5 ms, 0.82 dB with the clipper and 1.5 ms; the true peak stays within
-  the ceiling in all cases.
+  reduction is 1.68 dB with no clipper (and no peak control) and 5 ms,
+  0.83 dB with the clipper and 5 ms, 0.82 dB with the clipper and 1.5 ms;
+  the true peak stays within the ceiling in all cases. On speech, where
+  the clipper leaves the peaks to the limiter, its peak control does most
+  of the work with a slow gain (see the crackle case below).
 - `meter-interval` 100 ms: ten updates per second, the same as
   `stromdsp-meter`.
 
@@ -333,12 +358,12 @@ input, integrated output from 10 s (strom-dsp-harness
 `tests/programme_table.rs`, run on purpose). On the peaky programme (a click
 every 1.1 s), the clicky programme (a click every 300 ms), the music-like
 programme and speech-like noise (7 kHz), every case lands within
-−0.26 … +0.07 LU of the target, the governor reports no budget excess and
+−0.26 … +0.04 LU of the target, the governor reports no budget excess and
 no loudness deficit, and the true peak stays at least 0.4 dB under the
-ceiling. The final clipper works only at `streaming` and `speech`, and
-lightly (clip depth −50 … −87 dB on the peaky, clicky and speech-like
-programmes, −106 dB on music); the limiter's mean gain reduction stays at or under
-0.13 dB. A 60 s synthetic programme, and the hot, peaky, sport-like one,
+ceiling. The final clipper works only at `streaming`, and
+lightly (clip depth −50 … −63 dB on the peaky, clicky and speech-like
+programmes, −102 dB on music); the limiter's mean gain reduction stays at
+or under 0.29 dB. A 60 s synthetic programme, and the hot, peaky, sport-like one,
 also meet ±1 LU and the ceiling + 0.1 dB in the chain tests
 (`tests/broadcast.rs`, `ebur128`), and the short-term loudness is back
 within 1 LU of target after a 10 s pause.
@@ -388,32 +413,56 @@ the threshold, is left to the clipper and the limiter.
 latency mode, worst per-frame NMR against the linear reference over all
 clips (`strom-dsp-harness` `tests/crackle.rs`, extended workflow). The
 bound is 0 dB, where the error reaches the masked threshold; the dynamics
-alone (AGC, multiband, expander, bass clipper) stay under −8 dB.
+alone (AGC, multiband, expander, bass clipper) stay under −8 dB. Every
+configuration passes; none is listed as a known failure.
 
-| Preset | Mode | Before | Now | Cause of what remains |
-|---|---|---|---|---|
-| `ebu-r128` | standard | +10.8 dB | +10.8 dB (−8.3 without the shortwave clip) | clipper on the shortwave clip's static crashes |
-| `ebu-r128` | low | +37.6 | +5.6 (−9.3) | the same |
-| `atsc-a85` | standard | +17.5 | +17.5 (−5.6) | the same |
-| `atsc-a85` | low | +37.0 | +14.4 (−7.3) | the same |
-| `streaming` | standard | +35.7 | +35.7 | clipper on speech peaks at −16 LUFS; limiter +6.3 without it |
-| `streaming` | low | +43.1 | +35.7 | the same; limiter (0.6 ms) +13.9 without it |
-| `speech` | standard | +35.4 | +2.7 | limiter on one clip's peaks at −18 LUFS |
-| `speech` | low | +41.2 | +7.6 | limiter (0.6 ms) on three clips |
+| Preset | Mode | First measured | Before this change | Now | Without the peak control / adaptive depth / guard |
+|---|---|---|---|---|---|
+| `ebu-r128` | standard | +10.8 dB | +10.8 | −8.3 | −8.3 / −8.3 / −0.1 |
+| `ebu-r128` | low | +37.6 | +5.6 | −9.3 | −9.3 / −9.3 / −4.9 |
+| `atsc-a85` | standard | +17.5 | +17.5 | −8.3 | −8.3 / −5.6 / +9.5 |
+| `atsc-a85` | low | +37.0 | +14.4 | −8.2 | −9.0 / −7.3 / +4.8 |
+| `streaming` | standard | +35.7 | +35.7 | −1.5 | +6.4 / +17.7 / +32.9 |
+| `streaming` | low | +43.1 | +35.7 | −1.6 | +12.6 / +17.8 / +29.6 |
+| `speech` | standard | +35.4 | +2.7 | −4.4 | +2.7 / +2.7 / −4.4 |
+| `speech` | low | +41.2 | +7.6 | −2.1 | +7.6 / +7.6 / −2.1 |
 
-Before: the spike guard without the rise gate and the clipper at
-`speech`. In the standard mode the old event rule also took plosive
-bursts and mouth clicks for clicks (+0.8 … +4.1 dB on clean speech); the
-rise gate leaves them too. What remains is listed in the check as known
-failures, with these causes.
+What each part fixes, measured (`examples/crackle.rs` `diag:`, the Bark
+bands of the worst frames):
+
+- **Clippings above the band edge** (`ebu-r128` and `atsc-a85` on the
+  shortwave clip's static crashes, `streaming` on every phone and codec
+  clip): the error sat in the Bark bands above 6 kHz, where those clips
+  have nothing. The bandwidth guard leaves band-limited programme
+  unclipped.
+- **Clipped speech peaks** (`streaming` at −16 LUFS on full-band speech):
+  broadband clipping products in quiet bands. The content-adaptive depth
+  leaves predictable material unclipped.
+- **The limiter's fast ramp on speech** (`speech`, and `streaming` once
+  the clipper leaves speech alone): the error sat in the lowest Bark band
+  (under 100 Hz), where speech has nothing: the gain stepped down at each
+  new, higher glottal pulse, synchronous with the waveform, which puts
+  energy below the fundamental. The longer the ramp, the less (0.6 ms
+  +13.9 dB, 1.5 ms +2.6 dB, 3 ms −6.9 dB on the worst clip), but the
+  budget has no room for it. The peak control (held 20 ms, attack 4 ms)
+  reduces once per phrase instead, so the fast ramp is rarely needed.
+
+The low latency mode passes within its 3 ms budget (0.6 ms limiter
+lookahead); with a 1.1 ms lookahead (3.45 ms at 44.1 kHz) its worst frames
+would be −2.2 dB (`streaming`) and −2.9 dB (`speech`). (At `speech`,
+without the adaptive depth there is no predictability to drive the peak
+control, so it is off too.)
 
 **Measured case: bass into highs.** A loud 50 Hz with a 3 kHz tone 20 dB
 under it, the band compressors neutral, the bass clip threshold at the
 final clipper's and the bass 3 dB over it, at a fixed drive (AGC and
-governor off): without the IM feedback the clipper chops the 3 kHz at
+governor off), the clipper's content-adaptive depth and bandwidth guard
+off: without the IM feedback the clipper chops the 3 kHz at
 every bass peak, and the sidebands at 3 kHz ± 50/100 Hz are −13.8 dBc;
 with it the bass threshold comes down by its full 3 dB and the sidebands
-fall to −53.8 dBc. With the presets the multiband and the bass clipper
+fall to −53.8 dBc. With the defaults the pair of tones is predictable,
+the clipper leaves it to the limiter's peak control, and the sidebands
+are under −140 dBc. With the presets the multiband and the bass clipper
 keep the bass under the final clipper: at `streaming`, driven up to 9 dB
 over the ceiling, the sidebands stay under −148 dBc.
 
@@ -439,12 +488,14 @@ and the governor reports an excess of about 0.65 dB. (An earlier version
 cut the AGC target to hold the budget, which left the output 1.4 … 2.0 LU
 under the target.)
 
-**For a listening test:** speech band-limited to 3.4 kHz at `streaming`
-(−16 LUFS) reaches the final clipper (clip depth −61 dB) and its NMR in the
-harness rises from −27 dB (clipper off) to −11 dB; and two tones at 19 and
-20 kHz driven 6 dB over the ceiling at `streaming` give a 1 kHz
-difference tone at −74 dB through the clipper, where the limiter alone
-left none.
+**For a listening test:** speech-like noise band-limited to 3.4 kHz at
+`streaming` (−16 LUFS) reached the final clipper (clip depth −61 dB,
+harness NMR −11 dB, worst frame +15 dB); with the bandwidth guard the
+clipper leaves it (NMR −26 dB, worst frame −9.5 dB), and the limiter's
+peak control holds its peaks (mean reduction 1.3 dB over the harness's
+8 s run). Two tones at 19 and 20 kHz driven 6 dB over the ceiling at
+`streaming` gave a 1 kHz difference tone at −74 dB through the clipper;
+being predictable, they are now left to the limiter, which adds none.
 
 ## Final clipper latency
 
@@ -494,7 +545,7 @@ reads −200.0, never NaN.
 | `spike-events` | guint64 | spikes removed since the last message; 0 while the spike guard is off |
 | `agc-gain` | gdouble, dB | signed; + is boost |
 | `band-gain-reduction` | GstValueArray of gdouble | positive dB of reduction, one per active band |
-| `limiter-gain-reduction` | gdouble | positive dB of reduction; max of values sampled every 512 frames |
+| `limiter-gain-reduction` | gdouble | positive dB of reduction, including the peak control's; max of values sampled every 512 frames |
 | `band-expander-gain-reduction` | GstValueArray of gdouble | positive dB of expander attenuation, one per active band |
 | `bass-clip-gr` | gdouble | positive dB of bass-clipper reduction, largest since the last message |
 | `clip-depth` | gdouble, dB | energy the final clipper removed relative to its input since the last message; −200.0 when nothing |

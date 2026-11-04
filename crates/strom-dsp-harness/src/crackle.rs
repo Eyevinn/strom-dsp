@@ -25,8 +25,9 @@
 //! of every speech clip sits between −18.5 and −8.3 dB, so 0 dB leaves
 //! 8 dB of margin for the dynamics doing their work, while the defects
 //! found (an onset dipped by the spike guard without lookahead, speech
-//! peaks in the final clipper, plosives taken for clicks, speech peaks in
-//! the limiter at −16 and −18 LUFS) reach +1 … +37 dB.
+//! peaks in the final clipper, clippings above a phone or codec clip's band
+//! edge, plosives taken for clicks, speech peaks in the limiter at −16 and
+//! −18 LUFS) reached +1 … +37 dB.
 //!
 //! **Known failures** ([`KNOWN_FAILURES`]) are listed with their cause,
 //! for a whole configuration or for named clips: they are reported, not
@@ -98,70 +99,19 @@ impl KnownFailure {
     }
 }
 
-const SHORTWAVE: &[&str] = &["fs259175_shortwave_websdr"];
-const CLIPPER_ON_STATIC: &str = "final clipper on the static crashes of the shortwave clip";
-
-/// The known failures (see the module docs). Measured with
-/// `cargo run --release --example crackle -- corpus/data <out> 8 accept`
-/// and its stage switches (`accept:no-clipper`, `accept:no-limiter`, …).
-/// The spike guard is not among the causes: with it off every number is
-/// the same.
-pub const KNOWN_FAILURES: &[KnownFailure] = &[
-    KnownFailure {
-        preset: BroadcastPreset::EbuR128,
-        mode: LatencyMode::Standard,
-        clips: Some(SHORTWAVE),
-        reason: CLIPPER_ON_STATIC,
-    },
-    KnownFailure {
-        preset: BroadcastPreset::EbuR128,
-        mode: LatencyMode::Low,
-        clips: Some(SHORTWAVE),
-        reason: CLIPPER_ON_STATIC,
-    },
-    KnownFailure {
-        preset: BroadcastPreset::AtscA85,
-        mode: LatencyMode::Standard,
-        clips: Some(SHORTWAVE),
-        reason: CLIPPER_ON_STATIC,
-    },
-    KnownFailure {
-        preset: BroadcastPreset::AtscA85,
-        mode: LatencyMode::Low,
-        clips: Some(SHORTWAVE),
-        reason: CLIPPER_ON_STATIC,
-    },
-    KnownFailure {
-        preset: BroadcastPreset::Streaming,
-        mode: LatencyMode::Standard,
-        clips: None,
-        reason: "final clipper clips speech peaks at −16 LUFS (up to +35.7 dB; pending clipper \
-                 work); without it the limiter (up to +6.3 dB)",
-    },
-    KnownFailure {
-        preset: BroadcastPreset::Streaming,
-        mode: LatencyMode::Low,
-        clips: None,
-        reason: "final clipper clips speech peaks at −16 LUFS (up to +35.7 dB); without it the \
-                 limiter at 0.6 ms lookahead (up to +13.9 dB)",
-    },
-    KnownFailure {
-        preset: BroadcastPreset::Speech,
-        mode: LatencyMode::Standard,
-        clips: Some(&["librispeech_2035-152373-0005"]),
-        reason: "limiter on loud speech peaks at −18 LUFS (+2.7 dB)",
-    },
-    KnownFailure {
-        preset: BroadcastPreset::Speech,
-        mode: LatencyMode::Low,
-        clips: Some(&[
-            "librispeech_2035-152373-0005",
-            "fs259175_shortwave_websdr",
-            "fs524806_frs_walkie_kids",
-        ]),
-        reason: "limiter at 0.6 ms lookahead on loud speech peaks at −18 LUFS (up to +7.6 dB)",
-    },
-];
+/// The known failures (see the module docs): none. Measured with
+/// `cargo run --release --example crackle -- corpus/data <out> 8 accept`;
+/// its stage switches (`accept:no-clipper`, `accept:no-adapt`,
+/// `accept:no-guard`, `accept:no-peak-control`, …) show what each stage
+/// costs. With the final clipper's content-adaptive depth off, `streaming`
+/// fails (the clipper on speech peaks at −16 LUFS, up to +17.8 dB) and so
+/// does `speech` (no predictability to drive the limiter's peak control);
+/// with its bandwidth guard off, every preset with the clipper fails on
+/// the phone and codec clips (clippings above their band edge, up to
+/// +32.9 dB); with the limiter's peak control off, `streaming` and
+/// `speech` fail (the limiter's fast ramp on speech peaks, up to
+/// +12.6 dB in the low latency mode).
+pub const KNOWN_FAILURES: &[KnownFailure] = &[];
 
 /// The corpus directory: `$STROM_DSP_CORPUS`, else `corpus/data` in the
 /// repository.

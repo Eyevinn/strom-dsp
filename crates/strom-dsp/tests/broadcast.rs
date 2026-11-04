@@ -164,12 +164,15 @@ fn impulse_latency_is_reported_latency() {
                 let frames = lat + 4096;
                 let at = 1000;
                 let mut x = vec![0.0f32; frames * ch];
-                x[at * ch] = 0.5;
-                x[at * ch + 1] = -0.25;
+                // Well under the limiter's peak control (it starts 4.5 dB
+                // under the ceiling, and reads an impulse's true peak with
+                // its high-frequency term).
+                x[at * ch] = 0.25;
+                x[at * ch + 1] = -0.125;
                 let y = run(&mut bp, &x, ch, 333);
                 for (n, f) in y.chunks(ch).enumerate() {
                     let want: [f32; 2] = if n == at + lat {
-                        [0.5, -0.25]
+                        [0.25, -0.125]
                     } else {
                         [0.0, 0.0]
                     };
@@ -617,6 +620,11 @@ fn meter_sign_conventions() {
     }
 }
 
+/// A steady sine 6 dB over the ceiling with the clipper off: the
+/// limiter's gain reduction is its peak control's static curve (the
+/// clipper leaves it everything), `S·(6 + H)` dB above the knee with
+/// `S = 1 − 1/ratio` and `H` the peak control's headroom; with the peak
+/// control off, the plain limiter's 6 dB.
 #[test]
 fn limiter_gain_reduction_is_positive_when_limiting() {
     let ch = 2;
@@ -626,15 +634,25 @@ fn limiter_gain_reduction_is_positive_when_limiting() {
     p.true_peak_ceiling_dbtp = -6.0;
     let mut bp = processor(FS, ch, &p);
     let x = sine(48_000, ch, FS as f64, 200.0, 1.0);
-    let mut y = x.clone();
-    let mut max_gr = 0.0f64;
-    for c in y.chunks_mut(BLOCK * ch) {
-        bp.process(c);
-        let m = bp.take_meters();
-        assert_no_nan(&m);
-        max_gr = max_gr.max(m.limiter_gain_reduction_db);
-    }
-    assert!((max_gr - 6.0).abs() < 0.5, "limiter GR {max_gr}");
+    let measure = |bp: &mut BroadcastProcessor| {
+        let mut y = x.clone();
+        let mut gr = 0.0f64;
+        for c in y.chunks_mut(BLOCK * ch) {
+            bp.process(c);
+            let m = bp.take_meters();
+            assert_no_nan(&m);
+            gr = m.limiter_gain_reduction_db;
+        }
+        gr
+    };
+    let slope = 1.0 - 1.0 / strom_dsp::broadcast::PEAK_CONTROL_RATIO as f64;
+    let want = slope * (6.0 + strom_dsp::broadcast::PEAK_CONTROL_HEADROOM_DB as f64);
+    let gr = measure(&mut bp);
+    assert!((gr - want).abs() < 0.3, "limiter GR {gr} (want {want:.2})");
+    let mut plain = processor(FS, ch, &p);
+    plain.set_limiter_peak_control(false);
+    let gr = measure(&mut plain);
+    assert!((gr - 6.0).abs() < 0.3, "plain limiter GR {gr}");
 }
 
 /// The meters agree with `meter::LoudnessMeter` (`ebur128`) on the same
