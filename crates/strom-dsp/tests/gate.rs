@@ -1,42 +1,11 @@
 //! Gate tests: thresholds, hysteresis, hold, attack/release time constants,
 //! attenuation, linking, robustness and real-time safety.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use strom_dsp::gate::DETECTOR_RELEASE_MS;
 use strom_dsp::util::{db_to_lin, lin_to_db, one_pole_coef};
 use strom_dsp::{Gate, GateParams, Processor};
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -515,14 +484,14 @@ fn no_allocation_in_process_or_set_params() {
         ..GateParams::default()
     };
     let def = GateParams::default();
-    let before = alloc_count();
+    let before = allocs();
     for i in 0..50 {
         g.set_params(if i % 2 == 0 { &other } else { &def });
         g.process(&mut buf);
     }
     g.reset();
     g.process(&mut buf);
-    assert_eq!(alloc_count() - before, 0);
+    assert_eq!(allocs() - before, 0);
 }
 
 // ---------------------------------------------------------------------------

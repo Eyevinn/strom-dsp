@@ -3,12 +3,12 @@
 //! rate/channel count), including property changes, DISCONT and flushes; the
 //! defaults and `enabled=false` are bit-exact; hum is actually removed.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use strom_dsp::cleanup::{Cleanup, CleanupParams, HumFrequency};
-use util::{Action, FORMATS, TOL};
 
 /// Tolerance while the high-pass glides its cutoff: the element splits a
 /// buffer into whole-frame chunks of at most 4096 samples (1365 frames for 3

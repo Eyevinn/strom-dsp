@@ -7,7 +7,7 @@
 //! trace. Setup (`new`, signal generation) happens outside the scope.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_meter
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_meter::
 //! ```
 //!
 //! The canary that proves the sanitizer is active lives in `tests/rtsan.rs`.

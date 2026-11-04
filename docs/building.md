@@ -45,8 +45,8 @@ let comp = gst::ElementFactory::make("stromdsp-compressor").build()?;
 
 These are described in [PERFORMANCE.md](PERFORMANCE.md):
 - RealtimeSanitizer on Linux/macOS: every `crates/strom-dsp/tests/rtsan*.rs`
-  file runs under RealtimeSanitizer, one `--test` at a time, e.g.
-  `RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan`.
+  file runs under RealtimeSanitizer, all in one run:
+  `RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan`.
   See [Real-time safety](PERFORMANCE.md#real-time-safety).
 - Instruction-count benchmarks with gungraun on Linux. See
   [Instruction counts](PERFORMANCE.md#instruction-counts-gungraun-linux).

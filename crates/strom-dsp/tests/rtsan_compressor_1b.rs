@@ -3,7 +3,7 @@
 //! `reset`, all inside a real-time scope (see `tests/rtsan.rs`).
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_compressor_1b
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_compressor_1b::
 //! ```
 
 #![cfg(feature = "rtsan")]

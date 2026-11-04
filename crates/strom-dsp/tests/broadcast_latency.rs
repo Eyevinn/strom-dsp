@@ -13,13 +13,10 @@
 //!   largest gain reduction, the clipper's depth and the true peak,
 //!   against longer settings of each stage.
 
-mod agc_support;
-mod programme_support;
-
 use std::f64::consts::PI;
 
-use agc_support::{noise, pink, scale_to_lufs, Looper, Rng};
-use programme_support::peaky_programme;
+use crate::agc_support::{noise, pink, scale_to_lufs, Looper, Rng};
+use crate::programme_support::peaky_programme;
 use strom_dsp::broadcast::{BroadcastParams, BroadcastProcessor, LatencyMode};
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};
 use strom_dsp::presets::BroadcastPreset;

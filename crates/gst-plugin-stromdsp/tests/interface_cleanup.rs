@@ -1,9 +1,9 @@
 //! Interface test of `stromdsp-cleanup`: every property's
 //! name, GLib type, range, default and flags. Fails if the interface drifts.
 
-mod iface_check;
+use crate::iface_check;
 
-use iface_check::{check_element, p, Kind::*};
+use crate::iface_check::{check_element, p, Kind::*};
 
 #[test]
 fn cleanup_interface() {

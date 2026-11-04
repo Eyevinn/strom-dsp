@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 # gstreamer-rs 0.25 requires Rust 1.92 (the library crate alone needs 1.89).
 rust-version = "1.92"
+# The integration tests build into three binaries: `tests/suite.rs` and the
+# two static-registration tests, which need a fresh process each.
+autotests = false
 
 [lib]
 name = "gststromdsp"
@@ -23,6 +26,18 @@ gst-audio = { package = "gstreamer-audio", version = "0.25", features = ["v1_22"
 
 [dev-dependencies]
 gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_22"] }
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+[[test]]
+name = "static_registration"
+path = "tests/static_registration.rs"
+
+[[test]]
+name = "static_registration_concurrent"
+path = "tests/static_registration_concurrent.rs"
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8"

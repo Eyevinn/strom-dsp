@@ -8,10 +8,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# All integration tests build into one binary, `tests/suite.rs`.
+autotests = false
 
 [features]
 # Test-only: RealtimeSanitizer checks of `process`/`set_params`
-# (`tests/rtsan.rs`). Run with `RTSAN_ENABLE=1`, see docs/PERFORMANCE.md.
+# (`tests/rtsan*.rs`, modules of `tests/suite.rs`). Run with
+# `RTSAN_ENABLE=1`, see docs/PERFORMANCE.md.
 # The library code never uses the dependency; without RTSAN_ENABLE it is a no-op.
 rtsan = ["dep:rtsan-standalone"]
 # Bench-only: instruction-count benchmarks (`benches/strip_gungraun.rs`).
@@ -51,8 +54,8 @@ harness = false
 required-features = ["gungraun"]
 
 [[test]]
-name = "rtsan"
-required-features = ["rtsan"]
+name = "suite"
+path = "tests/suite.rs"
 
 [[bench]]
 name = "filters"

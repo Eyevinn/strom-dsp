@@ -2,7 +2,7 @@
 //! GLib types, ranges, defaults and flags of every property, the `reset`
 //! action signal, the pad templates, metadata and the passthrough mode.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

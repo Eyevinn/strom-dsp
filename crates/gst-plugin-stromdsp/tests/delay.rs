@@ -4,13 +4,13 @@
 //! `channel-delays` works with arrays shorter or longer than the channel
 //! count, and the defaults / `enabled=false` are bit-exact.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS};
 use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
 use strom_dsp::delay::{Delay, DelayParams};
-use util::{Action, FORMATS};
 
 fn array(v: &[f32]) -> glib::Value {
     gst::Array::new(v.iter().copied()).to_value()

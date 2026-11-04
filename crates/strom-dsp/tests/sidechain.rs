@@ -3,9 +3,6 @@
 //! works, the no-key path is unchanged, the expander's static curve matches
 //! its formula, every SIMD level gives the same output, and nothing allocates.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use strom_dsp::biquad::uses_fma;
 use strom_dsp::dynamics::{KeyDetector, KeyFilter};
 use strom_dsp::gate::{GateMode, DEFAULT_EXPANDER_RATIO};
@@ -13,35 +10,7 @@ use strom_dsp::simd::{detect, Level};
 use strom_dsp::util::{db_to_lin, lin_to_db};
 use strom_dsp::{Compressor, CompressorParams, Gate, GateParams, Processor};
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -673,7 +642,7 @@ fn no_allocation_in_keyed_processing_and_setters() {
         },
     ];
 
-    let before = alloc_count();
+    let before = allocs();
     for i in 0..60 {
         let f = filters[i % 3];
         g.set_key_filter(f);
@@ -697,7 +666,7 @@ fn no_allocation_in_keyed_processing_and_setters() {
             d.reset();
         }
     }
-    assert_eq!(alloc_count() - before, 0);
+    assert_eq!(allocs() - before, 0);
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! controllable and mutable in PLAYING. The original properties are
 //! checked by `tests/interface.rs`.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

@@ -3,8 +3,6 @@
 //! 1 = passthrough, the M/S round trip, the smoothing bound for parameter
 //! changes and mode switches, and no allocation after setup.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::f64::consts::{FRAC_1_SQRT_2, SQRT_2};
 
 use strom_dsp::stereo::{
@@ -12,35 +10,7 @@ use strom_dsp::stereo::{
 };
 use strom_dsp::Processor;
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -539,7 +509,7 @@ fn no_allocation_after_configure() {
     let mut s = Stereo::new();
     s.configure(FS, 2);
     let mut buf = noise(1024, 4);
-    let before = alloc_count();
+    let before = allocs();
     for i in 0..500 {
         let p = StereoParams {
             mode: MODES[i % MODES.len()],
@@ -561,5 +531,5 @@ fn no_allocation_after_configure() {
             s.reset();
         }
     }
-    assert_eq!(alloc_count() - before, 0, "process/set_params allocated");
+    assert_eq!(allocs() - before, 0, "process/set_params allocated");
 }

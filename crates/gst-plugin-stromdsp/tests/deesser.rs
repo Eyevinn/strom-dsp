@@ -3,12 +3,12 @@
 //! rate/channel count), including property changes, DISCONT and flushes;
 //! `enabled=false` is bit-exact.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use strom_dsp::deesser::{Deesser, DeesserMode, DeesserParams};
-use util::{Action, FORMATS, TOL};
 
 /// Tolerance while the crossover glides its frequency. The element splits a
 /// buffer into whole-frame chunks of at most 4096 samples (1365 frames for 3

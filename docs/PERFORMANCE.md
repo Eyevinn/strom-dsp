@@ -108,10 +108,10 @@ file runs the processing path inside a sanitizer scope. The sanitizer aborts
 with a stack trace on any allocation, lock, blocking call or other unsafe call.
 
 ```sh
-RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan
+RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan
 # the canary allocates inside a scope and MUST abort (proves RTSan is active):
-RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan \
-  -- --ignored --exact canary_allocation_is_detected
+RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite \
+  -- --ignored --exact rtsan::canary_allocation_is_detected
 ```
 
 `RTSAN_ENABLE` is read at build time; it makes `rtsan-standalone` download and

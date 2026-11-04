@@ -2,14 +2,14 @@
 //! through the element matches the library and its static curve, and
 //! `mode=gate` (with any `ratio`) is bit-identical to the classic gate.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use gststromdsp::gate::StromDspGateMode;
 use strom_dsp::gate::GateMode;
 use strom_dsp::{Gate, GateParams};
-use util::{Action, FORMATS, TOL};
 
 fn params() -> GateParams {
     GateParams {

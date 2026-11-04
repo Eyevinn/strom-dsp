@@ -19,15 +19,10 @@
 //! - Activity meter, stereo independence, parameter glides, robustness,
 //!   reset, zero allocations.
 
-mod agc_support;
-mod clip_metrics;
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::f64::consts::PI;
 
-use agc_support::{noise, pink, Rng};
-use clip_metrics::*;
+use crate::agc_support::{noise, pink, Rng};
+use crate::clip_metrics::*;
 use strom_dsp::biquad::{Biquad, BiquadCoefficients};
 use strom_dsp::clipper::{ClipperLatency, FinalClipper, FinalClipperParams, BANDWIDTH_RANGE_HZ};
 use strom_dsp::meter::{ChannelLayout, LoudnessConfig, LoudnessMeter};
@@ -35,32 +30,7 @@ use strom_dsp::oversample::OversampleFactor;
 use strom_dsp::truepeak::{TruePeakLimiter, TruePeakLimiterParams};
 use strom_dsp::Processor;
 
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn allocs() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 const FS: f64 = 48_000.0;
 

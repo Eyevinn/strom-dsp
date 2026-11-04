@@ -8,7 +8,7 @@
 //! blocking call there aborts the test.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_ducker
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_ducker::
 //! ```
 //!
 //! Setup (`new`, `configure`, `set_key_format`, signal generation) happens

@@ -3,7 +3,7 @@
 //! values, default and flags, no extra properties, klass, 2-channel pads, and
 //! that the element is never a BaseTransform passthrough.
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

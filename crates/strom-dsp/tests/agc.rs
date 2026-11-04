@@ -12,45 +12,12 @@
 //! - Bounds and rate limits hold, also while parameters jump.
 //! - Robustness, reset, bit-exact passthrough at 0 dB, zero allocations.
 
-mod agc_support;
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
-use agc_support::{pink, reference_loudness, scale_to_lufs, Looper, Rng};
+use crate::agc_support::{pink, reference_loudness, scale_to_lufs, Looper, Rng};
 use strom_dsp::agc::{Agc, AgcParams};
 use strom_dsp::meter::{ChannelLayout, LoudnessDetector};
 use strom_dsp::Processor;
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 
@@ -546,7 +513,7 @@ fn process_set_params_and_reset_do_not_allocate() {
         .iter()
         .map(|&n| vec![0.0f32; n * 2])
         .collect();
-    let before = alloc_count();
+    let before = allocs();
     let mut sink = 0.0;
     for i in 0..3000 {
         let buf = &mut bufs[i % 5];
@@ -565,6 +532,6 @@ fn process_set_params_and_reset_do_not_allocate() {
             a.reset();
         }
     }
-    assert_eq!(alloc_count(), before, "allocated in the processing path");
+    assert_eq!(allocs(), before, "allocated in the processing path");
     assert!(sink.is_finite());
 }

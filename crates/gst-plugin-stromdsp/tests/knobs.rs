@@ -80,7 +80,7 @@
 //! so the AGC stays on. Its READY-only properties (`num-bands`,
 //! `limiter-lookahead`) are not PLAYING-mutable and so not knobs.
 
-mod util;
+use crate::util;
 
 use std::collections::BTreeSet;
 use std::f64::consts::PI;

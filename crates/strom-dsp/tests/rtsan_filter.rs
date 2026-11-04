@@ -8,7 +8,7 @@
 //! non-real-time-safe call in that scope aborts the test with a stack trace.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_filter
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_filter::
 //! ```
 //!
 //! Setup (`new`, `configure`, buffers, signal generation) happens outside the

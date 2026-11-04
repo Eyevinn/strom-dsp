@@ -1,11 +1,11 @@
 //! Harness tests for `stromdsp-gate`.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use strom_dsp::{Gate, GateParams};
-use util::{Action, FORMATS, TOL};
 
 fn params() -> GateParams {
     GateParams {

@@ -8,7 +8,7 @@
 //! strom-dsp's own broadcast choice (`strom_dsp::presets`; "Why these
 //! defaults" on each element's page, `docs/elements/<element>.md`).
 
-mod util;
+use crate::util;
 
 use gst::glib;
 use gst::prelude::*;

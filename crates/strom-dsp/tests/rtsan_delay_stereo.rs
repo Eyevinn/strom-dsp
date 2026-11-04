@@ -8,7 +8,7 @@
 //! real-time scope; any allocation, lock or blocking call there aborts.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_delay_stereo
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_delay_stereo::
 //! ```
 //!
 //! Setup (`new`, `configure`, signal generation) happens outside the scope.

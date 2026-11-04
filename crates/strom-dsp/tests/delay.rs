@@ -3,43 +3,12 @@
 //! the documented discontinuity bound, delay 0 / disabled are bit-exact,
 //! extremes and odd inputs are handled, and nothing allocates after setup.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use strom_dsp::delay::{
     crossfade_frames, max_crossfade_step, Delay, DelayParams, MAX_DELAY_MS, MAX_OFFSET_CHANNELS,
 };
 use strom_dsp::Processor;
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -414,7 +383,7 @@ fn no_allocation_after_configure() {
     let mut buf: Vec<f32> = (0..1024 * 8).map(|_| rng.next_f32()).collect();
     let offsets: Vec<f32> = (0..8).map(|i| i as f32 * 1.5).collect();
     let mut p = params(0.0, &offsets);
-    let before = alloc_count();
+    let before = allocs();
     for i in 0..400 {
         p.delay_ms = (i % 7) as f32 * 30.0;
         p.enabled = i % 11 != 0;
@@ -425,5 +394,5 @@ fn no_allocation_after_configure() {
             d.reset();
         }
     }
-    assert_eq!(alloc_count() - before, 0, "process/set_params allocated");
+    assert_eq!(allocs() - before, 0, "process/set_params allocated");
 }

@@ -1,12 +1,12 @@
 //! Harness tests for `stromdsp-limiter`, including latency reporting.
 
-mod util;
+use crate::util;
 
+use crate::util::{Action, FORMATS, TOL};
 use gst::glib;
 use gst::prelude::*;
 use gst_check::Harness;
 use strom_dsp::{Limiter, LimiterParams};
-use util::{Action, FORMATS, TOL};
 
 fn params() -> LimiterParams {
     LimiterParams {

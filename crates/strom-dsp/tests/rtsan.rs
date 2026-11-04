@@ -11,7 +11,7 @@
 //! smoke test):
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan::
 //! ```
 //!
 //! Setup (`new`, `configure`, signal generation) happens outside the scope:

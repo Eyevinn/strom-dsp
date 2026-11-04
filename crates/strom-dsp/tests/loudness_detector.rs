@@ -12,12 +12,7 @@
 //! - channel weights, block-size independence, running-sum drift,
 //!   robustness and zero allocations.
 
-mod agc_support;
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
-use agc_support::{noise, pink, sine_on, Looper};
+use crate::agc_support::{noise, pink, sine_on, Looper};
 use strom_dsp::biquad::BiquadCoefficients;
 use strom_dsp::meter::{
     k_weighting, k_weighting_prototypes, lufs_from_mean_square, ChannelLayout, ChannelRole,
@@ -25,35 +20,7 @@ use strom_dsp::meter::{
     SILENCE_LUFS,
 };
 
-// ---------------------------------------------------------------------------
-// Counting allocator (per thread, so parallel tests don't interfere).
-
-struct CountingAlloc;
-
-thread_local! {
-    static ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
-
-fn alloc_count() -> usize {
-    ALLOCS.with(|c| c.get())
-}
+use crate::counting_alloc::allocs;
 
 // ---------------------------------------------------------------------------
 
@@ -355,7 +322,7 @@ fn process_and_readings_do_not_allocate() {
     let fs = 48_000.0;
     let sig = pink(1 << 15, 6, fs, 41);
     let mut d = detector(fs, 6, ChannelLayout::Surround51);
-    let before = alloc_count();
+    let before = allocs();
     let mut sink = 0.0;
     for (i, b) in sig
         .chunks(6 * [1usize, 480, 7, 1024][0])
@@ -376,6 +343,6 @@ fn process_and_readings_do_not_allocate() {
             sink += d.short_term_lufs();
         }
     }
-    assert_eq!(alloc_count(), before, "allocated in the processing path");
+    assert_eq!(allocs(), before, "allocated in the processing path");
     assert!(sink.is_finite());
 }

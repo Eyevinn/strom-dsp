@@ -7,7 +7,7 @@
 //! also covers the wrapped `realfft`/`rustfft` calls inside the STFT.
 //!
 //! ```text
-//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test rtsan_sampling
+//! RTSAN_ENABLE=1 cargo test -p strom-dsp --features rtsan --test suite rtsan_sampling::
 //! ```
 //!
 //! Setup (`new`, `configure`, buffers, signal generation) happens outside the
