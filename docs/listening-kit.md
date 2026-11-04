@@ -56,8 +56,8 @@ In short:
   recordings that clipped before they reached us, each through the
   declipper's three latency settings. For the clips clipped here the page
   shows the SDR gain on the clipped samples against the original; the
-  counters (runs repaired, fallbacks, runs too long, largest overshoot) are
-  shown for all.
+  counters (runs repaired, fallbacks, runs rejected, runs too long, largest
+  overshoot) are shown for all.
 
 Every original is the clip scaled to −23 LUFS. Broadcast configurations
 get it at their preset's target loudness, as the harness cases do. All

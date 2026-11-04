@@ -1,7 +1,8 @@
 name: Extended checks
 
-# Slower, specialised checks: minimum Rust versions, RealtimeSanitizer and
-# instruction counts. Weekly and on demand (Actions tab → Run workflow).
+# Slower, specialised checks: minimum Rust versions, RealtimeSanitizer,
+# instruction counts and the declipper check on the test corpus. Weekly and
+# on demand (Actions tab → Run workflow).
 
 on:
   schedule:
@@ -78,3 +79,20 @@ jobs:
       - run: cargo clippy -p strom-dsp --features rtsan,gungraun --all-targets -- -D warnings
       # Report-only: no regression limits are configured.
       - run: cargo bench -p strom-dsp --features gungraun --bench strip_gungraun
+
+  declipper-corpus:
+    name: Declipper on the corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/fetch-corpus.sh
+      # Speech and music clipped 3, 6 and 10 dB: never worse than the clipped
+      # input, no runaway peaks, speech ΔSDRc kept
+      # (crates/strom-dsp-harness/src/declip.rs).
+      - run: cargo test --release -p strom-dsp-harness --test declipper_corpus -- --ignored --nocapture
