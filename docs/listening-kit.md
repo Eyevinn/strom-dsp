@@ -51,6 +51,13 @@ In short:
 - **Channel strip on speech:** gate, gate as expander, compressor,
   de-esser and cleanup at the element defaults (cleanup with a usual
   speech setting, since its default is all off).
+- **Declipper:** clean speech and music hard-clipped 3, 6 and 10 dB
+  below their peak (the clipped version is shown too), and the corpus
+  recordings that clipped before they reached us, each through the
+  declipper's three latency settings. For the clips clipped here the page
+  shows the SDR gain on the clipped samples against the original; the
+  counters (runs repaired, fallbacks, runs too long, largest overshoot) are
+  shown for all.
 
 Every original is the clip scaled to −23 LUFS. Broadcast configurations
 get it at their preset's target loudness, as the harness cases do. All
