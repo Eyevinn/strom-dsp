@@ -34,8 +34,11 @@ debug = "line-tables-only"
 # The test suite runs long signals (seconds of audio, THD and loudness grids,
 # proptests). Unoptimised it takes over 10 minutes; opt-level 2 keeps
 # debug-assertions and overflow checks on but makes it practical in CI.
+# Line tables are enough for backtraces with file and line, and build and
+# link about a third faster than full debug info.
 [profile.test]
 opt-level = 2
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
