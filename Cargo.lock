@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-stromdsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
@@ -1312,7 +1312,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "strom-dsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "criterion",
  "ebur128",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "strom-dsp-harness"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "realfft",
  "serde_json",
