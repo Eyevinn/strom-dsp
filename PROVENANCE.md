@@ -893,7 +893,8 @@ the analytic LR4 band magnitudes `1/(1+r⁴)` and `r⁴/(1+r⁴)` with pre-warpe
 
 ### Declipper (`src/declipper/`)
 
-Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
+Real-time repair of hard-clipped runs, inside a fixed delay of 3, 5
+(default) or 10 ms.
 
 - **Reconstruction:** least-squares AR interpolation of missing samples:
   A. J. E. M. Janssen, R. N. J. Veldhuis, L. B. Vries, "Adaptive
@@ -953,18 +954,29 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
   - constrained least squares by a bounded active-set loop (≤ 4 solves; a
     bound is never released), then projection into the box; the box upper
     edge is a cap (default +12 dB over the clipped value);
+  - *Burg retry* (own design): when the first round leaves every unknown at
+    its starting value (the model has learnt the flat top, so the solve
+    lands inside the clip level), the first round is done again with a Burg
+    estimate on the known samples from 2.5 ms before the run to the end of
+    the window, if the work budget allows. It fixes runs that otherwise
+    come out unrepaired (synthetic speech clipped 3 dB: 0.3 → 3.3 dB SDR
+    improvement on the clipped samples) and costs nothing measurable on
+    recorded speech;
   - AR order 48 at 48 kHz (scaled with the rate, 12…64), 10 ms of context
-    before a run and up to 5 ms after it, 2 rounds: Burg on the known
-    samples only (reflection coefficients summed over the stretches between
-    the unknowns), then the autocorrelation method on the window with the
-    rebuilt samples; up to 8 samples of later runs in the window solved
+    before a run and up to 5 ms after it, 2 rounds of the autocorrelation
+    method (first with the run at its clipped values, then with the
+    rebuilt samples); up to 8 samples of later runs in the window solved
     jointly; Cholesky in f64 with 1e-10 relative diagonal loading, 1e-5
     white-noise correction on lag 0. Chosen by measurement on synthetic
-    material and recorded speech (VCTK, LibriSpeech, LibriVox) clipped 3, 6
-    and 10 dB: Burg first raised the mean SDR improvement on the clipped
-    samples of recorded speech from 12.4/8.9/7.3 dB to 13.6/9.7/7.5 dB, the
-    10 ms past context to 14.4/10.1/8.0 dB; AR orders 24, 32 and 64 and a
-    third round were no better overall. Consistency-constrained sparse
+    material and the recorded speech of the test corpus (VCTK, LibriSpeech,
+    LibriVox, MUSAN) clipped 3, 6 and 10 dB: the second round is what
+    matters (one round alone gives 11.8/3.1/3.7 dB mean SDR improvement on
+    the clipped samples against 16.4/12.9/9.8 dB with two, without a work
+    limit); Burg on the known samples only (reflection coefficients summed
+    over the stretches between the unknowns) as the first estimate gave the
+    same quality for 1.8 times the work, so under the work budget it lost
+    up to 3 dB; AR orders 24, 32 and 64, a third round and a 5 ms past
+    context were no better overall. Consistency-constrained sparse
     methods (consistent IHT, SPADE) were not built: they work on frames of
     tens of milliseconds with many transform iterations each, beyond the
     5 ms latency and the per-buffer CPU budget;
@@ -976,17 +988,22 @@ Real-time repair of hard-clipped runs, inside a fixed 10 ms delay.
   - *work budget* (own design): every step of a rebuild is counted in
     multiply-adds from its operation count (estimate `N·(p+2) + 1.5p²`,
     Burg `+5pN`, solve `(m+p)(p+1) + 3m(p+1) + m³/6 + 2m²`); each channel
-    has a token bucket refilled with 40·10⁶ units per second of audio, up
-    to 300 000. A step only starts when it fits: Burg, else the
-    autocorrelation estimate, then as many active-set solves and the second
-    round as fit; when not even an estimate and one solve fit, the cheap
-    fallback rebuilds the run: a cubic Hermite curve (any numerical-analysis
+    has a token bucket refilled with 50·10⁶ units per second of audio, up
+    to 200 000. A step only starts when it fits: the estimate, then the
+    active-set solves, then the second round. A round whose active-set loop
+    has to stop for the budget is dropped and the round before it kept (a
+    half-finished loop, projected into the box, put some runs at the cap
+    and left others at the clip level: on recorded speech it cost more than
+    the fallback); when the first round does not fit, the cheap fallback
+    rebuilds the run: a cubic Hermite curve (any numerical-analysis
     textbook) from the value and one-sided slope on each side, projected
     into the same box. Counted, not timed, so the output is deterministic
-    and independent of the buffer size;
+    and independent of the buffer size. The smaller burst and larger rate
+    (against 300 000 and 40·10⁶) keep the same bound per 10 ms buffer and
+    give dense clipping more work per second;
   - *model reuse* (own design): a run that starts within 10 ms of the run
     whose first-round AR model a channel keeps uses that model instead of a
-    new Burg estimate (measured: half the work per run on recorded speech
+    new estimate (measured: half the work per run on recorded speech
     clipped 10 dB, under 0.1 dB change in the SDR improvement);
   - the hot loops (dot products, Burg recursion, Cholesky) use four
     partial sums so they vectorise; the Hann window is built by a rotation

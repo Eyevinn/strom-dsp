@@ -73,6 +73,15 @@ pub enum ArMethod {
 pub struct LsarSolver {
     /// Estimation method.
     pub method: ArMethod,
+    /// Most known samples before the first unknown that the Burg estimate
+    /// uses (the rest of the window still serves the solve and the later
+    /// rounds). Default: all.
+    pub burg_before: usize,
+    /// With [`ArMethod::Autocorrelation`]: when the first round leaves every
+    /// unknown at its starting value (the model has learnt the clipped
+    /// plateau), try the first round again with Burg on the known samples,
+    /// if the work limit allows. Default `false`.
+    pub burg_retry: bool,
     /// Burg forward and backward prediction errors.
     fwd: Vec<f64>,
     bwd: Vec<f64>,
@@ -103,6 +112,11 @@ pub struct LsarSolver {
     /// Free unknowns (window indices) and their slot in the caller's list.
     free: Vec<usize>,
     free_slot: Vec<usize>,
+    /// Values of the unknowns after the last round that finished.
+    kept: Vec<f64>,
+    /// Work of the last [`interpolate`](Self::interpolate) call, also when
+    /// it returned [`LsarError::Budget`].
+    spent: f64,
 }
 
 /// Why an interpolation was not done.
@@ -114,7 +128,10 @@ pub enum LsarError {
     TooLarge,
     /// The window holds a non-finite value, or the solve broke down.
     Numerical,
-    /// Not even the first estimate and solve fit the work limit.
+    /// The first round did not fit the work limit: not even its estimate
+    /// and one solve, or its active-set loop had to stop with unknowns
+    /// still outside their boxes. [`LsarSolver::spent`] gives the work
+    /// done before it stopped.
     Budget,
 }
 
@@ -124,6 +141,8 @@ impl LsarSolver {
     pub fn new(n_max: usize, m_max: usize, p_max: usize) -> Self {
         Self {
             method: ArMethod::Autocorrelation,
+            burg_before: usize::MAX,
+            burg_retry: false,
             fwd: vec![0.0; n_max],
             bwd: vec![0.0; n_max],
             segs: Vec::with_capacity(m_max + 1),
@@ -143,7 +162,24 @@ impl LsarSolver {
             rhs: vec![0.0; m_max],
             free: Vec::with_capacity(m_max),
             free_slot: Vec::with_capacity(m_max),
+            kept: vec![0.0; m_max],
+            spent: 0.0,
         }
+    }
+
+    /// Work of the last [`interpolate`](Self::interpolate) call, including
+    /// one that returned [`LsarError::Budget`].
+    pub fn spent(&self) -> f64 {
+        self.spent
+    }
+
+    /// Work of the Burg estimate on a window of `n` with these unknowns.
+    fn burg_units(&self, n: usize, unknown: &[usize], p: usize) -> f64 {
+        let skip = unknown
+            .first()
+            .map_or(0, |&u| u.saturating_sub(self.burg_before));
+        let (n, nb, p) = (n as f64, (n - skip) as f64, p as f64);
+        n * (p + 2.0) + 1.5 * p * p + 5.0 * p * nb
     }
 
     /// Largest window length.
@@ -233,7 +269,9 @@ impl LsarSolver {
     ) -> Result<usize, LsarError> {
         let n = w.len();
         self.segs.clear();
-        let mut start = 0usize;
+        let mut start = unknown
+            .first()
+            .map_or(0, |&u| u.saturating_sub(self.burg_before));
         for &u in unknown.iter().chain(std::iter::once(&n)) {
             if u > start && u - start > p {
                 self.segs.push((start, u - 1));
@@ -307,11 +345,13 @@ impl LsarSolver {
     /// that would take the work past it. The first round uses
     /// [`method`](Self::method), or the cheaper autocorrelation estimate when
     /// that and one solve do not fit, or the coefficients in `first` when
-    /// given (they
-    /// must have `order + 1` entries, `first[0] = 1`); later rounds and
-    /// active-set solves are left out when they do not fit (every unknown is
-    /// still put into its box). When not even the first estimate and solve
-    /// fit, it returns [`LsarError::Budget`] and leaves `w` untouched.
+    /// given (they must have `order + 1` entries, `first[0] = 1`). A later
+    /// round that does not fit, or whose active-set loop has to stop for
+    /// the limit, is dropped and the last finished round's values are kept.
+    /// When the first round does not fit (not even its estimate and one
+    /// solve, or its active-set loop stops for the limit), it returns
+    /// [`LsarError::Budget`]; the unknowns then hold their values from
+    /// entry, and [`spent`](Self::spent) the work done.
     ///
     /// Returns the work done. On another error the contents of `w` are
     /// undefined.
@@ -345,80 +385,150 @@ impl LsarSolver {
         if m == 0 {
             return Ok(0.0);
         }
+        self.spent = 0.0;
         let mut work = 0.0;
         let first_solve = solve_units(m, p);
-        for round in 0..rounds.max(1) {
-            if round == 0 {
-                let auto = estimate_units(n, p, false);
-                if let Some(a) = first {
-                    self.a[..=p].copy_from_slice(a);
-                    work += 1.5 * (p * p) as f64;
-                } else if self.method == ArMethod::Burg
-                    && estimate_units(n, p, true) + first_solve <= limit
-                {
-                    work += estimate_units(n, p, true);
-                    self.estimate_burg(w, unknown, p)?;
-                } else if auto + first_solve <= limit {
-                    work += auto;
-                    self.estimate(w, p)?;
-                } else {
-                    return Err(LsarError::Budget);
-                }
-                self.a0[..=p].copy_from_slice(&self.a[..=p]);
-            } else {
-                let est = estimate_units(n, p, false);
-                if work + est + first_solve > limit {
-                    break;
-                }
-                work += est;
+        for (slot, &i) in unknown.iter().enumerate() {
+            self.kept[slot] = w[i];
+        }
+        // First round: the estimate (or the given model), then the
+        // active-set loop. With `burg_retry`, a first round that leaves
+        // every unknown at its starting value is tried again with Burg.
+        let mut burg = self.method == ArMethod::Burg;
+        let mut retry = false;
+        let mut use_first = first;
+        loop {
+            let auto = estimate_units(n, p, false);
+            if let Some(a) = use_first {
+                self.a[..=p].copy_from_slice(a);
+                work += 1.5 * (p * p) as f64;
+            } else if burg && work + self.burg_units(n, unknown, p) + first_solve <= limit {
+                work += self.burg_units(n, unknown, p);
+                self.estimate_burg(w, unknown, p)?;
+            } else if retry {
+                // A retry that does not fit: keep the first attempt.
+                break;
+            } else if work + auto + first_solve <= limit {
+                work += auto;
                 self.estimate(w, p)?;
+            } else {
+                self.spent = work;
+                return Err(LsarError::Budget);
             }
-            self.coef_autocorr(p);
-            self.free.clear();
-            self.free_slot.clear();
+            self.a0[..=p].copy_from_slice(&self.a[..=p]);
+            if self.active_set(w, unknown, lo, hi, p, &mut work, limit)? {
+                for (slot, &i) in unknown.iter().enumerate() {
+                    w[i] = self.kept[slot];
+                }
+                self.spent = work;
+                if retry {
+                    // The retry stopped: keep the first attempt, which
+                    // left the unknowns at their starting values.
+                    break;
+                }
+                return Err(LsarError::Budget);
+            }
+            let moved = unknown
+                .iter()
+                .enumerate()
+                .any(|(slot, &i)| w[i] != self.kept[slot]);
+            if moved || burg || !self.burg_retry {
+                break;
+            }
+            // Nothing moved: the model has learnt the plateau. The unknowns
+            // are back at their starting values, so `w` is as on entry.
+            burg = true;
+            retry = true;
+            use_first = None;
+        }
+        for (slot, &i) in unknown.iter().enumerate() {
+            self.kept[slot] = w[i];
+        }
+        for _ in 1..rounds.max(1) {
+            let est = estimate_units(n, p, false);
+            if work + est + first_solve > limit {
+                break;
+            }
+            work += est;
+            self.estimate(w, p)?;
+            if self.active_set(w, unknown, lo, hi, p, &mut work, limit)? {
+                // Stopped for the work limit with unknowns that were last
+                // solved outside their boxes: projecting them can land
+                // anywhere in the box. Keep the round before.
+                for (slot, &i) in unknown.iter().enumerate() {
+                    w[i] = self.kept[slot];
+                }
+                break;
+            }
             for (slot, &i) in unknown.iter().enumerate() {
-                self.free.push(i);
-                self.free_slot.push(slot);
-                // Start each round from the box (the clipped value on the
-                // first round): only the free unknowns are re-solved.
-                w[i] = w[i].clamp(lo[slot], hi[slot]);
-            }
-            for _ in 0..MAX_ACTIVE_SET_ROUNDS {
-                if self.free.is_empty() {
-                    break;
-                }
-                let cost = solve_units(self.free.len(), p);
-                if work + cost > limit {
-                    break;
-                }
-                work += cost;
-                self.solve_free(w, p)?;
-                // Fix every free unknown outside its box at the bound it crossed.
-                let mut kept = 0;
-                for f in 0..self.free.len() {
-                    let i = self.free[f];
-                    let slot = self.free_slot[f];
-                    if w[i] < lo[slot] {
-                        w[i] = lo[slot];
-                    } else if w[i] > hi[slot] {
-                        w[i] = hi[slot];
-                    } else {
-                        self.free[kept] = i;
-                        self.free_slot[kept] = slot;
-                        kept += 1;
-                    }
-                }
-                if kept == self.free.len() {
-                    break;
-                }
-                self.free.truncate(kept);
-                self.free_slot.truncate(kept);
-            }
-            for (slot, &i) in unknown.iter().enumerate() {
-                w[i] = w[i].clamp(lo[slot], hi[slot]);
+                self.kept[slot] = w[i];
             }
         }
+        self.spent = work;
         Ok(work)
+    }
+
+    /// The bounded active-set loop for the current model (`self.a`): solve
+    /// with every unknown free, fix those outside their box at the bound
+    /// they crossed, solve again, at most [`MAX_ACTIVE_SET_ROUNDS`] times;
+    /// then every unknown into its box. Returns `true` when it stopped for
+    /// the work limit before it finished (the unknowns are then undefined).
+    #[allow(clippy::too_many_arguments)]
+    fn active_set(
+        &mut self,
+        w: &mut [f64],
+        unknown: &[usize],
+        lo: &[f64],
+        hi: &[f64],
+        p: usize,
+        work: &mut f64,
+        limit: f64,
+    ) -> Result<bool, LsarError> {
+        self.coef_autocorr(p);
+        self.free.clear();
+        self.free_slot.clear();
+        for (slot, &i) in unknown.iter().enumerate() {
+            self.free.push(i);
+            self.free_slot.push(slot);
+            // Start from the box (the clipped value on the first round):
+            // only the free unknowns are re-solved.
+            w[i] = w[i].clamp(lo[slot], hi[slot]);
+        }
+        for _ in 0..MAX_ACTIVE_SET_ROUNDS {
+            if self.free.is_empty() {
+                break;
+            }
+            let cost = solve_units(self.free.len(), p);
+            if *work + cost > limit {
+                return Ok(true);
+            }
+            *work += cost;
+            self.solve_free(w, p)?;
+            // Fix every free unknown outside its box at the bound it crossed.
+            let mut kept = 0;
+            for f in 0..self.free.len() {
+                let i = self.free[f];
+                let slot = self.free_slot[f];
+                if w[i] < lo[slot] {
+                    w[i] = lo[slot];
+                } else if w[i] > hi[slot] {
+                    w[i] = hi[slot];
+                } else {
+                    self.free[kept] = i;
+                    self.free_slot[kept] = slot;
+                    kept += 1;
+                }
+            }
+            if kept == self.free.len() {
+                break;
+            }
+            self.free.truncate(kept);
+            self.free_slot.truncate(kept);
+        }
+        for (slot, &i) in unknown.iter().enumerate() {
+            w[i] = w[i].clamp(lo[slot], hi[slot]);
+        }
+        Ok(false)
     }
 
     /// The first round's AR coefficients of the last successful

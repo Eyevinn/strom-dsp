@@ -17,10 +17,12 @@
 //!    always there, the future costs latency. A run is rebuilt as soon as
 //!    the full future context has arrived, or at the latest when its first
 //!    sample is about to leave the delay line, with whatever future context
-//!    there is by then (`latency − run length − 1` frames or more). The AR model
-//!    is first estimated by Burg's method from the known samples of the
-//!    window only, then from the whole window with the rebuilt samples in
-//!    it (Janssen et al. 1986 alternate estimate and interpolation); the run's samples
+//!    there is by then (`latency − run length − 1` frames or more). The AR
+//!    model is estimated by the autocorrelation method on the window, first
+//!    with the run at its clipped values, then with the rebuilt samples in
+//!    it (Janssen et al. 1986 alternate estimate and interpolation); when
+//!    the first model leaves the run at the clip level, by Burg's method on
+//!    the known samples just before and after it instead. The run's samples
 //!    are the values that minimise the prediction error, and each one is kept
 //!    on the clipped side of its observed value (Abel & Smith 1991) and no
 //!    more than `max_overshoot_db` beyond it. AR estimate and interpolation
@@ -61,11 +63,12 @@
 //! one. Each channel has a work budget, counted in multiply-adds of the
 //! solver's own cost model ([`lsar::work_units`]): it is refilled by
 //! [`WORK_RATE`] per second of audio, up to [`WORK_BURST`]. A rebuild only
-//! starts the steps that still fit: the Burg estimate, or else the cheaper
-//! autocorrelation estimate, then as many active-set solves and the second
-//! round as fit. When not even an estimate and one solve fit, the run is
-//! rebuilt by the cheap fallback, a cubic Hermite curve across the run
-//! from the value and slope on each side, put into the same box (sign,
+//! starts the steps that still fit: the estimate, the active-set solves,
+//! then the second round. A round whose active-set loop has to stop for
+//! the budget is dropped (its last solve can lie far outside the boxes),
+//! and the previous round's result is kept. When the first round does not
+//! fit, the run is rebuilt by the cheap fallback, a cubic Hermite curve
+//! across the run from the value and slope on each side, put into the same box (sign,
 //! beyond the clipped value, within `max_overshoot_db`); it is counted in
 //! [`DeclipperStats::fallbacks`]. Runs close together share work: a run
 //! that starts within [`MODEL_REUSE_MS`] of the run whose first-round
@@ -75,7 +78,7 @@
 //! `channels · (WORK_BURST + WORK_RATE · d)` plus the fallbacks (12
 //! multiply-adds per sample), independent of the input: 700 000 units per
 //! channel for a 10 ms buffer. On the bench (Apple M5 Pro) a unit takes
-//! 0.25–0.3 ns, so the worst 10 ms stereo buffer stays under 4 % of its
+//! 0.25–0.3 ns, so the worst 10 ms stereo buffer stays under 5 % of its
 //! duration, detection included; shorter buffers can take a larger share
 //! (the burst does not shrink with them). Everything is counted, not timed,
 //! so the output does not depend on the machine, the load or the buffer
@@ -192,15 +195,23 @@ pub const MODEL_REUSE_MS: f32 = 10.0;
 
 /// Work budget per channel, refilled per second of audio (multiply-adds,
 /// see [`lsar::work_units`]). See "CPU budget" in the module docs. With
-/// [`WORK_BURST`] it keeps the worst 10 ms stereo buffer under 4 % of its
+/// [`WORK_BURST`] it keeps the worst 10 ms stereo buffer under 5 % of its
 /// duration on the bench, and costs about 1 dB of the SDR improvement on
-/// recorded speech clipped 10 dB (none at 3 dB) against no limit.
-pub const WORK_RATE: f64 = 40.0e6;
+/// recorded speech clipped 10 dB (0.2 dB at 3 and 6 dB) against no limit.
+pub const WORK_RATE: f64 = 50.0e6;
 
 /// Most work a channel can save up (multiply-adds): what one buffer can
-/// spend on top of its own refill. It covers the first estimate and solve
-/// of the longest run (2 ms) with the autocorrelation estimate.
-pub const WORK_BURST: f64 = 300.0e3;
+/// spend on top of its own refill. It covers the estimate and the first
+/// solve of runs up to about 1.7 ms at 48 kHz; longer runs (rare in speech)
+/// get the fallback. A smaller burst with a larger rate keeps the same
+/// bound per 10 ms buffer but more work per second for dense clipping.
+pub const WORK_BURST: f64 = 200.0e3;
+
+/// Context before a run that the Burg retry uses (ms; at least `2 × AR
+/// order + 1` frames). A run that the first AR model leaves at the clip
+/// level (the model has learnt the plateau) is estimated again by Burg on
+/// the known samples only; the short context keeps the retry cheap.
+pub const BURG_RETRY_PAST_MS: f32 = 2.5;
 
 /// Bypass crossfade (ms).
 pub const XFADE_MS: f32 = 5.0;
@@ -554,8 +565,8 @@ impl Declipper {
                     fallback = true;
                     let off = (s - ws) as usize;
                     let k = run.len;
-                    let work =
-                        hermite_fill(&mut self.w[..len], off, k, &self.lo[..k], &self.hi[..k]);
+                    let work = self.solver.spent()
+                        + hermite_fill(&mut self.w[..len], off, k, &self.lo[..k], &self.hi[..k]);
                     ch.credit -= work;
                     self.stats.work += work;
                     Ok(())
@@ -677,7 +688,15 @@ impl Processor for Declipper {
         let n_max = self.past + self.max_run_limit + self.future + 1;
         let m_max = self.max_run_limit + JOINT_LATER;
         self.solver = LsarSolver::new(n_max, m_max, self.order);
-        self.solver.method = ArMethod::Burg;
+        // The autocorrelation method: Burg on the known samples gave no
+        // more SDR improvement on recorded speech once the second round
+        // re-estimates with the rebuilt samples, for about 1.8 times the
+        // work per run. It stays as the retry for runs the first model
+        // leaves at the clip level.
+        self.solver.method = ArMethod::Autocorrelation;
+        self.solver.burg_retry = true;
+        self.solver.burg_before =
+            ms_frames(BURG_RETRY_PAST_MS, sample_rate).max(2 * self.order + 1);
         self.w = vec![0.0; n_max];
         self.unknown = Vec::with_capacity(m_max);
         self.lo = Vec::with_capacity(m_max);
