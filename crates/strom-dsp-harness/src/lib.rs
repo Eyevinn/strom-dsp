@@ -8,6 +8,9 @@
 //! - [`metrics`]: generic metrics over signals: loudness, true peak,
 //!   gain-reduction split, clip depth, aliasing, IMD and NMR.
 //! - [`chain`]: the broadcast chain cases and the numbers per case.
+//! - [`crackle`]: crackle on speech: the chain on corpus clips, worst-frame
+//!   NMR and clicks, and the acceptance check over presets and latency
+//!   modes.
 //! - [`baseline`]: the checked-in baseline (`baseline.json`) and the
 //!   regression check against it.
 //! - [`listen`]: the listening kit: processor configurations over the
@@ -20,6 +23,7 @@
 
 pub mod baseline;
 pub mod chain;
+pub mod crackle;
 pub mod listen;
 pub mod metrics;
 pub mod signals;
