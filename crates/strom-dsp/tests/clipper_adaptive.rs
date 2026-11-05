@@ -237,6 +237,61 @@ fn bandwidth_guard_follows_the_programme_without_flapping() {
 }
 
 // ---------------------------------------------------------------------------
+/// Switched off, the predictability estimator and the bandwidth guard are
+/// not fed; switched on again they start clean. A reading kept from the
+/// programme before the switch (a vowel, a band-limited source) would
+/// lower the depth on full-band noise that follows it.
+#[test]
+fn estimators_start_clean_when_switched_on_again() {
+    let mut v = vowel((0.3 * FS) as usize);
+    let mut band = white((1.0 * FS) as usize, 1.0, 61);
+    lowpass(&mut band, FS, 3_400.0, 8);
+    let mut noise = white((0.3 * FS) as usize, 1.0, 62);
+    drive(&mut v, 3.0);
+    drive(&mut band, 3.0);
+    drive(&mut noise, 3.0);
+    let params = |on: bool| FinalClipperParams {
+        threshold_db: THRESHOLD_DB,
+        adaptive_depth: on,
+        bandwidth_guard: on,
+        ..FinalClipperParams::default()
+    };
+    let mut c = clipper(true, true);
+    run(&mut c, &band);
+    assert!(c.guard_edge_hz().is_some(), "guard found no edge");
+    // The vowel last: the estimator's window holds it.
+    let mut y = v.clone();
+    for b in y.chunks_mut(480) {
+        c.process(b);
+    }
+    assert!(
+        c.predictability() > 0.9,
+        "vowel read as {}",
+        c.predictability()
+    );
+    c.set_params(&params(false));
+    run(&mut c, &noise);
+    c.set_params(&params(true));
+    assert_eq!(
+        c.guard_edge_hz(),
+        None,
+        "stale band edge after switching on"
+    );
+    let (mut max_pred, mut min_depth) = (0.0f64, 1.0f32);
+    let mut y = noise.clone();
+    for b in y.chunks_mut(64) {
+        c.process(b);
+        max_pred = max_pred.max(c.predictability());
+        min_depth = min_depth.min(c.depth());
+    }
+    println!("after switching on: predictability ≤ {max_pred:.2}, depth ≥ {min_depth:.2}");
+    assert!(
+        max_pred < 0.5,
+        "stale predictability {max_pred:.2} on noise"
+    );
+    assert!(min_depth > 0.5, "depth fell to {min_depth:.2} on noise");
+}
+
 // Limiter peak control.
 
 const CEILING_DB: f32 = -1.0;
@@ -338,6 +393,95 @@ fn peak_control_reduction_is_the_smaller_gain_not_the_product() {
     );
     assert!((last - want).abs() < 0.3, "settles at {last:.2} dB");
     assert!(max_gr < want + 0.5, "overshoots to {max_gr:.2} dB");
+}
+
+/// `reset` clears the peak control completely: after loud programme, a
+/// reset and quiet input, nothing is reduced. A held static reduction that
+/// survived the reset would bring the reduction back for the length of its
+/// hold.
+#[test]
+fn peak_control_reset_leaves_no_held_reduction() {
+    let mut l = limiter(true);
+    let mut loud = white((0.3 * FS) as usize, 1.0, 51);
+    let amp = lin(CEILING_DB as f64 + 9.0);
+    loud.iter_mut().for_each(|v| *v *= amp as f32);
+    for b in loud.chunks_mut(480) {
+        l.process(b);
+    }
+    assert!(
+        l.peak_control_reduction_db() > 3.0,
+        "loud programme reduced too little"
+    );
+    l.set_peak_control_drive(0.25);
+    l.reset();
+    let quiet: Vec<f32> = (0..(0.1 * FS) as usize)
+        .map(|n| (lin(-30.0) * (2.0 * PI * 440.0 * n as f64 / FS).sin()) as f32)
+        .collect();
+    let mut y = quiet.clone();
+    for (i, b) in y.chunks_mut(16).enumerate() {
+        l.process(b);
+        let gr = l.gain_reduction_db();
+        assert!(gr == 0.0, "reduction {gr:.3} dB after reset (chunk {i})");
+    }
+    // The drive is back at full: a step over the curve reduces as a fresh
+    // limiter does.
+    let mut fresh = limiter(true);
+    let step: Vec<f32> = (0..(0.2 * FS) as usize)
+        .map(|n| (lin(CEILING_DB as f64 + 3.0) * (2.0 * PI * 1_000.0 * n as f64 / FS).sin()) as f32)
+        .collect();
+    let (mut a, mut b) = (step.clone(), step);
+    fresh.reset();
+    l.reset();
+    fresh.process(&mut a);
+    l.process(&mut b);
+    assert_eq!(a, b, "reset limiter differs from a fresh one");
+}
+
+/// The peak control's reduction is read at the same point in time as the
+/// total reduction (the most recently output frame), so at a speech-like
+/// onset it never exceeds the total and the fast limiter's share is
+/// counted. Read at the input instead, it runs a lookahead ahead of the
+/// output gain and hides the fast part.
+#[test]
+fn fast_part_is_counted_at_a_speech_like_onset() {
+    let mut l = TruePeakLimiter::new();
+    l.set_params(&TruePeakLimiterParams {
+        enabled: true,
+        ceiling_dbtp: CEILING_DB,
+        release_ms: 200.0,
+        lookahead_ms: 5.0,
+    });
+    l.set_peak_control(&PC);
+    l.configure(FS as f32, 1);
+    // 100 ms of silence, then a vowel 8 dB over the ceiling with a 3 ms
+    // rise.
+    let pre = (0.1 * FS) as usize;
+    let mut v = vowel((0.15 * FS) as usize);
+    let p = v.iter().fold(0.0f32, |m, &s| m.max(s.abs())) as f64;
+    let g = lin(CEILING_DB as f64 + 8.0) / p;
+    let rise = 0.003 * FS;
+    v.iter_mut()
+        .enumerate()
+        .for_each(|(n, s)| *s = (*s as f64 * g * (n as f64 / rise).min(1.0)) as f32);
+    let mut x = vec![0.0f32; pre];
+    x.extend_from_slice(&v);
+    let (mut fast, mut worst) = (0.0f64, f64::NEG_INFINITY);
+    for s in x.chunks_mut(1) {
+        l.process(s);
+        let (gr, pc) = (l.gain_reduction_db(), l.peak_control_reduction_db());
+        worst = worst.max(pc - gr);
+        fast += (gr - pc).max(0.0);
+    }
+    let fast_db_ms = fast / FS * 1_000.0;
+    println!("onset: fast part {fast_db_ms:.2} dB·ms, peak control over total by {worst:.4} dB");
+    assert!(
+        worst < 1e-3,
+        "peak control reduction exceeds the total by {worst:.3} dB"
+    );
+    assert!(
+        fast_db_ms > 10.0,
+        "fast part not counted: {fast_db_ms:.3} dB·ms"
+    );
 }
 
 /// The content-adaptive depth, the bandwidth guard and the peak control

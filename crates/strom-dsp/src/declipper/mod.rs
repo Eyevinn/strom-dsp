@@ -9,8 +9,16 @@
 //!    more consecutive samples on a flat (or, optionally, slightly drooping)
 //!    plateau, entered and left by a sharp corner from the same side, at a
 //!    level above `min_level`. The clip level is each plateau's own value,
-//!    so a clip below 0 dBFS, or with a DC offset after it, is found too;
-//!    the detector docs give the exact rules;
+//!    so a clip below 0 dBFS, or with a DC offset after it, is found too.
+//!    Once the source has shown its clip level (a long flat run confirms
+//!    it, per direction), a peak that only just reaches that level is a
+//!    run too: a pair, or a **single sample**, within `tol` of the
+//!    confirmed level with a sharp corner on each side. A single sample is
+//!    reported one sample late (when its right neighbour arrives) and is
+//!    rebuilt like any run, as a run of length 1. Single samples never
+//!    confirm the level, so it expires 5 s after the last long run, and
+//!    unclipped material, which never confirms one, gets no single-sample
+//!    repair. The detector docs ("Known clip level") give the exact rules;
 //! 2. **rebuilds** each run from a window of [`PAST_CONTEXT_MS`] before it
 //!    and up to [`FUTURE_CONTEXT_MS`] after it, by least-squares AR
 //!    interpolation ([`lsar`]). The context is asymmetric: the past is

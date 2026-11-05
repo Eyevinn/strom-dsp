@@ -1083,7 +1083,10 @@ impl LimiterStage {
     }
 
     /// Current gain reduction (positive dB) beyond the peak control's: the
-    /// fast part.
+    /// fast part. Both are read for the most recently output frame (the
+    /// peak control's reduction is delayed by the lookahead inside the
+    /// core), so an onset's fast reduction is not hidden by a peak control
+    /// that has already reacted to it at the input.
     fn fast_gain_reduction_db(&self) -> f64 {
         (self.inner.gain_reduction_db() - self.inner.peak_control_reduction_db()).max(0.0)
     }

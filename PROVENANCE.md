@@ -327,7 +327,13 @@ basics from J. O. Smith III. No code listing was used.
   hold above, after Giannoulis et al. on fast time constants). The required
   gain becomes `min(r[j], g_pc[j])`, so the proof above is unchanged (own
   derivation; a two-stage limiter is textbook, the min form keeps the
-  stages from adding up). Guard tests: `tests/clipper_adaptive.rs`.
+  stages from adding up). Its smoothed reduction is kept per input frame
+  and reported for the frame being output (`L` frames back in peak-stream
+  time), the same point in time as the total gain, so the fast share
+  (total minus peak control) is never hidden at an onset; by the min form
+  it is never negative. `reset` clears the reduction, the held static
+  reduction and its hold, and the drive (own choices). Guard tests:
+  `tests/clipper_adaptive.rs`.
 
 ### Loudness detector (`src/meter/kweighting.rs`)
 
@@ -468,6 +474,13 @@ clippings are scaled by a depth before they are subtracted.
   clippings).
 - Both decide on a fixed grid of input frames and ramp linearly (64 frames;
   the guard 15 ms), so the output does not depend on the buffer size.
+- Neither estimator is fed while its flag is off (no cost when unused);
+  switched on again it starts from a clean state rather than from a
+  reading of programme that has gone (own choice).
+- The decimator early-out is held off by any non-zero clipping, whatever
+  the depth; the depth-weighted count (frames at depth ≥ ½) is the
+  meter's only (own choice: the decimator's state does not depend on the
+  depth).
 
 **Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −94.0
 dBFS (standard), −75.8 dBFS (low); worst sample peak over the threshold on
@@ -490,10 +503,33 @@ processing path uses a masking model.
 - Pre-emphasis `1 − 0.9 z⁻¹`, order 10 at an 8 kHz analysis rate, white-noise
   correction of r₀: the textbook narrowband speech LPC setup (Rabiner &
   Schafer, *Digital Processing of Speech Signals*, ch. 8).
-- Own choices: analysis below 3.5 kHz (4th-order Butterworth, decimated),
-  so the reading does not depend on the programme's upper band edge; a
-  reflection coefficient at or over 1 (the recursive window is not always
-  positive definite) reads as fully predictable (a sum of tones).
+- Own choices: analysis below 3.5 kHz, so the reading does not depend on
+  the programme's upper band edge; a reflection coefficient at or over 1
+  (the recursive window is not always positive definite) reads as fully
+  predictable (a sum of tones).
+- Same analysis at every input rate (own design): an 8th-order Butterworth
+  low-pass at 3.5 kHz (RBJ cookbook sections with the Butterworth Qs
+  `1/(2·cos((2k−1)π/16))`; Oppenheim & Schafer for the pole placement) as
+  the anti-alias filter, then the analysis samples taken at exactly 8 kHz,
+  at the fractional positions `k·fs/8000`, by 4-point cubic interpolation
+  (Catmull–Rom spline: E. Catmull and R. Rom, "A class of local
+  interpolating splines", 1974). At whole multiples of 8 kHz this is plain
+  decimation. Measured against 48 kHz on a vowel, white, band-pass and
+  band-limited noise: within 0.2 dB at 44.1 … 192 kHz and 0.5 dB at 16
+  and 22.05 kHz (guard test in the module). The earlier rounded integer
+  decimation analysed 44.1 kHz at 7.35 kHz and let 4th-order aliasing
+  through (a vowel read 10 dB at 22.05 kHz against 23 dB at 48 kHz).
+- Programme above the analysed band (own choice): with less than −30 dB
+  of the programme's power below 3.5 kHz (windowed mean squares of the
+  mono sum before and after the anti-alias filter) the reading is the
+  largest gain, predictable. The rounded decimation folded a high tone
+  into the band, where it read as a tone; with a proper anti-alias filter
+  nothing is left, and the harness CCIF twin-tone (19 + 20 kHz) was then
+  clipped in `streaming`, with a −74 dB difference tone and a worst-frame
+  NMR of −29 dB (−66 dB before). Leaving it to the limiter restores that.
+- Warm-up (own choice): until the window has seen one time constant of
+  analysis samples (at least `4·P`) after a reset, the gain reads 0 dB;
+  an order-10 estimate from a few samples read white noise as up to 7 dB.
 
 ### Bandwidth guard (`src/bandwidth_guard.rs`)
 
@@ -688,6 +724,29 @@ Own design choices:
   high-frequency word onset was dipped). With it the low mode needs no lookahead: corpus speech measures
   the same with the guard as without it, and the test clicks are caught
   as before.
+- **Multi-sample clicks** (own extension of the rise gate): a click that
+  peaks over two or three samples (e.g. `0.05, 0.6, 1.0, 0.4, 0.05`)
+  failed (2), its second sample already over the cap. Condition (1)/(2)
+  became: the rise from the programme level (a sample and the one before
+  it at or under the cap) to the peak takes at most 3 samples at 48 kHz
+  (scaled with the rate: 6 at 96 kHz, 12 at 192 kHz, so a click is the
+  same length in time), and exceeds the cap once per 48 kHz sample it
+  takes, rising in one stroke (the samples between on the peak's side,
+  each at least as large as the one before: a 0.2 ms swell on a 15 kHz
+  tone, which alternates in sign on its way up, was otherwise taken for a
+  click in the harness). With one sample it is the rule above. Measured on the corpus
+  crackle check: a rise within three samples that only had to exceed the
+  cap once took speech onsets (worst-frame NMR up to +19 dB in the low
+  mode; +0.1 dB in the standard one); with two samples it passed with less
+  margin (−4.1 against −8.3 dB for `ebu-r128`); with the per-sample
+  steepness every configuration measures as it did before.
+- **Isolation window above 48 kHz** (own choice): the buffer reaches only
+  0.25 ms there, so the window of (3) cannot lie after the longest core.
+  It used to be the last 7 buffered frames, a fixed place that could fall
+  on the click's own peak or fall. It now starts after the click's own
+  fall (its last sample over the core level within the rise allowance
+  after the peak) and runs to the newest buffered frame; with fewer than
+  7 frames left the excursion is refused.
 - **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
   interpolator's ringing before a large click) and the ramp after a spike
   stay out of the envelope; an abandoned event's peak goes into it at once.

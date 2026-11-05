@@ -9,7 +9,7 @@
 //! to BaseTransform passthrough and the latency never changes with it. The
 //! meter message is built (and allocates) only when it is due.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use gst::glib;
@@ -107,6 +107,7 @@ fn meter_structure(
         .field("runs-too-long", st.runs_too_long)
         .field("fallbacks", st.fallbacks)
         .field("runs-rejected", st.runs_rejected)
+        .field("runs-failed", st.runs_failed)
         .field(
             "largest-overshoot",
             if over.is_finite() { over.max(0.0) } else { 0.0 },
@@ -118,23 +119,34 @@ fn meter_structure(
 pub struct StromDspDeclipper {
     settings: SharedSettings<Settings>,
     stream: Mutex<Option<Stream>>,
-    /// Negotiated rate (0 = none) and the configured latency (frames), for
-    /// the latency query without touching the streaming lock.
-    rate: AtomicU32,
-    latency_frames: AtomicU32,
+    /// Negotiated rate (high 32 bits; 0 = none) and the configured latency
+    /// (frames, low 32 bits), for the latency query without touching the
+    /// streaming lock. One atomic, so a query never sees the rate of one
+    /// configuration with the latency of another.
+    rate_latency: AtomicU64,
+}
+
+/// `(rate, latency_frames)` packed into one word (see
+/// [`StromDspDeclipper::rate_latency`]).
+fn pack(rate: u32, frames: u32) -> u64 {
+    (u64::from(rate) << 32) | u64::from(frames)
+}
+
+fn unpack(v: u64) -> (u32, u32) {
+    ((v >> 32) as u32, v as u32)
 }
 
 impl StromDspDeclipper {
     /// The reported latency: the configured one, or before caps the current
     /// setting's at [`FALLBACK_RATE`].
     fn latency(&self) -> gst::ClockTime {
-        let rate = self.rate.load(Ordering::Acquire);
+        let (rate, frames) = unpack(self.rate_latency.load(Ordering::Acquire));
         if rate == 0 {
             let mode = self.settings.get().latency.library();
             let frames = Declipper::latency_frames_for(FALLBACK_RATE as f32, mode);
             latency_time(FALLBACK_RATE, frames as u32)
         } else {
-            latency_time(rate, self.latency_frames.load(Ordering::Acquire))
+            latency_time(rate, frames)
         }
     }
 }
@@ -214,7 +226,7 @@ impl ObjectImpl for StromDspDeclipper {
                     s.latency = v;
                     s.params.latency = v.library();
                 });
-                if self.rate.load(Ordering::Acquire) != 0 {
+                if unpack(self.rate_latency.load(Ordering::Acquire)).0 != 0 {
                     gst::warning!(
                         CAT,
                         imp = self,
@@ -286,7 +298,7 @@ impl BaseTransformImpl for StromDspDeclipper {
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         *self.stream.lock().unwrap() = None;
-        self.rate.store(0, Ordering::Release);
+        self.rate_latency.store(0, Ordering::Release);
         gst::debug!(CAT, imp = self, "stopped");
         Ok(())
     }
@@ -313,8 +325,8 @@ impl BaseTransformImpl for StromDspDeclipper {
             *guard = Some(st);
             frames
         };
-        self.latency_frames.store(frames, Ordering::Release);
-        self.rate.store(rate, Ordering::Release);
+        self.rate_latency
+            .store(pack(rate, frames), Ordering::Release);
         let new_latency = self.latency();
         gst::debug!(
             CAT,

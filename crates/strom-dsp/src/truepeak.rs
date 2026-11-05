@@ -358,8 +358,10 @@ impl TruePeakLimiter {
         self.core.set_peak_control_drive(drive);
     }
 
-    /// The peak control's current reduction (positive dB), part of
-    /// [`TruePeakLimiter::gain_reduction_db`].
+    /// The peak control's reduction (positive dB) in force for the most
+    /// recently output frame: the same point in time as
+    /// [`TruePeakLimiter::gain_reduction_db`], and never more than it. Their
+    /// difference is the fast limiter's share.
     pub fn peak_control_reduction_db(&self) -> f64 {
         self.core.peak_control_reduction_db()
     }
@@ -466,8 +468,26 @@ impl TruePeakLimiter {
     /// [`TruePeakLimiter::set_peak_control_drive`]) given per input frame:
     /// `drive[i]` for frame `i` of `samples` (at least one per frame). The
     /// drive in force afterwards is the last frame's.
+    ///
+    /// A `drive` shorter than the frame count is a caller bug (a debug
+    /// assertion); in a release build every frame is still processed, the
+    /// frames past the end of `drive` with the last drive given.
     pub fn process_with_drive(&mut self, samples: &mut [f32], drive: &[f32]) {
-        self.process_impl(samples, Some(drive));
+        debug_assert!(
+            self.channels == 0 || drive.len() >= samples.len() / self.channels,
+            "drive slice shorter than the frame count"
+        );
+        self.process_clamped(samples, drive);
+    }
+
+    /// [`TruePeakLimiter::process_with_drive`] without the assertion: the
+    /// frames `drive` covers with it, the rest with the drive in force.
+    fn process_clamped(&mut self, samples: &mut [f32], drive: &[f32]) {
+        let ch = self.channels.max(1);
+        let covered = (drive.len() * ch).min(samples.len());
+        let (head, tail) = samples.split_at_mut(covered);
+        self.process_impl(head, Some(drive));
+        self.process_impl(tail, None);
     }
 
     fn process_impl(&mut self, samples: &mut [f32], drive: Option<&[f32]>) {
@@ -476,9 +496,7 @@ impl TruePeakLimiter {
             return;
         }
         let frames = samples.len() / ch;
-        if drive.is_some_and(|d| d.len() < frames) {
-            return;
-        }
+        debug_assert!(drive.is_none_or(|d| d.len() >= frames));
         for (k, chunk) in samples[..frames * ch]
             .chunks_mut(CHUNK_FRAMES * ch)
             .enumerate()
@@ -504,5 +522,45 @@ impl TruePeakLimiter {
             let drive = drive.map(|d| &d[k * CHUNK_FRAMES..k * CHUNK_FRAMES + nf]);
             self.core.process_with_peaks(chunk, peaks, drive);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A short drive slice does not skip processing: the frames it covers
+    /// use it, the rest the last drive given, exactly as with a full slice
+    /// that repeats the last value.
+    #[test]
+    fn short_drive_slice_processes_every_frame() {
+        let make = || {
+            let mut l = TruePeakLimiter::new();
+            l.set_peak_control(&PeakControlParams {
+                headroom_db: 3.0,
+                ratio: 8.0,
+                knee_db: 3.0,
+                attack_ms: 4.0,
+                release_ms: 1_000.0,
+            });
+            l.configure(48_000.0, 2);
+            l
+        };
+        let frames = 2_000;
+        let x: Vec<f32> = (0..frames * 2)
+            .map(|i| 1.5 * (i as f32 * 0.05).sin())
+            .collect();
+        let drive: Vec<f32> = (0..frames).map(|i| (i % 300) as f32 / 299.0).collect();
+        let short = &drive[..1_234];
+        let mut full = short.to_vec();
+        full.resize(frames, short[short.len() - 1]);
+
+        let (mut a, mut b) = (x.clone(), x.clone());
+        let mut la = make();
+        la.process_clamped(&mut a, short);
+        let mut lb = make();
+        lb.process_with_drive(&mut b, &full);
+        assert_eq!(a, b);
+        assert_ne!(a, x, "nothing processed");
     }
 }

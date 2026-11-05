@@ -504,8 +504,10 @@ fn meter_message_counts_repairs() {
     assert!(sum("runs-repaired") > 0);
     assert!(sum("samples-repaired") >= sum("runs-repaired"));
     assert!(sum("fallbacks") <= sum("runs-repaired"));
+    // Every count field is there (a missing one panics in `sum`).
     let _ = sum("runs-too-long");
     let _ = sum("runs-rejected");
+    let _ = sum("runs-failed");
     let over = msgs
         .iter()
         .map(|s| s.get::<f64>("largest-overshoot").unwrap())
@@ -525,6 +527,8 @@ fn meter_message_counts_repairs() {
     let mut buf = input.clone();
     d.process(&mut buf);
     assert_eq!(sum("runs-repaired"), d.stats().runs_repaired);
+    assert_eq!(sum("runs-rejected"), d.stats().runs_rejected);
+    assert_eq!(sum("runs-failed"), d.stats().runs_failed);
 
     // Clean audio: messages with nothing repaired. Interval 0: none.
     let clean: Vec<f32> = util::test_signal(48_000, 2, 48_000)

@@ -57,7 +57,8 @@ input gain → spike guard → wideband AGC → multiband compressor (LR4) → f
   It clips only where clipping is masked:
   - **Content-adaptive depth:** the clippings are scaled down on
     predictable material. One value per 64 frames, the linear-prediction
-    gain of the programme below 3.5 kHz (order 10, 20 ms window), maps
+    gain of the programme below 3.5 kHz (order 10, 20 ms window, analysed
+    at 8 kHz whatever the sample rate), maps
     2 … 5 dB to full … no clipping, held for 1 s. Speech, tones and
     sustained music are not clipped; noise, crowd, applause and dense
     mixes are, as before.
@@ -402,9 +403,11 @@ around a single click is 2.3 dB (a click that lands on a loud hit gets the
 hit's own reduction).
 
 **Spike guard limits:** a spike is at most 0.25 ms long at its core
-and jumps to its peak in one sample (single-sample clicks and glitches;
-a longer microphone bump, a plosive, or a click spread over several
-samples by a filter or a codec is programme to it). A click that lands
+and rises steeply to its peak within three samples at 48 kHz (the same
+time at other rates), by more than the threshold per sample: single-sample
+clicks and glitches, and clicks that peak over two or three samples. A
+longer microphone bump, a plosive, or a click spread wider by a filter or
+a codec is programme to it. A click that lands
 on a loud passage, where the samples just before it are already over
 the threshold, is left to the clipper and the limiter.
 

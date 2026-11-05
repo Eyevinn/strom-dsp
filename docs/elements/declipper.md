@@ -52,6 +52,14 @@ one.
   samples), single samples and pairs at that level, with sharp corners, count
   as clipped as well. The level is forgotten 5 s after it was last
   confirmed, and single samples never confirm it.
+- **Single-sample repair.** A peak that only just reaches a confirmed clip
+  level is clipped on one sample and has no plateau of its own. When that
+  sample sits at the confirmed level (per direction, top and bottom) and
+  both of its neighbours lie clearly inside it, it is rebuilt like any
+  other run, as a run of one sample, and counted in `runs-repaired`. It is
+  found one sample later than a longer run, which the latency already
+  covers. Audio that has never shown a clip level gets no single-sample
+  repair.
 - Unclipped audio is never touched: across the test signals (full-scale
   tones at every peak phase, band-limited squares, soft-saturated tones,
   speech-, music- and noise-like material, as float, 16-bit and 24-bit) and
@@ -123,6 +131,7 @@ Every `meter-interval` ms of stream time an element message named
 | `runs-too-long` | `guint64` | | runs too long to repair, passed through |
 | `fallbacks` | `guint64` | | runs rebuilt by the cheap fallback because the work budget was spent (included in `runs-repaired`) |
 | `runs-rejected` | `guint64` | | runs whose rebuild was not plausible, left at their clipped samples (not in `runs-repaired`) |
+| `runs-failed` | `guint64` | | runs left at their clipped samples because the rebuild could not be computed (non-finite input, a numerical breakdown) or the run queue was full (not in `runs-repaired`) |
 | `largest-overshoot` | `gdouble` | dB | largest rebuilt peak over its clip level (0 when nothing was rebuilt) |
 
 ## Why these defaults

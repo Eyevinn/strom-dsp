@@ -223,6 +223,8 @@ struct PeakControl {
     held_db: f64,
     hold_left: usize,
     hold_frames: usize,
+    /// Smoothed reduction (dB) of each frame of the last block applied.
+    block_db: [f32; BLOCK_FRAMES],
 }
 
 impl PeakControl {
@@ -241,7 +243,17 @@ impl PeakControl {
             held_db: 0.0,
             hold_left: 0,
             hold_frames: 0,
+            block_db: [0.0; BLOCK_FRAMES],
         }
+    }
+
+    /// Back to the state after construction: no reduction, no held static
+    /// reduction, full drive. Keeps the parameters and coefficients.
+    fn clear(&mut self) {
+        self.reduction_db = 0.0;
+        self.held_db = 0.0;
+        self.hold_left = 0;
+        self.drive = 1.0;
     }
 
     fn set(&mut self, p: &PeakControlParams, fs: f64) {
@@ -280,7 +292,12 @@ impl PeakControl {
     fn apply(&mut self, ceiling: f32, peaks: &[f32], drive: Option<&[f32]>, req: &mut [f64]) {
         let c = ceiling as f64;
         let start = c * 10f64.powf(self.curve.knee_start_db() / 20.0);
-        for (i, (r, &p)) in req.iter_mut().zip(peaks).enumerate() {
+        for (i, ((r, &p), out)) in req
+            .iter_mut()
+            .zip(peaks)
+            .zip(self.block_db.iter_mut())
+            .enumerate()
+        {
             if let Some(d) = drive {
                 let d = d[i];
                 self.drive = if d.is_finite() {
@@ -320,6 +337,7 @@ impl PeakControl {
                 y + self.rel * (target - y)
             };
             self.reduction_db = if y < 1e-9 { 0.0 } else { y };
+            *out = self.reduction_db as f32;
             if self.reduction_db > 0.0 {
                 *r = r.min(10f64.powf(-self.reduction_db / 20.0));
             }
@@ -436,6 +454,10 @@ pub struct Limiter {
     // Per-input-frame history: required gain and ceiling, indexed by frame time.
     req_hist: Vec<f64>,
     ceil_hist: Vec<f32>,
+    /// Peak control's smoothed reduction (dB) per input frame, so it can be
+    /// read for the frame being output (see
+    /// [`Limiter::peak_control_reduction_db`]).
+    pc_hist: Vec<f32>,
     hist_mask: usize,
 
     // Gain pipeline.
@@ -495,6 +517,7 @@ impl Limiter {
             delay: DelayLine::default(),
             req_hist: Vec::new(),
             ceil_hist: Vec::new(),
+            pc_hist: Vec::new(),
             hist_mask: 0,
             window_min: SegmentedMin::default(),
             win_push_delay: 0,
@@ -588,10 +611,19 @@ impl Limiter {
         self.peak_control.set(params, self.sample_rate);
     }
 
-    /// Crate-internal core hook: the peak control's current reduction (dB,
-    /// ≥ 0).
+    /// Crate-internal core hook: the peak control's reduction (dB, ≥ 0) in
+    /// force for the most recently output frame, i.e. computed for the peak
+    /// frame `L` frames before it (the gain pipeline works in peak-stream
+    /// time; the detector delay is on the audio side). It is the same point
+    /// in time as [`Limiter::current_gain`], and never exceeds that gain's
+    /// reduction: the peak control only lowers the required gain the
+    /// pipeline stays under.
     pub(crate) fn peak_control_reduction_db(&self) -> f64 {
-        self.peak_control.reduction_db
+        if self.pc_hist.is_empty() {
+            return 0.0;
+        }
+        let t = self.now - 1 - self.lookahead as u64;
+        self.pc_hist[t as usize & self.hist_mask] as f64
     }
 
     /// Crate-internal core hook: share (0 … 1) of the peak control's slope in
@@ -902,6 +934,7 @@ impl Processor for Limiter {
         let hist = (2 * self.max_frames + self.max_hold_frames + 2).next_power_of_two();
         self.req_hist = vec![1.0; hist];
         self.ceil_hist = vec![f32::INFINITY; hist];
+        self.pc_hist = vec![0.0; hist];
         self.hist_mask = hist - 1;
         self.window_min.allocate(hist);
         self.ramp.allocate(self.max_frames);
@@ -919,13 +952,14 @@ impl Processor for Limiter {
         self.delay.clear();
         self.req_hist.fill(1.0);
         self.ceil_hist.fill(f32::INFINITY);
+        self.pc_hist.fill(0.0);
         self.gain = 1.0;
         self.now = TIME_ORIGIN;
         self.lookahead = self.target_lookahead;
         self.xfade = None;
         self.safety_clips = 0;
         self.fresh = true;
-        self.peak_control.reduction_db = 0.0;
+        self.peak_control.clear();
         self.rebuild();
     }
 
@@ -1002,11 +1036,20 @@ impl Limiter {
                 None => frame_peaks_simd(simd, block, ch, &mut peaks[..nf]),
             }
             required_gains(simd, self.ceiling, enabled, &peaks[..nf], &mut req[..nf]);
+            let t0 = self.now as usize;
+            let hmask = self.hist_mask;
             if self.peak_control.is_on() && enabled {
                 let at = b * BLOCK_FRAMES;
                 let drive = drive.map(|d| &d[at..at + nf]);
                 self.peak_control
                     .apply(self.ceiling, &peaks[..nf], drive, &mut req[..nf]);
+                for (i, &y) in self.peak_control.block_db[..nf].iter().enumerate() {
+                    self.pc_hist[(t0 + i) & hmask] = y;
+                }
+            } else {
+                for i in 0..nf {
+                    self.pc_hist[(t0 + i) & hmask] = 0.0;
+                }
             }
             let mut i = 0;
             // A cross-fade only starts at the top of `process` or right after
