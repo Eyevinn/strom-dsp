@@ -724,6 +724,29 @@ Own design choices:
   high-frequency word onset was dipped). With it the low mode needs no lookahead: corpus speech measures
   the same with the guard as without it, and the test clicks are caught
   as before.
+- **Multi-sample clicks** (own extension of the rise gate): a click that
+  peaks over two or three samples (e.g. `0.05, 0.6, 1.0, 0.4, 0.05`)
+  failed (2), its second sample already over the cap. Condition (1)/(2)
+  became: the rise from the programme level (a sample and the one before
+  it at or under the cap) to the peak takes at most 3 samples at 48 kHz
+  (scaled with the rate: 6 at 96 kHz, 12 at 192 kHz, so a click is the
+  same length in time), and exceeds the cap once per 48 kHz sample it
+  takes, rising in one stroke (the samples between on the peak's side,
+  each at least as large as the one before: a 0.2 ms swell on a 15 kHz
+  tone, which alternates in sign on its way up, was otherwise taken for a
+  click in the harness). With one sample it is the rule above. Measured on the corpus
+  crackle check: a rise within three samples that only had to exceed the
+  cap once took speech onsets (worst-frame NMR up to +19 dB in the low
+  mode; +0.1 dB in the standard one); with two samples it passed with less
+  margin (−4.1 against −8.3 dB for `ebu-r128`); with the per-sample
+  steepness every configuration measures as it did before.
+- **Isolation window above 48 kHz** (own choice): the buffer reaches only
+  0.25 ms there, so the window of (3) cannot lie after the longest core.
+  It used to be the last 7 buffered frames, a fixed place that could fall
+  on the click's own peak or fall. It now starts after the click's own
+  fall (its last sample over the core level within the rise allowance
+  after the peak) and runs to the newest buffered frame; with fewer than
+  7 frames left the excursion is refused.
 - **Envelope hygiene:** frames up to 0.33 ms ahead of an event (the
   interpolator's ringing before a large click) and the ramp after a spike
   stay out of the envelope; an abandoned event's peak goes into it at once.

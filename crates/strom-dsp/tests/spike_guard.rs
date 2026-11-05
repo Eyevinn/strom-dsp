@@ -288,6 +288,88 @@ fn clicks_are_caught_and_confined() {
     }
 }
 
+/// Clicks that peak over two or three samples at 48 kHz are clicks too:
+/// caught (one event each) and capped near the clip level, at 48 and
+/// 96 kHz with the same shapes in samples, and stretched to the same
+/// length in time at 96 and 192 kHz (where the isolation window starts
+/// after the click's own fall). A rise over five samples at 48 kHz is not
+/// a click and is left alone.
+#[test]
+fn short_multi_sample_clicks_are_caught() {
+    let amp = 0.1;
+    let p = SpikeGuardParams::default();
+    let level = amp * 10f64.powf(p.threshold_db as f64 / 20.0);
+    // Shapes at 48 kHz (relative to the click's peak).
+    let shapes: [(&str, &[f64]); 3] = [
+        ("2 samples", &[0.8, 1.0]),
+        ("3 samples", &[0.6, 1.0, 0.4]),
+        ("3-sample rise", &[0.35, 0.7, 1.0, 0.3]),
+    ];
+    // `shape` at `stretch` samples per 48 kHz sample (linear between).
+    let stretched = |shape: &[f64], stretch: usize| -> Vec<f64> {
+        let n = shape.len();
+        (0..n * stretch)
+            .map(|i| {
+                let t = i as f64 / stretch as f64;
+                let (k, f) = (t.floor() as usize, t.fract());
+                let next = if k + 1 < n { shape[k + 1] } else { 0.0 };
+                shape[k] * (1.0 - f) + next * f
+            })
+            .collect()
+    };
+    for (fs, stretch) in [
+        (48_000.0f32, 1usize),
+        (96_000.0, 1),
+        (96_000.0, 2),
+        (192_000.0, 4),
+    ] {
+        for (name, shape) in shapes {
+            let shape = stretched(shape, stretch);
+            let frames = (0.5 * fs) as usize;
+            let mut x: Vec<f32> = (0..frames)
+                .map(|n| (amp * (2.0 * PI * 440.0 * n as f64 / fs as f64).sin()) as f32)
+                .collect();
+            let clicks: Vec<usize> = (2_400..frames - 2_400).step_by(2_400).collect();
+            for (i, &n) in clicks.iter().enumerate() {
+                let a = if i % 2 == 0 { 1.0 } else { -0.9 };
+                for (k, v) in shape.iter().enumerate() {
+                    x[n + k] += (a * v) as f32;
+                }
+            }
+            let mut g = guard(fs, 1, &p);
+            let lat = g.latency_frames();
+            let y = run(&mut g, &x, 1, 480);
+            let what = format!("{name} at {fs} Hz, stretch {stretch}");
+            assert_eq!(g.take_events() as usize, clicks.len(), "{what}: events");
+            let w = (0.002 * fs) as usize;
+            for &n in &clicks {
+                let peak = y[n + lat - w..n + lat + w]
+                    .iter()
+                    .fold(0.0f32, |m, v| m.max(v.abs())) as f64;
+                assert!(
+                    peak <= level * 1.1,
+                    "{what}: click at {n}: output peak {peak:.3}, clip level {level:.3}"
+                );
+            }
+        }
+    }
+    // A rise over five samples at 48 kHz: not a click.
+    let frames = 24_000;
+    let mut x: Vec<f32> = (0..frames)
+        .map(|n| (amp * (2.0 * PI * 440.0 * n as f64 / 48_000.0).sin()) as f32)
+        .collect();
+    for (k, v) in [0.2, 0.4, 0.6, 0.8, 1.0, 0.5].iter().enumerate() {
+        x[12_000 + k] += 0.9 * v;
+    }
+    let mut g = guard(FS, 1, &p);
+    run(&mut g, &x, 1, 480);
+    assert_eq!(
+        g.take_events(),
+        0,
+        "a five-sample rise was taken for a click"
+    );
+}
+
 /// Crest factor (sample peak / RMS, dB) of `x`.
 fn crest_db(x: &[f32]) -> f64 {
     let peak = x.iter().fold(0.0f64, |m, &v| m.max(v.abs() as f64));
