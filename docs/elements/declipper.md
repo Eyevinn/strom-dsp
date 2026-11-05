@@ -131,6 +131,7 @@ Every `meter-interval` ms of stream time an element message named
 | `runs-too-long` | `guint64` | | runs too long to repair, passed through |
 | `fallbacks` | `guint64` | | runs rebuilt by the cheap fallback because the work budget was spent (included in `runs-repaired`) |
 | `runs-rejected` | `guint64` | | runs whose rebuild was not plausible, left at their clipped samples (not in `runs-repaired`) |
+| `runs-failed` | `guint64` | | runs left at their clipped samples because the rebuild could not be computed (non-finite input, a numerical breakdown) or the run queue was full (not in `runs-repaired`) |
 | `largest-overshoot` | `gdouble` | dB | largest rebuilt peak over its clip level (0 when nothing was rebuilt) |
 
 ## Why these defaults
