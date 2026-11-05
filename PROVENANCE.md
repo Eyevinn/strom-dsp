@@ -474,6 +474,13 @@ clippings are scaled by a depth before they are subtracted.
   clippings).
 - Both decide on a fixed grid of input frames and ramp linearly (64 frames;
   the guard 15 ms), so the output does not depend on the buffer size.
+- Neither estimator is fed while its flag is off (no cost when unused);
+  switched on again it starts from a clean state rather than from a
+  reading of programme that has gone (own choice).
+- The decimator early-out is held off by any non-zero clipping, whatever
+  the depth; the depth-weighted count (frames at depth ≥ ½) is the
+  meter's only (own choice: the decimator's state does not depend on the
+  depth).
 
 **Measured** (`tests/clipper.rs`): spurs of the clipped 15 kHz tone −94.0
 dBFS (standard), −75.8 dBFS (low); worst sample peak over the threshold on

@@ -269,10 +269,12 @@ pub struct FinalClipperParams {
     pub passes: usize,
     /// Content-adaptive depth: scale the clippings down on predictable
     /// material (see the module docs). Off: every clipping is subtracted
-    /// in full.
+    /// in full, and the estimator is not fed; switched on again it starts
+    /// from a clean state.
     pub adaptive_depth: bool,
     /// Bandwidth guard: subtract no clippings while the programme is
-    /// band-limited (see the module docs).
+    /// band-limited (see the module docs). Off, the guard is not fed;
+    /// switched on again it starts from a clean state (full band).
     pub bandwidth_guard: bool,
 }
 
@@ -843,6 +845,16 @@ impl FinalClipper {
         let old = self.params;
         self.params = p;
         let fs = self.sample_rate;
+        // The estimators are not fed while their flag is off: switched on
+        // again, they start from a clean state instead of a reading of
+        // programme that has long gone.
+        if p.adaptive_depth && !old.adaptive_depth {
+            self.predict.reset();
+            self.block_energy = 0.0;
+        }
+        if p.bandwidth_guard && !old.bandwidth_guard {
+            self.guard.reset();
+        }
         if self.fresh {
             self.cur_threshold_db = p.threshold_db;
             self.cur_knee_db = p.knee_db;

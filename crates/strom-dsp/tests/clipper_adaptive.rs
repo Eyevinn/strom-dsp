@@ -237,6 +237,61 @@ fn bandwidth_guard_follows_the_programme_without_flapping() {
 }
 
 // ---------------------------------------------------------------------------
+/// Switched off, the predictability estimator and the bandwidth guard are
+/// not fed; switched on again they start clean. A reading kept from the
+/// programme before the switch (a vowel, a band-limited source) would
+/// lower the depth on full-band noise that follows it.
+#[test]
+fn estimators_start_clean_when_switched_on_again() {
+    let mut v = vowel((0.3 * FS) as usize);
+    let mut band = white((1.0 * FS) as usize, 1.0, 61);
+    lowpass(&mut band, FS, 3_400.0, 8);
+    let mut noise = white((0.3 * FS) as usize, 1.0, 62);
+    drive(&mut v, 3.0);
+    drive(&mut band, 3.0);
+    drive(&mut noise, 3.0);
+    let params = |on: bool| FinalClipperParams {
+        threshold_db: THRESHOLD_DB,
+        adaptive_depth: on,
+        bandwidth_guard: on,
+        ..FinalClipperParams::default()
+    };
+    let mut c = clipper(true, true);
+    run(&mut c, &band);
+    assert!(c.guard_edge_hz().is_some(), "guard found no edge");
+    // The vowel last: the estimator's window holds it.
+    let mut y = v.clone();
+    for b in y.chunks_mut(480) {
+        c.process(b);
+    }
+    assert!(
+        c.predictability() > 0.9,
+        "vowel read as {}",
+        c.predictability()
+    );
+    c.set_params(&params(false));
+    run(&mut c, &noise);
+    c.set_params(&params(true));
+    assert_eq!(
+        c.guard_edge_hz(),
+        None,
+        "stale band edge after switching on"
+    );
+    let (mut max_pred, mut min_depth) = (0.0f64, 1.0f32);
+    let mut y = noise.clone();
+    for b in y.chunks_mut(64) {
+        c.process(b);
+        max_pred = max_pred.max(c.predictability());
+        min_depth = min_depth.min(c.depth());
+    }
+    println!("after switching on: predictability ≤ {max_pred:.2}, depth ≥ {min_depth:.2}");
+    assert!(
+        max_pred < 0.5,
+        "stale predictability {max_pred:.2} on noise"
+    );
+    assert!(min_depth > 0.5, "depth fell to {min_depth:.2} on noise");
+}
+
 // Limiter peak control.
 
 const CEILING_DB: f32 = -1.0;
