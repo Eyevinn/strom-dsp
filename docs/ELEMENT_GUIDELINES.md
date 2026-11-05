@@ -61,6 +61,6 @@ Keep the default test suite fast: `cargo test` should finish in about a minute o
 - Property tests use a small number of cases by default and more in the extended workflow.
 
 ## Provenance
-- strom-dsp is a clean-room implementation. Every algorithm is written from textbooks, papers and standards, and `PROVENANCE.md` names the reference for each one.
+- strom-dsp is an independent implementation from public knowledge. It is not a traditional clean room (no separate specification team); what it holds to is the source rules in `PROVENANCE.md`. Every algorithm is written from textbooks, papers and standards, and `PROVENANCE.md` names the reference for each one.
 - Never read, copy or port code from other DSP projects or products. Never tune an element to match the output of a specific product.
 - A crate is reused only for what is hard to get right (FFT, standards-compliant measurement, resampling), and only under a licence on the `deny.toml` allowlist.

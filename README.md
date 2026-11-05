@@ -1,7 +1,8 @@
 # strom-dsp
 
-A small, clean-room audio DSP library in Rust, and a GStreamer plugin on top of
-it, built for the [Strom](https://github.com/Eyevinn/strom) live media engine.
+A small audio DSP library in Rust, written from public knowledge (textbooks,
+papers, standards), and a GStreamer plugin on top of it, built for the
+[Strom](https://github.com/Eyevinn/strom) live media engine.
 
 - **`strom-dsp`** (`crates/strom-dsp`): the DSP library. It has no GStreamer
   dependency and is real-time safe: after `configure` it does no allocation,
@@ -14,7 +15,7 @@ it, built for the [Strom](https://github.com/Eyevinn/strom) live media engine.
   (`gststromdsp::plugin_register_static()`).
 
 Licence: MIT OR Apache-2.0. See [PROVENANCE.md](PROVENANCE.md) for the
-clean-room record: which reference each algorithm follows, and every
+provenance record: which reference each algorithm follows, and every
 dependency with its licence.
 
 ## Elements
@@ -117,6 +118,6 @@ Every element, present and future, follows the
 [element guidelines](docs/ELEMENT_GUIDELINES.md): `enabled` bypass that fades
 and ends bit-exact, click-free live changes of every PLAYING-mutable property,
 real-time safety, reported and constant latency, sensible standalone defaults,
-a test per rule, and clean-room provenance. strom-dsp is a clean-room project:
-keep [PROVENANCE.md](PROVENANCE.md) current with the reference for every
-algorithm and every reused crate.
+a test per rule, and provenance. strom-dsp is built from public knowledge only
+(not a traditional clean room): keep [PROVENANCE.md](PROVENANCE.md) current
+with the reference for every algorithm and every reused crate.
