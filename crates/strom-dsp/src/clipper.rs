@@ -545,8 +545,9 @@ impl Curve {
 /// clippings; `prev` holds each channel's previous input. The curve moves
 /// linearly (in amplitude) from `from` to `to` over the block, so a
 /// threshold glide has no steps. Returns how many samples have a non-zero
-/// clipping, counting only frames whose `depth` (one per `per` frames of
-/// `buf`) is at least ½.
+/// clipping: all of them (what the decimator's state depends on), and
+/// only those in frames whose `depth` (one per `per` frames of `buf`) is
+/// at least ½ (for the meter).
 fn clip_frames(
     from: &Curve,
     to: &Curve,
@@ -554,11 +555,11 @@ fn clip_frames(
     prev: &mut [f32],
     depth: &[f32],
     per: usize,
-) -> u64 {
+) -> (u64, u64) {
     let ch = prev.len();
     let frames = buf.len() / ch;
     let steady = from.k == to.k && from.w == to.w;
-    let mut touched = 0u64;
+    let (mut nonzero, mut touched) = (0u64, 0u64);
     for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
         let curve = if steady {
             *to
@@ -579,11 +580,12 @@ fn clip_frames(
                 curve.adaa(u, *p)
             };
             *p = u;
+            nonzero += (c != 0.0) as u64;
             touched += (counts && c != 0.0) as u64;
             *v = c;
         }
     }
-    touched
+    (nonzero, touched)
 }
 
 /// A value that moves linearly to a new target over a given number of
@@ -959,7 +961,9 @@ impl FinalClipper {
         let quiet = self.early_out && peak * bound < knee;
 
         let clip = &mut self.clip[..n * ch];
-        let mut touched = 0u64;
+        // `nonzero` drives the early-out (any clipping leaves state in the
+        // decimator, whatever the depth); `touched` is the meter's count.
+        let (mut nonzero, mut touched) = (0u64, 0u64);
         if quiet && pass.since_clip >= down_span {
             // No sample can reach the curve, and the decimator holds only
             // zeros: the clippings are exactly 0.
@@ -981,13 +985,15 @@ impl FinalClipper {
             }
             let up = &mut self.up[..n * ratio * ch];
             pass.os.upsample(x, up);
-            touched = clip_frames(&from, &to, up, &mut pass.prev, &self.depth_buf[..n], ratio);
+            (nonzero, touched) =
+                clip_frames(&from, &to, up, &mut pass.prev, &self.depth_buf[..n], ratio);
             pass.os.downsample(up, clip);
         } else {
             clip.copy_from_slice(x);
-            touched = clip_frames(&from, &to, clip, &mut pass.prev, &self.depth_buf[..n], 1);
+            (nonzero, touched) =
+                clip_frames(&from, &to, clip, &mut pass.prev, &self.depth_buf[..n], 1);
         }
-        if touched > 0 {
+        if nonzero > 0 {
             pass.since_clip = 0;
         } else {
             pass.since_clip = pass.since_clip.saturating_add(n);
@@ -1463,6 +1469,59 @@ mod tests {
         assert_eq!(c.adaa(0.5, 0.4), 0.0);
         assert_eq!(c.adaa(f32::NAN, 0.4), 0.0);
         assert_eq!(c.adaa(f32::INFINITY, 0.4), 0.0);
+    }
+
+    /// Clippings at a depth under ½ still hold the early-out off until the
+    /// decimator has drained them: the output is the same with and without
+    /// the early-out, so no stale clipping emerges after a quiet stretch.
+    #[test]
+    fn shallow_clippings_keep_the_decimator_live() {
+        let fs = 48_000.0f32;
+        let make = |early: bool| {
+            let mut c = FinalClipper::new();
+            c.set_params(&FinalClipperParams {
+                threshold_db: -6.0,
+                adaptive_depth: true,
+                bandwidth_guard: false,
+                ..FinalClipperParams::default()
+            });
+            c.configure(fs, 1);
+            c.set_early_out(early);
+            // Held predictability 0.7: depth 0.3 (decays slowly; nothing
+            // in the signal below raises it toward ½ within the test).
+            c.predictable = 0.7;
+            c.adapt_ramp = Ramp::new(0.3);
+            c
+        };
+        // A burst over the threshold that ends right at a buffer boundary,
+        // silence, then a burst again.
+        let mut x = vec![0.0f32; 4_800];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for (n, v) in x.iter_mut().enumerate() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let noise = (seed >> 40) as f32 / (1u64 << 23) as f32 - 1.0;
+            if n < 1_024 || (3_000..3_512).contains(&n) {
+                *v = 0.9 * noise;
+            }
+        }
+        let mut outs = Vec::new();
+        for early in [false, true] {
+            let mut c = make(early);
+            let mut y = x.clone();
+            for b in y.chunks_mut(4) {
+                c.process(b);
+                assert!(c.depth() < 0.5, "depth {}", c.depth());
+            }
+            outs.push(y);
+        }
+        let diff = outs[0]
+            .iter()
+            .zip(&outs[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(diff == 0.0, "early-out changes the output by {diff}");
     }
 
     #[test]
