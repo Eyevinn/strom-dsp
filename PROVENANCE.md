@@ -327,7 +327,13 @@ basics from J. O. Smith III. No code listing was used.
   hold above, after Giannoulis et al. on fast time constants). The required
   gain becomes `min(r[j], g_pc[j])`, so the proof above is unchanged (own
   derivation; a two-stage limiter is textbook, the min form keeps the
-  stages from adding up). Guard tests: `tests/clipper_adaptive.rs`.
+  stages from adding up). Its smoothed reduction is kept per input frame
+  and reported for the frame being output (`L` frames back in peak-stream
+  time), the same point in time as the total gain, so the fast share
+  (total minus peak control) is never hidden at an onset; by the min form
+  it is never negative. `reset` clears the reduction, the held static
+  reduction and its hold, and the drive (own choices). Guard tests:
+  `tests/clipper_adaptive.rs`.
 
 ### Loudness detector (`src/meter/kweighting.rs`)
 

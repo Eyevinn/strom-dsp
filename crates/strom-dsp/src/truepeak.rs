@@ -358,8 +358,10 @@ impl TruePeakLimiter {
         self.core.set_peak_control_drive(drive);
     }
 
-    /// The peak control's current reduction (positive dB), part of
-    /// [`TruePeakLimiter::gain_reduction_db`].
+    /// The peak control's reduction (positive dB) in force for the most
+    /// recently output frame: the same point in time as
+    /// [`TruePeakLimiter::gain_reduction_db`], and never more than it. Their
+    /// difference is the fast limiter's share.
     pub fn peak_control_reduction_db(&self) -> f64 {
         self.core.peak_control_reduction_db()
     }
