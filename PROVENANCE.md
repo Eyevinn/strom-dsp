@@ -496,10 +496,33 @@ processing path uses a masking model.
 - Pre-emphasis `1 − 0.9 z⁻¹`, order 10 at an 8 kHz analysis rate, white-noise
   correction of r₀: the textbook narrowband speech LPC setup (Rabiner &
   Schafer, *Digital Processing of Speech Signals*, ch. 8).
-- Own choices: analysis below 3.5 kHz (4th-order Butterworth, decimated),
-  so the reading does not depend on the programme's upper band edge; a
-  reflection coefficient at or over 1 (the recursive window is not always
-  positive definite) reads as fully predictable (a sum of tones).
+- Own choices: analysis below 3.5 kHz, so the reading does not depend on
+  the programme's upper band edge; a reflection coefficient at or over 1
+  (the recursive window is not always positive definite) reads as fully
+  predictable (a sum of tones).
+- Same analysis at every input rate (own design): an 8th-order Butterworth
+  low-pass at 3.5 kHz (RBJ cookbook sections with the Butterworth Qs
+  `1/(2·cos((2k−1)π/16))`; Oppenheim & Schafer for the pole placement) as
+  the anti-alias filter, then the analysis samples taken at exactly 8 kHz,
+  at the fractional positions `k·fs/8000`, by 4-point cubic interpolation
+  (Catmull–Rom spline: E. Catmull and R. Rom, "A class of local
+  interpolating splines", 1974). At whole multiples of 8 kHz this is plain
+  decimation. Measured against 48 kHz on a vowel, white, band-pass and
+  band-limited noise: within 0.2 dB at 44.1 … 192 kHz and 0.5 dB at 16
+  and 22.05 kHz (guard test in the module). The earlier rounded integer
+  decimation analysed 44.1 kHz at 7.35 kHz and let 4th-order aliasing
+  through (a vowel read 10 dB at 22.05 kHz against 23 dB at 48 kHz).
+- Programme above the analysed band (own choice): with less than −30 dB
+  of the programme's power below 3.5 kHz (windowed mean squares of the
+  mono sum before and after the anti-alias filter) the reading is the
+  largest gain, predictable. The rounded decimation folded a high tone
+  into the band, where it read as a tone; with a proper anti-alias filter
+  nothing is left, and the harness CCIF twin-tone (19 + 20 kHz) was then
+  clipped in `streaming`, with a −74 dB difference tone and a worst-frame
+  NMR of −29 dB (−66 dB before). Leaving it to the limiter restores that.
+- Warm-up (own choice): until the window has seen one time constant of
+  analysis samples (at least `4·P`) after a reset, the gain reads 0 dB;
+  an order-10 estimate from a few samples read white noise as up to 7 dB.
 
 ### Bandwidth guard (`src/bandwidth_guard.rs`)
 
