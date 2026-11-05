@@ -1,6 +1,6 @@
 [package]
 name = "strom-dsp"
-description = "Clean-room real-time audio DSP: gate, compressor, EQ and filters, limiters (lookahead and true-peak), de-esser, ducker, delay, stereo tools, input cleanup, loudness metering, AGC, multiband compressor and a broadcast processor chain"
+description = "Real-time audio DSP written from published references: gate, compressor, EQ and filters, limiters (lookahead and true-peak), de-esser, ducker, delay, stereo tools, input cleanup, loudness metering, AGC, multiband compressor and a broadcast processor chain"
 publish = false
 version.workspace = true
 edition.workspace = true

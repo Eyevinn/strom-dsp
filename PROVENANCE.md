@@ -1,11 +1,19 @@
 # Provenance
 
-`strom-dsp` and `gst-plugin-stromdsp` are a **clean-room implementation**. Every
-line of code in this repository was written new, from public descriptions of
-algorithms (textbooks, papers, public-domain notes) and from the documentation
-of permissively licensed dependencies.
+`strom-dsp` and `gst-plugin-stromdsp` are an **independent implementation from
+public knowledge**. Every line of code in this repository was written new, from
+published descriptions of algorithms (textbooks, papers, standards,
+public-domain notes) and from the documentation of permissively licensed
+dependencies.
 
-## Clean-room rules followed
+This is not a clean room in the traditional sense: there is no separate team
+that studies the replaced plugin and hands a specification to a team that has
+never seen it, and the prior exposure of contributors, and of the tools they
+use, to other code cannot be ruled out. What the project does hold to is the
+rules below: what is read while working on it, where each algorithm comes
+from, and that this file names the reference for every one.
+
+## Source rules followed
 
 - **Not accessed, in any form:** LSP Plugins (and any fork, mirror or quotation
   of it), lsp-plugins-rs (source, checkouts or built plugin), the Strom
@@ -392,7 +400,7 @@ the lookahead.
   clicks exceeded the ceiling by up to 0.78 dB.
 - κ = 0.45 gives about 30 % headroom over the largest value an adversarial
   search needed. Measuring against an implementation of a standard is allowed
-  by the clean-room rules above.
+  by the source rules above.
 - Cost: extra limiting on HF-heavy material. About 1 dB at 15 kHz; full-band
   white noise ends about 1.9 dB under the ceiling.
 - The term is a conservative detector margin. It is not a clipping or
@@ -1358,7 +1366,7 @@ deliberately not set (see "Engineering policies").
   Rust SIMD and denormal handling, a research assistant (which wrote no
   project code) viewed `src/denormal.rs` of the crate `truce-core`. That crate
   turned out to carry a proprietary licence (`LicenseRef-TruceLicense-1.0`),
-  i.e. an "unclear licence" in the sense of the clean-room rules. The file only
+  i.e. an "unclear licence" in the sense of the source rules. The file only
   sets the CPU flush-to-zero flag. Remediation: nothing from it is used. FTZ
   handling, if added, comes from the MIT-licensed `no_denormals` crate or is
   written from the Intel SDM (MXCSR) and Arm ARM (FPCR.FZ) by a contributor

@@ -1,4 +1,5 @@
-//! `strom-dsp`: a small clean-room audio DSP library.
+//! `strom-dsp`: a small audio DSP library, written from public knowledge
+//! (textbooks, papers, standards; see `PROVENANCE.md`).
 //!
 //! The channel-strip processors, re-exported at the crate root, all work in
 //! place on interleaved `f32` frames:
