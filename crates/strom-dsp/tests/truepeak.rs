@@ -297,7 +297,7 @@ fn signal(kind: &Kind, frames: usize, ch: usize, fs: f64, seed: u64) -> Vec<f32>
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: if cfg!(debug_assertions) { 24 } else { 160 },
+        cases: crate::proptest_cases(if cfg!(debug_assertions) { 24 } else { 160 }),
         .. ProptestConfig::default()
     })]
 

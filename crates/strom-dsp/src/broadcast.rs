@@ -396,7 +396,8 @@ pub const MAX_CROSSOVERS: usize = MAX_BANDS - 1;
 /// through, 1 ms 12.0 dB, none 12.0 dB, and steady bass stays clean (2nd
 /// and 3rd harmonic under −125 dBc) at every setting. What gets through
 /// goes on to the final clipper (which leaves bass alone) and the limiter
-/// (see `tests/broadcast_latency.rs` for what that costs there).
+/// (see `strom-dsp-harness/tests/long_runs/latency_modes.rs` for what that
+/// costs there).
 pub const STANDARD_BASS_LOOKAHEAD_MS: f32 = 1.0;
 /// Bass clipper lookahead (ms) of the low-latency configuration.
 pub const LOW_LATENCY_BASS_LOOKAHEAD_MS: f32 = 0.0;

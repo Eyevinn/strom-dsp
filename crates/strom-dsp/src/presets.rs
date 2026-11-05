@@ -198,7 +198,7 @@ impl LimiterParams {
 ///   the first 10 s of a programme at −35 … −10 LUFS input. All four pass
 ///   the chain acceptance test (60 s programme at −35, −23
 ///   and −10 LUFS input, integrated within ±1 LU of the target after 10 s;
-///   `tests/broadcast.rs`).
+///   `strom-dsp-harness/tests/long_runs/broadcast.rs`).
 /// - **AGC gate** −50 LUFS for programme: room tone and pauses sit below it,
 ///   while even quiet programme material delivered 12 LU under target
 ///   (−35 LUFS) stays well above it. **Speech: −40 LUFS** (the "faster AGC

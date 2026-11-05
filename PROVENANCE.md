@@ -621,8 +621,8 @@ Own choices:
   same textbook sources as the gate's defaults; the floor is kept small so
   a misjudged threshold can do little on quiet music.
 
-The values were checked with the chain acceptance test in
-`tests/broadcast.rs` (60 s programme at −35, −23 and −10 LUFS input:
+The values were checked with the chain acceptance runs in the harness
+(`strom-dsp-harness/tests/long_runs/broadcast.rs`; 60 s programme at −35, −23 and −10 LUFS input:
 integrated loudness within ±1 LU of target after the first 10 s, true peak
 ≤ ceiling + 0.1 dB, measured with `ebur128`), and with a hot, peaky,
 sport-like programme (hits, clicks, inter-sample peaks) under the same
@@ -1252,8 +1252,8 @@ signals through the broadcast chain per preset and compares a fixed set of
 numbers with a checked-in baseline (`baseline.json`). All signals are
 generated in code with fixed seeds. The programme generators of the chain
 tests (`tests/broadcast.rs`, `tests/governor.rs`,
-`tests/broadcast_latency.rs`) live in one place, `tests/programme_support/`,
-and are shared with the harness.
+`tests/broadcast_latency.rs`, and the harness long runs) live in one place,
+`tests/programme_support/`, and are shared with the harness.
 
 - **Signals:** sine; exponential sweep (A. Farina, "Simultaneous
   measurement of impulse response and distortion with a swept-sine

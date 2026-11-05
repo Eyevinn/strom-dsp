@@ -1,8 +1,9 @@
 name: Extended checks
 
 # Slower, specialised checks: minimum Rust versions, RealtimeSanitizer,
-# instruction counts, and the crackle and declipper checks on the test
-# corpus. Weekly and on demand (Actions tab → Run workflow).
+# instruction counts, the crackle and declipper checks on the test corpus,
+# and the long programme runs of the broadcast chain. Weekly and on demand
+# (Actions tab → Run workflow).
 
 on:
   schedule:
@@ -23,9 +24,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      # The action installs one toolchain per use.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89, 1.92"
+          toolchain: "1.92"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
       - run: cargo +1.89 check -p strom-dsp --all-targets
       # Cargo.lock pins kstring 2.0.2: 2.0.3+ (pulled in by gstreamer) needs a
@@ -110,3 +115,20 @@ jobs:
       # input, no runaway peaks, speech ΔSDRc kept
       # (crates/strom-dsp-harness/src/declip.rs).
       - run: cargo test --release -p strom-dsp-harness --test declipper_corpus -- --ignored --nocapture
+
+  long-runs:
+    name: Long runs (programme, property tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Minutes of programme through the broadcast chain over presets, input
+      # levels and latency modes, with hard bounds (loudness, true peak,
+      # governor). The baseline in the default suite guards the same
+      # readings per change (crates/strom-dsp-harness/tests/long_runs/).
+      - run: cargo test --release -p strom-dsp-harness --test long_runs -- --ignored --nocapture
+      # The property tests with many more cases than the default suite's.
+      - run: cargo test --release -p strom-dsp --test suite -- never_amplifies_beyond_makeup prop_ceiling_guarantee prop_true_peak_guarantee
+        env:
+          PROPTEST_CASES: "5000"

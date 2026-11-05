@@ -248,7 +248,7 @@ fn param_strategy() -> impl Strategy<Value = LimiterParams> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(200))]
+    #![proptest_config(ProptestConfig::with_cases(crate::proptest_cases(200)))]
 
     /// For arbitrary signals up to +20 dBFS and arbitrary parameter changes
     /// between blocks (threshold, attack, release, lookahead, enable), every
