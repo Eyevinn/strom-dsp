@@ -52,6 +52,14 @@ one.
   samples), single samples and pairs at that level, with sharp corners, count
   as clipped as well. The level is forgotten 5 s after it was last
   confirmed, and single samples never confirm it.
+- **Single-sample repair.** A peak that only just reaches a confirmed clip
+  level is clipped on one sample and has no plateau of its own. When that
+  sample sits at the confirmed level (per direction, top and bottom) and
+  both of its neighbours lie clearly inside it, it is rebuilt like any
+  other run, as a run of one sample, and counted in `runs-repaired`. It is
+  found one sample later than a longer run, which the latency already
+  covers. Audio that has never shown a clip level gets no single-sample
+  repair.
 - Unclipped audio is never touched: across the test signals (full-scale
   tones at every peak phase, band-limited squares, soft-saturated tones,
   speech-, music- and noise-like material, as float, 16-bit and 24-bit) and
