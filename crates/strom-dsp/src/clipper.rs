@@ -1232,7 +1232,27 @@ impl FinalClipper {
     /// [`FinalClipper::depth`]) into `depth` and the held predictability
     /// (see [`FinalClipper::predictability`], ramped like the depth) into
     /// `predictable` (each at least one per frame).
+    ///
+    /// A control slice shorter than the frame count is a caller bug (a
+    /// debug assertion); in a release build every frame is still processed
+    /// and the slices are filled as far as they reach.
     pub fn process_with_control(
+        &mut self,
+        samples: &mut [f32],
+        depth: &mut [f32],
+        predictable: &mut [f32],
+    ) {
+        debug_assert!(
+            self.channels == 0
+                || (depth.len() >= samples.len() / self.channels
+                    && predictable.len() >= samples.len() / self.channels),
+            "control slice shorter than the frame count"
+        );
+        self.process_control_clamped(samples, depth, predictable);
+    }
+
+    /// [`FinalClipper::process_with_control`] without the assertion.
+    fn process_control_clamped(
         &mut self,
         samples: &mut [f32],
         depth: &mut [f32],
@@ -1243,16 +1263,21 @@ impl FinalClipper {
             return;
         }
         let usable = samples.len() / ch * ch;
-        if predictable.len() < usable / ch || depth.len() < usable / ch {
-            return;
-        }
         self.fresh = false;
         self.last = ClipStats::default();
         for (k, chunk) in samples[..usable].chunks_mut(CHUNK * ch).enumerate() {
             let n = chunk.len() / ch;
             self.process_chunk(chunk);
-            depth[k * CHUNK..k * CHUNK + n].copy_from_slice(&self.depth_buf[..n]);
-            predictable[k * CHUNK..k * CHUNK + n].copy_from_slice(&self.predict_buf[..n]);
+            let at = k * CHUNK;
+            for (out, src) in [
+                (&mut *depth, &self.depth_buf),
+                (&mut *predictable, &self.predict_buf),
+            ] {
+                let m = n.min(out.len().saturating_sub(at));
+                if m > 0 {
+                    out[at..at + m].copy_from_slice(&src[..m]);
+                }
+            }
         }
     }
 
@@ -1481,6 +1506,32 @@ mod tests {
         assert_eq!(c.adaa(0.5, 0.4), 0.0);
         assert_eq!(c.adaa(f32::NAN, 0.4), 0.0);
         assert_eq!(c.adaa(f32::INFINITY, 0.4), 0.0);
+    }
+
+    /// A short control slice does not skip processing: the audio is the
+    /// same as `process`, and the slices are filled as far as they reach.
+    #[test]
+    fn short_control_slices_process_every_frame() {
+        let make = || {
+            let mut c = FinalClipper::new();
+            c.set_params(&FinalClipperParams {
+                threshold_db: -6.0,
+                ..FinalClipperParams::default()
+            });
+            c.configure(48_000.0, 2);
+            c
+        };
+        let frames = 700;
+        let x: Vec<f32> = (0..frames * 2).map(|i| (i as f32 * 0.07).sin()).collect();
+        let (mut a, mut b) = (x.clone(), x.clone());
+        let mut ca = make();
+        let (mut depth, mut pred) = (vec![-1.0f32; 300], vec![-1.0f32; 500]);
+        ca.process_control_clamped(&mut a, &mut depth, &mut pred);
+        let mut cb = make();
+        cb.process(&mut b);
+        assert_eq!(a, b);
+        assert_ne!(a, x, "nothing processed");
+        assert!(depth.iter().chain(&pred).all(|&v| (0.0..=1.0).contains(&v)));
     }
 
     /// Clippings at a depth under ½ still hold the early-out off until the
