@@ -100,17 +100,17 @@ let comp = gst::ElementFactory::make("stromdsp-compressor").build()?;
 ## Performance
 
 At 48 kHz stereo with 10 ms buffers, on an Apple M5 Pro (criterion medians,
-v0.2.3, on mains power in High Power mode, load average about 2 from
+2026-11-06, on mains power in High Power mode, load average about 1 from
 unrelated work, so upper bounds):
 
 | Benchmark | Time per 10 ms buffer | % of one core |
 |---|---|---|
 | Channel strip (gate → compressor → 4-band EQ → limiter) | 8.75 µs | 0.09 % |
-| Broadcast processor, `ebu-r128` defaults (spike guard → AGC → 4-band multiband with expanders and bass clipper → final clipper → true-peak limiter, governor, meters), `standard` / `low` latency | 89.0 / 89.1 µs | 0.89 / 0.89 % |
-| Broadcast processor, `streaming` defaults, `standard` / `low` latency | 102.1 / 96.6 µs | 1.02 / 0.97 % |
+| Broadcast processor, `ebu-r128` defaults (spike guard → AGC → 4-band multiband with expanders and bass clipper → final clipper → true-peak limiter, governor, meters), `standard` / `low` latency | 88.4 / 88.4 µs | 0.88 / 0.88 % |
+| Broadcast processor, `streaming` defaults, `standard` / `low` latency | 99.5 / 95.9 µs | 0.99 / 0.96 % |
 
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, gives
-x86-64 figures from a cloud VM (the broadcast processor at 1.9 … 2.2 % of one
+x86-64 figures from a cloud VM (the broadcast processor at 1.6 … 1.9 % of one
 core there), and covers
 the instruction-count benchmarks (gungraun) and the RealtimeSanitizer tests.
 

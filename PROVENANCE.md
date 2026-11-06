@@ -263,7 +263,7 @@ them. Time constants everywhere: `a = exp(−1/(τ·fs))` (63.2 % after τ).
 | `GateStateMachine` | hysteresis thresholds + hold counter | Zölzer, *DAFX*, dynamics chapter |
 | `DelayLine` | multichannel interleaved ring buffer | standard circular buffer, own design |
 | `SlidingMin` | sliding-window minimum, monotonic deque in a preallocated ring | standard ascending-minima technique |
-| `BoxAverage` | exact integer moving average, floor-rounded | J. O. Smith III, moving average |
+| `BoxAverage` | exact integer moving average, floor-rounded; the division by the invariant window length is a precomputed multiply and shift, exact for sums below 2^63 (hardware division above) | J. O. Smith III, moving average; T. Granlund & P. L. Montgomery, "Division by invariant integers using multiplication", PLDI 1994 |
 | `RampSmoother` | two cascaded `BoxAverage`s in fixed point; output never exceeds any bound holding for its last A+1 inputs | own derivation (limiter ceiling proof) |
 | `frame` | linked-channel peak / gain-apply helpers with mono/stereo paths | own design |
 
