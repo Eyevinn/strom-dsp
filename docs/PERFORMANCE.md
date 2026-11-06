@@ -82,29 +82,40 @@ chain 137 µs instead of 89 µs), and the numbers are not comparable.
 | `cleanup` | off / DC + HP4 / 10 hum notches / all | 0.06 / 1.49 / 3.11 / 4.55 µs |
 | `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB / runs too long (cost scales with the amount of clipping; worst single buffer 3.8 % of 10 ms) | 9.25 / 33.7 / 81.0 / 257 / 16.4 µs |
 
-**x86-64.** The same run at the same commit on a cloud VM (CPU model AMD
-EPYC-Milan, 6 vCPU; the guest reports FMA, AVX2 and AVX-512; Linux 6.8,
-load average about 1). A VM shares its host, so treat these as upper
-bounds too.
+**x86-64.** A full run on a cloud VM (CPU model AMD EPYC-Milan, 6 vCPU;
+the guest reports FMA, AVX2 and AVX-512; Linux 6.8, load average about 1),
+at the M5 Pro run's commit plus the oversampler fix of
+[#8](https://github.com/Eyevinn/strom-dsp/pull/8). A VM shares its host,
+so treat these as upper bounds too.
 
 | Bench | Case | Time |
 |---|---|---|
-| `strip` | gate / compressor / limiter / strip | 1.81 / 4.08 / 20.9 / 30.9 µs |
-| `strip` | EQ 4-band mono / stereo / 8 ch | 4.04 / 4.11 / 6.65 µs |
-| `broadcast` | full chain defaults `ebu-r128`, `standard` / `low` latency | 191 / 190 µs |
-| `broadcast` | full chain defaults `streaming`, `standard` / `low` latency | 253 / 228 µs |
-| `broadcast` | final clipper alone, standard: idle / clipping | 3.21 / 176 µs |
-| `broadcast` | final clipper alone, low latency: idle / clipping | 3.13 / 96.8 µs |
-| `truepeak` | 5 ms lookahead | 47.8 µs |
-| `multiband` | 4 bands, plain / with expander on every band and bass clipper | 33.0 / 67.3 µs |
-| `sampling` | oversampler 2× / 4× / 4× scalar fallback / 8× up+down | 33.9 / 62.7 / 47.0 / 106 µs |
-| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB (worst single buffer 4.7 % of 10 ms) | 22.6 / 54.8 / 139 / 371 µs |
+| `strip` | gate / compressor / limiter / strip | 1.87 / 4.08 / 21.0 / 30.9 µs |
+| `strip` | EQ 4-band mono / stereo / 8 ch | 4.04 / 4.11 / 6.64 µs |
+| `broadcast` | full chain defaults `ebu-r128`, `standard` / `low` latency | 190 / 190 µs |
+| `broadcast` | full chain defaults `streaming`, `standard` / `low` latency | 216 / 205 µs |
+| `broadcast` | final clipper alone, standard: idle / clipping | 3.03 / 117 µs |
+| `broadcast` | final clipper alone, low latency: idle / clipping | 2.99 / 60.5 µs |
+| `truepeak` | 5 ms lookahead | 48.0 µs |
+| `multiband` | 4 bands, plain / with expander on every band and bass clipper | 32.6 / 67.1 µs |
+| `sampling` | oversampler 2× / 4× / 4× scalar fallback / 8× up+down | 9.80 / 17.8 / 45.6 / 32.1 µs |
+| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB (worst single buffer 6.2 % of 10 ms) | 22.1 / 54.3 / 139 / 370 µs |
 
-Most processors take about 1 … 3.5× their M5 Pro time here. The
-oversampler, the limiter and the 4-band EQ take 4 … 7×, and the oversampler's
-detected SIMD level is slower than its scalar fallback (62.7 against 47.0 µs
-at 4×). That points at the vector path on this CPU rather than at the
-machine; it is not yet investigated.
+Most processors take about 1 … 3.5× their M5 Pro time here. The limiter,
+the true-peak limiter and the 4-band EQ take 4 … 7×; this is not yet
+investigated. Forced to each level, the limiter takes the same time at
+AVX-512, AVX2, SSE4.2 and the scalar fallback (21.5 … 22.4 µs), so its
+extra cost lies outside its vector kernels; the stereo EQ is fastest on the
+scalar fallback (3.57 µs against 4.03 µs at AVX-512).
+
+Before #8 the oversampler's vector levels were slower than its scalar
+fallback on x86 (4×: 62.7 µs at AVX-512, 97.8 µs at AVX2, 47.0 µs
+fallback). A local closure in the decimation kernel was not inlined, and
+code outlined from `vectorize` is compiled without its target features, so
+every vector operation in it became a call. After a change to a kernel,
+check on x86 that none of its closures appears as a symbol of its own in
+the disassembly (`objdump -d -C … | grep 'kernel.*closure'`): aarch64
+does not show the problem, because NEON is part of its baseline.
 
 ## Instruction counts (gungraun, Linux)
 

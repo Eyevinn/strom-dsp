@@ -110,7 +110,7 @@ unrelated work, so upper bounds):
 | Broadcast processor, `streaming` defaults, `standard` / `low` latency | 102.1 / 96.6 µs | 1.02 / 0.97 % |
 
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, gives
-x86-64 figures from a cloud VM (the broadcast processor at 1.9 … 2.5 % of one
+x86-64 figures from a cloud VM (the broadcast processor at 1.9 … 2.2 % of one
 core there), and covers
 the instruction-count benchmarks (gungraun) and the RealtimeSanitizer tests.
 
