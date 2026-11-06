@@ -21,38 +21,10 @@ use strom_dsp::biquad::{uses_fma, Biquad, BiquadCoefficients};
 use strom_dsp::simd::{detect, Level};
 use strom_dsp::{BandParams, BandType, Equalizer, EqualizerParams, Processor, MAX_BANDS};
 
-use fearless_simd::Simd;
+use crate::simd_support::levels;
 
 const CHANNELS: [usize; 8] = [1, 2, 3, 4, 5, 8, 13, 64];
 const FS: f32 = 48_000.0;
-
-/// The fallback plus every vector level the running CPU supports.
-fn levels() -> Vec<(&'static str, Level)> {
-    let d = detect();
-    #[allow(unused_mut)]
-    let mut v = vec![("fallback", Level::fallback())];
-    #[cfg(target_arch = "aarch64")]
-    if let Some(t) = d.as_neon() {
-        v.push(("neon", t.level()));
-    }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if let Some(t) = d.as_sse2() {
-            v.push(("sse2", t.level()));
-        }
-        if let Some(t) = d.as_sse4_2() {
-            v.push(("sse4.2", t.level()));
-        }
-        if let Some(t) = d.as_avx2() {
-            v.push(("avx2", t.level()));
-        }
-        if let Some(t) = d.as_avx512() {
-            v.push(("avx512", t.level()));
-        }
-    }
-    let _ = d;
-    v
-}
 
 fn noise(n: usize, seed: &mut u64, amp: f32) -> Vec<f32> {
     (0..n)

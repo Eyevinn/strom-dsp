@@ -14,6 +14,7 @@ mod counting_alloc;
 mod declipper_support;
 mod measure_support;
 mod programme_support;
+mod simd_support;
 
 mod agc;
 mod band_correlation;

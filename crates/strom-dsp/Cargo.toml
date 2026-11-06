@@ -51,7 +51,16 @@ name = "strip"
 harness = false
 
 [[bench]]
+name = "simd_levels"
+harness = false
+
+[[bench]]
 name = "strip_gungraun"
+harness = false
+required-features = ["gungraun"]
+
+[[bench]]
+name = "simd_gungraun"
 harness = false
 required-features = ["gungraun"]
 
