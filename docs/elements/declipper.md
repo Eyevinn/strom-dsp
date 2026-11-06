@@ -91,7 +91,7 @@ the error on the clipped samples.
 
 **CPU.** Grows with the amount of clipping. On an Apple M5 Pro, 48 kHz
 stereo in 10 ms buffers: about 0.09 % of the buffer duration on clean audio,
-0.3–0.8 % on speech and music clipped 6–10 dB, 2.5 % on dense tones clipped
+0.3–0.8 % on speech and music clipped 6–10 dB, 2.4 % on dense tones clipped
 10 dB; the worst single buffer stays under 4 % on any input.
 
 **Disabled behaviour.** `enabled=false` crossfades (10 ms raised cosine) to
