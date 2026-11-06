@@ -49,33 +49,73 @@ duration. For example, 5 µs per 10 ms buffer is 0.05 %. Results land in
 on the same machine. Wall-clock numbers depend on the machine and its load:
 compare runs only on the same, otherwise idle, machine.
 
-**Current numbers.** These are criterion medians on an Apple M5 Pro (NEON),
-48 kHz stereo, 480 frames (10 ms). The machine was under heavy unrelated load
-(load average about 12), so treat them as upper bounds.
+**Current numbers.** These are criterion medians from one full
+`cargo bench -p strom-dsp` run at v0.2.3 (2026-11-06), on an Apple M5 Pro
+(NEON), 48 kHz stereo, 480 frames (10 ms). The machine ran on mains power in
+High Power mode, not idle (load average about 2 from unrelated work), so
+treat them as upper bounds.
+
+On a laptop, measure on mains power with Low Power Mode off: on battery in
+Low Power Mode the same code reads about 1.5× slower (the full broadcast
+chain 137 µs instead of 89 µs), and the numbers are not comparable.
 
 | Bench | Case | Time |
 |---|---|---|
-| `strip` | gate / compressor / limiter / strip | 2.19 / 7.91 / 5.72 / 18.3 µs |
-| `strip` | EQ 4-band mono / stereo / 8 ch / stereo automated | 2.06 / 2.16 / 8.26 / 5.91 µs |
-| `broadcast` (complete chain, separate run, load average 4 … 6) | full chain defaults `ebu-r128`, `standard` / `low` latency | 92.0 / 91.8 µs |
-| `broadcast` (same run) | full chain defaults `streaming`, `standard` / `low` latency | 104.3 / 99.0 µs |
-| `broadcast` (same run) | full chain, library defaults (expanders and bass clipper off) | 78.2 µs |
-| `broadcast` | final clipper alone, standard: idle / clipping | 1.27 / 46.7 µs |
-| `broadcast` | final clipper alone, low latency: idle / clipping | 1.27 / 25.4 µs |
-| `truepeak` | 5 ms lookahead | 18.8 µs |
-| `multiband` | 4 bands | 46.7 µs |
-| `spike_guard` | no events / a click every 50 ms (separate run, load average about 4) | 12.1 / 13.9 µs |
-| `multiband` | 4 bands, plain / with expander on every band and bass clipper (3 ms lookahead at the time; now 1 ms) | 18.2 / 33.3 µs (separate run, machine not idle: other builds ran in parallel) |
-| `agc` | detector / AGC / ebur128 read every block | 1.55 / 1.95 / 263 µs |
-| `filters` | Butterworth 4 / 8, LR4 crossover 3 / 5 bands | 1.46 / 2.18 / 7.37 / 13.6 µs |
-| `sampling` | oversampler 4× up+down, 4× peaks; STFT 1024/256 | 17.6 / 9.44 / 13.3 µs |
-| `meter` | loudness / + true peak / correlation / bands / mono detector | 10.7 / 17.4 / 1.23 / 12.2 / 1.70 µs |
-| `sidechain` | keyed compressor / expander / keyed expander | 9.32 / 3.42 / 4.53 µs |
-| `ducker` | mono key / proportional / 16 kHz key / no key | 4.52 / 5.29 / 2.52 / 3.04 µs |
-| `dynamics_1b` | de-esser split / wide | 12.7 / 12.6 µs |
-| `channel_tools` | delay 0 / 20 ms / 8 ch / crossfading; stereo default / width+balance | 0.16 / 0.22 / 3.42 / 3.24; 0.08 / 0.55 µs |
-| `cleanup` | off / DC + HP4 / 10 hum notches / all | 0.10 / 2.28 / 5.20 / 7.19 µs |
-| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB / runs too long (load average about 4; cost scales with the amount of clipping, worst single buffer 3.8 % of 10 ms) | 9.7 / 33.8 / 82.0 / 264 / 16.2 µs |
+| `strip` | gate / compressor / limiter / strip | 1.45 / 3.59 / 3.15 / 8.75 µs |
+| `strip` | EQ 4-band mono / stereo / 8 ch / stereo automated | 0.98 / 1.01 / 3.90 / 2.86 µs |
+| `broadcast` | full chain defaults `ebu-r128`, `standard` / `low` latency | 89.0 / 89.1 µs |
+| `broadcast` | full chain defaults `streaming`, `standard` / `low` latency | 102.1 / 96.6 µs |
+| `broadcast` | full chain, library defaults (expanders and bass clipper off) | 75.7 µs |
+| `broadcast` | final clipper alone, standard: idle / clipping | 1.65 / 47.9 µs |
+| `broadcast` | final clipper alone, low latency: idle / clipping | 1.64 / 26.2 µs |
+| `truepeak` | 5 ms lookahead | 12.2 µs |
+| `spike_guard` | no events / a click every 50 ms | 12.5 / 12.7 µs |
+| `multiband` | 4 bands, plain / with expander on every band and bass clipper | 18.3 / 34.0 µs |
+| `agc` | detector / AGC / ebur128 read every block | 1.01 / 1.26 / 170 µs |
+| `filters` | Butterworth 4 / 8, LR4 crossover 3 / 5 bands | 0.78 / 0.96 / 3.36 / 7.20 µs |
+| `sampling` | oversampler 2× / 4× / 8× up+down, 4× peaks; STFT 1024/256 / 2048/512 | 7.01 / 11.1 / 18.9 / 5.77; 6.84 / 7.44 µs |
+| `meter` | loudness / + true peak / correlation / bands / mono detector | 7.00 / 10.3 / 0.66 / 5.47 / 0.68 µs |
+| `sidechain` | keyed compressor / expander / keyed expander | 4.34 / 1.75 / 2.26 µs |
+| `ducker` | mono key / proportional / 16 kHz key / no key | 2.88 / 3.38 / 1.67 / 1.98 µs |
+| `dynamics_1b` | de-esser split / wide | 8.35 / 8.38 µs |
+| `channel_tools` | delay 0 / 20 ms / 8 ch / crossfading; stereo default / width+balance | 0.11 / 0.15 / 2.25 / 2.15; 0.05 / 0.34 µs |
+| `cleanup` | off / DC + HP4 / 10 hum notches / all | 0.06 / 1.49 / 3.11 / 4.55 µs |
+| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB / runs too long (cost scales with the amount of clipping; worst single buffer 3.8 % of 10 ms) | 9.25 / 33.7 / 81.0 / 257 / 16.4 µs |
+
+**x86-64.** A full run on a cloud VM (CPU model AMD EPYC-Milan, 6 vCPU;
+the guest reports FMA, AVX2 and AVX-512; Linux 6.8, load average about 1),
+at the M5 Pro run's commit plus the oversampler fix of
+[#8](https://github.com/Eyevinn/strom-dsp/pull/8). A VM shares its host,
+so treat these as upper bounds too.
+
+| Bench | Case | Time |
+|---|---|---|
+| `strip` | gate / compressor / limiter / strip | 1.87 / 4.08 / 21.0 / 30.9 µs |
+| `strip` | EQ 4-band mono / stereo / 8 ch | 4.04 / 4.11 / 6.64 µs |
+| `broadcast` | full chain defaults `ebu-r128`, `standard` / `low` latency | 190 / 190 µs |
+| `broadcast` | full chain defaults `streaming`, `standard` / `low` latency | 216 / 205 µs |
+| `broadcast` | final clipper alone, standard: idle / clipping | 3.03 / 117 µs |
+| `broadcast` | final clipper alone, low latency: idle / clipping | 2.99 / 60.5 µs |
+| `truepeak` | 5 ms lookahead | 48.0 µs |
+| `multiband` | 4 bands, plain / with expander on every band and bass clipper | 32.6 / 67.1 µs |
+| `sampling` | oversampler 2× / 4× / 4× scalar fallback / 8× up+down | 9.80 / 17.8 / 45.6 / 32.1 µs |
+| `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB (worst single buffer 6.2 % of 10 ms) | 22.1 / 54.3 / 139 / 370 µs |
+
+Most processors take about 1 … 3.5× their M5 Pro time here. The limiter,
+the true-peak limiter and the 4-band EQ take 4 … 7× (issues
+[#9](https://github.com/Eyevinn/strom-dsp/issues/9),
+[#10](https://github.com/Eyevinn/strom-dsp/issues/10),
+[#11](https://github.com/Eyevinn/strom-dsp/issues/11)).
+
+Before #8 the oversampler's vector levels were slower than its scalar
+fallback on x86 (4×: 62.7 µs at AVX-512, 97.8 µs at AVX2, 47.0 µs
+fallback). A local closure in the decimation kernel was not inlined, and
+code outlined from `vectorize` is compiled without its target features, so
+every vector operation in it became a call. After a change to a kernel,
+check on x86 that none of its closures appears as a symbol of its own in
+the disassembly (`objdump -d -C … | grep 'kernel.*closure'`): aarch64
+does not show the problem, because NEON is part of its baseline. CI does
+not catch this yet ([#12](https://github.com/Eyevinn/strom-dsp/issues/12)).
 
 ## Instruction counts (gungraun, Linux)
 
@@ -139,25 +179,22 @@ cargo asm -p strom-dsp --lib "<strom_dsp::gate::Gate as strom_dsp::Processor>::p
   function they are inlined into.
 
 **Complete broadcast chain.** Measured on the same Apple M5 Pro, not idle
-(load average 3 … 4 from other work), criterion with 1 s warm-up and 3 s
-measurement, so treat them as upper bounds:
+(mains power, High Power mode, load average about 2 from other work), with
+criterion's default warm-up and measurement, so treat them as upper bounds:
 
 ```sh
-cargo bench -p strom-dsp --bench broadcast -- full_chain --warm-up-time 1 --measurement-time 3
+cargo bench -p strom-dsp --bench broadcast -- full_chain
 ```
 
 The full chain (spike guard, AGC, 4-band multiband with expanders and bass
 clipper, final clipper, limiter, governor, all meters) with the `ebu-r128`
-defaults takes 92.0 µs per 10 ms stereo buffer in the `standard` latency
-mode (0.92 % of one core) and 91.8 µs in `low` (0.92 %); with the
-`streaming` defaults 104.3 µs (1.04 %) and 99.0 µs (0.99 %). The final
-clipper's content-adaptive depth and bandwidth guard (eight biquads per
-frame on the mono sum, an order-10 prediction every 64 frames) and the
-limiter's peak control cost about 9.5 µs of that: the same run on the
-chain without them read 82.5 / 82.2 µs and 94.5 / 88.3 µs. The low mode
-is no more expensive: its clipper runs at 4× instead of 8×. The clipper's
-early-out makes it nearly free on programme that does not reach its knee
-(1.27 µs); driven 6 dB over its threshold on every buffer it takes 46.7 µs
-(standard, 8×) or 25.4 µs (low latency, 4×), so even a chain that clips
-all the time stays under the 2 % budget.
+defaults takes 89.0 µs per 10 ms stereo buffer in the `standard` latency
+mode (0.89 % of one core) and 89.1 µs in `low` (0.89 %); with the
+`streaming` defaults 102.1 µs (1.02 %) and 96.6 µs (0.97 %). The low mode
+costs the same or less: its clipper runs at 4× instead of 8×. The
+clipper's early-out keeps it cheap on programme that does not reach its
+knee (1.65 µs); driven 6 dB over its threshold on every buffer it takes
+47.9 µs (standard, 8×) or 26.2 µs (low latency, 4×). A chain that clipped
+on every buffer would therefore come to roughly 1.1 … 1.5 % of one core,
+under the 2 % budget.
 

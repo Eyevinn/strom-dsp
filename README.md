@@ -100,16 +100,18 @@ let comp = gst::ElementFactory::make("stromdsp-compressor").build()?;
 ## Performance
 
 At 48 kHz stereo with 10 ms buffers, on an Apple M5 Pro (criterion medians,
-measured under unrelated load, so upper bounds; the broadcast rows from a
-later run at load average 3 … 4):
+v0.2.3, on mains power in High Power mode, load average about 2 from
+unrelated work, so upper bounds):
 
 | Benchmark | Time per 10 ms buffer | % of one core |
 |---|---|---|
-| Channel strip (gate → compressor → 4-band EQ → limiter) | 18.3 µs | 0.18 % |
-| Broadcast processor, `ebu-r128` defaults (spike guard → AGC → 4-band multiband with expanders and bass clipper → final clipper → true-peak limiter, governor, meters), `standard` / `low` latency | 82.6 / 82.0 µs | 0.83 / 0.82 % |
-| Broadcast processor, `streaming` defaults, `standard` / `low` latency | 93.4 / 88.6 µs | 0.93 / 0.89 % |
+| Channel strip (gate → compressor → 4-band EQ → limiter) | 8.75 µs | 0.09 % |
+| Broadcast processor, `ebu-r128` defaults (spike guard → AGC → 4-band multiband with expanders and bass clipper → final clipper → true-peak limiter, governor, meters), `standard` / `low` latency | 89.0 / 89.1 µs | 0.89 / 0.89 % |
+| Broadcast processor, `streaming` defaults, `standard` / `low` latency | 102.1 / 96.6 µs | 1.02 / 0.97 % |
 
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, and covers
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) lists every benchmark, gives
+x86-64 figures from a cloud VM (the broadcast processor at 1.9 … 2.2 % of one
+core there), and covers
 the instruction-count benchmarks (gungraun) and the RealtimeSanitizer tests.
 
 ## Contributing

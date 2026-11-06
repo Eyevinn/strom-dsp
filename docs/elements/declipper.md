@@ -90,9 +90,9 @@ distorted: on speech clipped 10 dB the repair takes back about 9 dB of
 the error on the clipped samples.
 
 **CPU.** Grows with the amount of clipping. On an Apple M5 Pro, 48 kHz
-stereo in 10 ms buffers: about 0.1 % of the buffer duration on clean audio,
-0.3–0.8 % on speech and music clipped 6–10 dB, 2.6 % on dense tones clipped
-10 dB; the worst single buffer stays under 5 % on any input.
+stereo in 10 ms buffers: about 0.09 % of the buffer duration on clean audio,
+0.3–0.8 % on speech and music clipped 6–10 dB, 2.5 % on dense tones clipped
+10 dB; the worst single buffer stays under 4 % on any input.
 
 **Disabled behaviour.** `enabled=false` crossfades (10 ms raised cosine) to
 the input delayed by the same latency; after the fade the output is the
