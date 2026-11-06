@@ -382,7 +382,13 @@ fn flush_all<S: Simd, V: SimdFloat<S, Element = f64>, const N: usize>(
     simd: S,
     st: &mut [LaneState<V>; N],
 ) {
-    st.iter_mut().for_each(|s| s.flush(simd));
+    // A plain loop, not `for_each` with a closure: the closure can be
+    // outlined from `vectorize` and lose its target features, which on x86
+    // turns every vector operation in it into a call and keeps the filter
+    // state in memory in the hot loop (issue #11).
+    for s in st.iter_mut() {
+        s.flush(simd);
+    }
 }
 
 /// The realisation being faded out during a crossfade.
