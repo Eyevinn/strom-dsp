@@ -102,11 +102,10 @@ so treat these as upper bounds too.
 | `declipper` | clean / speech+music 6 dB / 10 dB / tones 10 dB (worst single buffer 6.2 % of 10 ms) | 22.1 / 54.3 / 139 / 370 µs |
 
 Most processors take about 1 … 3.5× their M5 Pro time here. The limiter,
-the true-peak limiter and the 4-band EQ take 4 … 7×; this is not yet
-investigated. Forced to each level, the limiter takes the same time at
-AVX-512, AVX2, SSE4.2 and the scalar fallback (21.5 … 22.4 µs), so its
-extra cost lies outside its vector kernels; the stereo EQ is fastest on the
-scalar fallback (3.57 µs against 4.03 µs at AVX-512).
+the true-peak limiter and the 4-band EQ take 4 … 7× (issues
+[#9](https://github.com/Eyevinn/strom-dsp/issues/9),
+[#10](https://github.com/Eyevinn/strom-dsp/issues/10),
+[#11](https://github.com/Eyevinn/strom-dsp/issues/11)).
 
 Before #8 the oversampler's vector levels were slower than its scalar
 fallback on x86 (4×: 62.7 µs at AVX-512, 97.8 µs at AVX2, 47.0 µs
@@ -115,7 +114,8 @@ code outlined from `vectorize` is compiled without its target features, so
 every vector operation in it became a call. After a change to a kernel,
 check on x86 that none of its closures appears as a symbol of its own in
 the disassembly (`objdump -d -C … | grep 'kernel.*closure'`): aarch64
-does not show the problem, because NEON is part of its baseline.
+does not show the problem, because NEON is part of its baseline. CI does
+not catch this yet ([#12](https://github.com/Eyevinn/strom-dsp/issues/12)).
 
 ## Instruction counts (gungraun, Linux)
 
