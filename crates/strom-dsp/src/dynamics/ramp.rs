@@ -7,6 +7,54 @@ pub const RAMP_FRAC_BITS: u32 = 44;
 const ONE: u64 = 1 << RAMP_FRAC_BITS;
 const SCALE: f64 = ONE as f64;
 
+/// Unsigned division by an invariant divisor `d ≥ 1` as a multiply and a
+/// shift (T. Granlund and P. L. Montgomery, "Division by invariant integers
+/// using multiplication", PLDI 1994).
+///
+/// With `l = ⌈log2 d⌉`, `s = 63 + l` and `m = ⌈2^s / d⌉` (which fits in a
+/// `u64`), write `m·d = 2^s + e` with `0 ≤ e < d ≤ 2^l`. For `n < 2^63`,
+/// `n·m / 2^s = n/d + n·e/(d·2^s)`, and the second term is below `1/d`
+/// because `n·e < 2^63·2^l = 2^s`. Since the fractional part of `n/d` is at
+/// most `(d − 1)/d`, the floor is unchanged: `⌊n·m / 2^s⌋ = ⌊n/d⌋` exactly.
+/// Larger `n` fall back to a hardware division.
+///
+/// On x86-64 a 64-bit `div` has a latency of tens of cycles, and the
+/// limiter's ramp chains two of them per frame on its serial path (issue #9).
+#[derive(Debug, Clone, Copy, Default)]
+struct Divisor {
+    d: u64,
+    m: u64,
+    s: u32,
+}
+
+impl Divisor {
+    /// Largest dividend handled by the multiply path.
+    const MUL_MAX: u64 = (1 << 63) - 1;
+
+    fn new(d: u64) -> Self {
+        let d = d.max(1);
+        let l = if d == 1 {
+            0
+        } else {
+            64 - (d - 1).leading_zeros()
+        };
+        let s = 63 + l;
+        let m = (1u128 << s).div_ceil(d as u128);
+        debug_assert!(m <= u64::MAX as u128);
+        Self { d, m: m as u64, s }
+    }
+
+    /// `⌊n / d⌋`, exactly.
+    #[inline(always)]
+    fn div(self, n: u64) -> u64 {
+        if n <= Self::MUL_MAX {
+            ((n as u128 * self.m as u128) >> self.s) as u64
+        } else {
+            n / self.d
+        }
+    }
+}
+
 /// Moving average of the last `len` integer inputs, rounded **down**:
 /// `y[n] = ⌊(x[n] + … + x[n−len+1]) / len⌋`.
 ///
@@ -20,6 +68,8 @@ pub struct BoxAverage {
     pos: usize,
     len: usize,
     sum: u64,
+    /// Division by the invariant `len` as a multiplication (see [`Divisor`]).
+    div: Divisor,
 }
 
 impl BoxAverage {
@@ -32,6 +82,7 @@ impl BoxAverage {
         self.pos = 0;
         self.len = 1;
         self.sum = 0;
+        self.div = Divisor::new(1);
     }
 
     /// Window length in samples.
@@ -51,6 +102,7 @@ impl BoxAverage {
             return;
         }
         self.len = len.clamp(1, self.ring.len());
+        self.div = Divisor::new(self.len as u64);
         for k in 0..self.len {
             self.ring[self.pos.wrapping_sub(k) & self.mask] = value;
         }
@@ -65,7 +117,7 @@ impl BoxAverage {
         let old = self.ring[old_idx];
         self.ring[self.pos] = v;
         self.sum = self.sum - old + v;
-        self.sum / self.len as u64
+        self.div.div(self.sum)
     }
 }
 
@@ -130,6 +182,50 @@ impl RampSmoother {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn divisor_matches_hardware_division() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let ds = (1..=4100u64).chain([
+            (1 << 19) - 1,
+            1 << 19,
+            (1 << 31) + 1,
+            u32::MAX as u64,
+            (1 << 62) + 3,
+            u64::MAX,
+        ]);
+        for d in ds {
+            let v = Divisor::new(d);
+            let mut ns = vec![
+                0,
+                1,
+                d - 1,
+                d,
+                d.wrapping_add(1),
+                Divisor::MUL_MAX,
+                Divisor::MUL_MAX + 1,
+                u64::MAX,
+            ];
+            // Values just below and at multiples of d, across the range.
+            for k in [1u64, 2, 3, (1 << 44) - 1, 1 << 44, Divisor::MUL_MAX / d] {
+                let q = k.saturating_mul(d);
+                ns.extend([q, q.saturating_sub(1), q.saturating_add(1)]);
+            }
+            for _ in 0..200 {
+                let r = next();
+                ns.extend([r, r >> 1, r >> 19, r >> 40]);
+            }
+            for n in ns {
+                assert_eq!(v.div(n), n / d, "n={n} d={d}");
+            }
+        }
+    }
 
     #[test]
     fn box_average_floor_mean() {
