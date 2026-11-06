@@ -634,12 +634,14 @@ fn down_kernel<S: Simd, const P: usize>(simd: S, a: DownArgs<'_>) {
             let mut dst = a.dst;
             let mut j = 0;
             while j < n {
-                let y = |jj: usize| {
-                    let f = fir_branch::<S, P>(simd, fma, &c, fir, jj);
-                    madd32(fma, ld(simd, dly, h + jj - shift), half, f)
-                };
-                let y0 = y(j);
-                let y1 = y(j + w);
+                // Written out rather than as a local closure: a closure that
+                // the compiler does not inline is compiled without the target
+                // features of `vectorize`, and on x86 every vector operation
+                // in it then becomes a function call.
+                let f0 = fir_branch::<S, P>(simd, fma, &c, fir, j);
+                let y0 = madd32(fma, ld(simd, dly, h + j - shift), half, f0);
+                let f1 = fir_branch::<S, P>(simd, fma, &c, fir, j + w);
+                let y1 = madd32(fma, ld(simd, dly, h + j + w - shift), half, f1);
                 match &mut dst {
                     DownDst::Flat(out) => {
                         y0.store_slice(&mut out[j..j + w]);
