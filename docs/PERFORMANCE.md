@@ -39,6 +39,7 @@ cargo bench -p strom-dsp --bench strip -- eq   # filter by name
 | `truepeak` | true-peak limiter |
 | `broadcast` | full broadcast chain with all meters, presets' defaults in both latency modes; final clipper alone |
 | `spike_guard` | spike guard, without events and with a click every 50 ms |
+| `simd_levels` | oversampler 4× / 8× up+down, EQ 4-band stereo / 8 ch, limiter, true-peak limiter, each forced to every SIMD level the CPU supports (x86-64: AVX-512, AVX2, SSE4.2; aarch64: NEON; and the scalar fallback) |
 
 All benches use 48 kHz. Most use 480-frame (10 ms) buffers; some also run
 1024 frames.
@@ -117,8 +118,11 @@ call, and state passed to it lives in memory instead of registers. After a
 change to a kernel, check on x86 that none of its closures appears as a
 symbol of its own in the disassembly (`objdump -d -C … | grep
 'kernel.*closure'`): aarch64 does not show the problem, because NEON is
-part of its baseline. CI does not catch this yet
-([#12](https://github.com/Eyevinn/strom-dsp/issues/12)). #13 also
+part of its baseline. The weekly extended workflow catches both cases:
+`simd_gungraun` (see "Instruction counts" below) fails when a vector
+kernel's instruction count grows by more than 20 %. Pull-request CI does
+not run it. `cargo bench --bench simd_levels` shows each kernel's time at
+every level ([#12](https://github.com/Eyevinn/strom-dsp/issues/12)). #13 also
 replaced a 64-bit division per frame in the ramp's box average with a
 multiply: free on Apple and recent Intel cores, but it took the true-peak
 limiter on Zen 3 from 48.1 to 28.9 µs.
@@ -127,23 +131,43 @@ limiter on Zen 3 from 48.1 to 28.9 µs.
 
 | Bench | Covers |
 |---|---|
-| `strip_gungraun` | gate, compressor, EQ, limiter, and the full strip |
+| `strip_gungraun` | gate, compressor, EQ, limiter, and the full strip (report-only) |
+| `simd_gungraun` | oversampler 4× / 8× up+down, EQ 4-band stereo / 8 ch, true-peak limiter, full broadcast chain (`ebu-r128` defaults), at AVX2, with hard limits |
 
-`benches/strip_gungraun.rs` counts instructions for one 1024-frame, 48 kHz
-stereo buffer through the strip and through each processor, using Valgrind
-Callgrind. The count is deterministic, so it also works on shared CI runners.
-The runner version must match the `gungraun` version pinned in
-`crates/strom-dsp/Cargo.toml`:
+Both count instructions with Valgrind Callgrind. The count is
+deterministic, so it also works on shared CI runners. The runner version
+must match the `gungraun` version pinned in `crates/strom-dsp/Cargo.toml`:
 
 ```sh
 sudo apt-get install valgrind
 cargo install --locked gungraun-runner --version 0.20.0
 cargo bench -p strom-dsp --features gungraun --bench strip_gungraun
+cargo bench -p strom-dsp --features gungraun --bench simd_gungraun
 ```
 
 - Each run is compared with the previous one in `target/gungraun/`.
-- CI runs it report-only, with no regression limits.
 - In Docker, Valgrind needs `--security-opt seccomp=unconfined`.
+
+Both run in the weekly extended workflow (and on demand), not on pull
+requests. `strip_gungraun` counts one 1024-frame stereo buffer and is
+report-only. `simd_gungraun` counts one 480-frame buffer per case at
+AVX2 (Valgrind does not implement AVX-512, so forcing AVX2 makes the count
+independent of the runner) and fails when a count exceeds its **hard
+limit**, 20 % over the count measured when the limit was set. Both known
+closure regressions break the limits: #8 doubles the oversampler's counts,
+and #11 raises the EQ's by 30–54 %.
+
+The limits are absolute, so a new `rustc` or a change to a kernel can move
+the counts. To update them:
+
+1. Run `cargo bench -p strom-dsp --features gungraun --bench simd_gungraun`
+   on x86-64 Linux with the stable toolchain CI uses.
+2. Put each case's measured `Instructions` value into its
+   `config = limit(…)` in `crates/strom-dsp/benches/simd_gungraun.rs`
+   (`limit` adds the 20 %).
+3. Say in the commit message why the counts changed (toolchain, an
+   intended change to a kernel, …). Raising a limit to make a regression
+   pass is not a reason.
 
 ## Real-time safety
 

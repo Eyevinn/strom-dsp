@@ -11,7 +11,9 @@ use std::f64::consts::PI;
 
 use strom_dsp::biquad::uses_fma;
 use strom_dsp::oversample::{OversampleFactor, Oversampler, PASSBAND_EDGE};
-use strom_dsp::simd::{detect, Level};
+use strom_dsp::simd::Level;
+
+use crate::simd_support::levels;
 
 use crate::counting_alloc::allocs;
 
@@ -454,15 +456,14 @@ fn robustness() {
     assert_eq!(u.channels(), 1);
 }
 
-/// The fallback level matches the detected one: bit-identical when both use
-/// the same FMA policy, otherwise within f32 rounding.
+/// Every SIMD level the CPU supports matches the fallback (upsample,
+/// downsample and `upsample_peaks`): bit-identical between levels with the
+/// same FMA policy, otherwise within f32 rounding.
 #[test]
-fn fallback_matches_detected_level() {
-    let detected = detect();
-    let same_policy = uses_fma(detected) == uses_fma(Level::fallback());
+fn every_level_matches_fallback() {
     for &f in &FACTORS {
         let l = f.ratio();
-        for ch in [1usize, 2, 3] {
+        for ch in [1usize, 2, 3, 8] {
             let frames = 1000;
             let x = noise(frames * ch, 11);
             let run = |level: Level| {
@@ -472,16 +473,26 @@ fn fallback_matches_detected_level() {
                 o.upsample(&x, &mut up);
                 let mut dn = vec![0.0f32; frames * ch];
                 o.downsample(&up, &mut dn);
-                (up, dn)
+                o.reset();
+                let mut pk = vec![0.0f32; frames];
+                o.upsample_peaks(&x, &mut pk);
+                [up, dn, pk].concat()
             };
-            let (ua, da) = run(detected);
-            let (ub, db_) = run(Level::fallback());
-            if same_policy {
-                assert_eq!(ua, ub, "{l}x {ch} ch up");
-                assert_eq!(da, db_, "{l}x {ch} ch down");
-            } else {
-                for (a, b) in ua.iter().zip(&ub).chain(da.iter().zip(&db_)) {
-                    assert!((a - b).abs() <= 1e-5, "{a} vs {b}");
+            let runs: Vec<_> = levels()
+                .into_iter()
+                .map(|(name, level)| (name, level, run(level)))
+                .collect();
+            for (name, level, y) in &runs {
+                // Reference: the first level with the same FMA policy (exact)
+                // and the fallback (within rounding).
+                let same = runs.iter().find(|r| uses_fma(r.1) == uses_fma(*level));
+                let (_, _, exact) = same.expect("a level matches itself");
+                assert!(
+                    y.iter().zip(exact).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{l}x {ch} ch: {name} differs from a level with the same FMA policy"
+                );
+                for (a, b) in y.iter().zip(&runs[0].2) {
+                    assert!((a - b).abs() <= 1e-5, "{l}x {ch} ch {name}: {a} vs {b}");
                 }
             }
         }

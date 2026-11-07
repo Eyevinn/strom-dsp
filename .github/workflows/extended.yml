@@ -82,6 +82,8 @@ jobs:
       - run: cargo clippy -p strom-dsp --features rtsan,gungraun --all-targets -- -D warnings
       # Report-only: no regression limits are configured.
       - run: cargo bench -p strom-dsp --features gungraun --bench strip_gungraun
+      # Hard limits on the vector kernels (docs/PERFORMANCE.md, "Instruction counts").
+      - run: cargo bench -p strom-dsp --features gungraun --bench simd_gungraun
 
   crackle:
     name: Crackle on speech (corpus)
