@@ -1073,3 +1073,353 @@ impl Limiter {
         }
     }
 }
+
+/// Peak control (crate-internal, so tested here): the static curve, the
+/// time constants and hold, `is_on`, the reported reduction, and the
+/// `process_with_peaks` hook.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FS: f64 = 48_000.0;
+
+    fn pc_params(headroom: f32, ratio: f32, knee: f32, att: f32, rel: f32) -> PeakControlParams {
+        PeakControlParams {
+            headroom_db: headroom,
+            ratio,
+            knee_db: knee,
+            attack_ms: att,
+            release_ms: rel,
+        }
+    }
+
+    fn peak_control(p: &PeakControlParams) -> PeakControl {
+        let mut pc = PeakControl::new();
+        pc.set(p, FS);
+        pc
+    }
+
+    /// One frame of linked peak `p` at ceiling `c` with optional drive;
+    /// returns the required gain after the peak control (from 1).
+    fn step(pc: &mut PeakControl, c: f32, p: f32, drive: Option<f32>) -> f64 {
+        let mut req = [1.0f64];
+        let d = [drive.unwrap_or(1.0)];
+        pc.apply(c, &[p], drive.map(|_| &d[..]), &mut req);
+        req[0]
+    }
+
+    /// Soft-knee static curve (Giannoulis, Massberg & Reiss, JAES 60(6),
+    /// 2012): reduction in dB for level `x` (dB re ceiling), threshold `t`,
+    /// knee width `w` and slope `s = 1 − 1/ratio`.
+    fn curve(x: f64, t: f64, w: f64, s: f64) -> f64 {
+        let over = x - t;
+        if 2.0 * over <= -w {
+            0.0
+        } else if 2.0 * over < w {
+            s * (over + w / 2.0).powi(2) / (2.0 * w)
+        } else {
+            s * over
+        }
+    }
+
+    /// The static reduction is the compressor curve with its threshold
+    /// `headroom` under the ceiling, the given ratio and soft knee, scaled
+    /// by the drive, and the required gain becomes `10^(−y/20)`. With a
+    /// 0.01 ms attack the one-pole settles within 1e-12 dB in 200 frames,
+    /// so the settled reduction must match the curve to 1e-9 dB.
+    #[test]
+    fn peak_control_static_curve() {
+        let (headroom, ratio, knee) = (3.0f32, 4.0f32, 6.0f32);
+        let s = 1.0 - 1.0 / ratio as f64;
+        let c = 0.5f32; // ceiling
+        for drive in [None, Some(1.0f32), Some(0.5), Some(0.0)] {
+            let k = drive.unwrap_or(1.0) as f64;
+            // Below, at the start of, inside and above the knee
+            // (knee −6 … 0 dB re ceiling).
+            for x_db in [-20.0, -6.5, -5.9, -4.0, -3.0, -0.5, 0.0, 2.0, 12.0] {
+                let mut pc = peak_control(&pc_params(headroom, ratio, knee, 0.01, 1.0));
+                let p = (c as f64 * 10f64.powf(x_db / 20.0)) as f32;
+                let x = 20.0 * (p as f64 / c as f64).log10();
+                let mut r = 1.0;
+                for _ in 0..200 {
+                    r = step(&mut pc, c, p, drive);
+                }
+                let want = k * curve(x, -(headroom as f64), knee as f64, s);
+                let y = pc.reduction_db;
+                assert!(
+                    (y - want).abs() < 1e-9,
+                    "x={x_db} drive={drive:?}: {y} dB, curve {want} dB"
+                );
+                let g = if y > 0.0 { 10f64.powf(-y / 20.0) } else { 1.0 };
+                assert!(
+                    (r - g).abs() < 1e-12,
+                    "x={x_db}: required gain {r}, want {g}"
+                );
+                assert_eq!(pc.block_db[0], y as f32);
+            }
+        }
+    }
+
+    /// Attack and release are one-poles with the documented time constants
+    /// (after `τ` frames 1 − 1/e of the way), the static reduction is held
+    /// for exactly `PEAK_CONTROL_HOLD_MS` after the last frame over the
+    /// curve, the reduction never overshoots its target, and it snaps to
+    /// exactly 0 instead of decaying into the subnormal range.
+    #[test]
+    fn peak_control_time_constants_and_hold() {
+        let (att_ms, rel_ms) = (5.0f32, 10.0f32);
+        let mut pc = peak_control(&pc_params(0.0, 4.0, 0.0, att_ms, rel_ms));
+        let c = 0.5f32;
+        let p = (c as f64 * 10f64.powf(4.0 / 20.0)) as f32;
+        let target = 0.75 * 20.0 * (p as f64 / c as f64).log10(); // ≈ 3 dB
+        let tau_a = (att_ms as f64 * 1e-3 * FS).round() as usize;
+        let tau_r = (rel_ms as f64 * 1e-3 * FS).round() as usize;
+        let mut ys = Vec::new();
+        for _ in 0..4000 {
+            step(&mut pc, c, p, None);
+            ys.push(pc.reduction_db);
+        }
+        let rise = ys[tau_a - 1] / target;
+        assert!(
+            (rise - (1.0 - (-1.0f64).exp())).abs() < 1e-9,
+            "attack: {rise}"
+        );
+        for w in ys.windows(2) {
+            assert!(
+                w[1] > w[0] && w[1] <= target,
+                "attack not a one-pole: {w:?}"
+            );
+        }
+        // Quiet: hold, then release.
+        let hold = (PEAK_CONTROL_HOLD_MS * 1e-3 * FS).round() as usize;
+        let mut q = Vec::new();
+        for _ in 0..20_000 {
+            step(&mut pc, c, 0.0, None);
+            q.push(pc.reduction_db);
+        }
+        let first_fall = (0..q.len())
+            .find(|&i| q[i] < if i == 0 { ys[3999] } else { q[i - 1] })
+            .unwrap();
+        assert_eq!(first_fall, hold, "release starts after the hold");
+        let held = q[hold - 1];
+        let fall = q[hold - 1 + tau_r] / held;
+        assert!((fall - (-1.0f64).exp()).abs() < 1e-9, "release: {fall}");
+        let zero = q
+            .iter()
+            .position(|&y| y == 0.0)
+            .expect("never snapped to 0");
+        assert!(q[zero..].iter().all(|&y| y == 0.0));
+        assert!(
+            q.iter().all(|&y| y == 0.0 || y >= 1e-9),
+            "decayed below 1e-9"
+        );
+        // Snaps when under 1e-9 dB: ln(3e9) ≈ 22 time constants.
+        assert!(zero < hold + 23 * tau_r, "snapped late: {zero}");
+    }
+
+    /// `is_on`: a ratio over 1, or a reduction still releasing. Setting the
+    /// ratio to 1 (or setting the same parameters again) while reducing
+    /// does not cut the reduction; it releases normally and the peak
+    /// control turns off once it reaches 0.
+    #[test]
+    fn peak_control_is_on_while_releasing() {
+        let on = pc_params(0.0, 4.0, 0.0, 1.0, 5.0);
+        let mut pc = peak_control(&PeakControlParams::default());
+        assert!(!pc.is_on(), "ratio 1 is off");
+        pc.set(&on, FS);
+        assert!(pc.is_on());
+        let c = 0.5f32;
+        for _ in 0..1000 {
+            step(&mut pc, c, 1.0, None);
+        }
+        let y = pc.reduction_db;
+        assert!(y > 4.0);
+        pc.set(&on, FS);
+        assert_eq!(
+            pc.reduction_db, y,
+            "same parameters again changed the state"
+        );
+        pc.set(&PeakControlParams { ratio: 1.0, ..on }, FS);
+        assert_eq!(pc.reduction_db, y, "ratio 1 cut a running reduction");
+        assert!(pc.is_on(), "off while still reducing");
+        // The held static reduction keeps it up for the hold, then it
+        // releases monotonically to exactly 0 and the peak control is off.
+        let hold = (PEAK_CONTROL_HOLD_MS * 1e-3 * FS).round() as usize;
+        let mut n = 0;
+        while pc.reduction_db > 0.0 {
+            assert!(pc.is_on());
+            let before = pc.reduction_db;
+            step(&mut pc, c, 1.0, None);
+            if n >= hold {
+                assert!(pc.reduction_db < before, "not releasing at {n}");
+            } else {
+                assert!(pc.reduction_db >= before, "released during the hold at {n}");
+            }
+            n += 1;
+            assert!(n < 20_000, "never released");
+        }
+        assert!(n > hold);
+        assert!(!pc.is_on());
+    }
+
+    /// A non-finite peak (Inf from Inf input) gives no reduction and leaves
+    /// the state finite (ELEMENT_GUIDELINES: no NaN or Inf at any input).
+    #[test]
+    fn peak_control_ignores_non_finite_peaks() {
+        let mut pc = peak_control(&pc_params(3.0, 8.0, 3.0, 4.0, 100.0));
+        let c = 0.5f32;
+        for p in [f32::INFINITY, f32::NAN] {
+            let r = step(&mut pc, c, p, None);
+            assert_eq!((r, pc.reduction_db), (1.0, 0.0), "p={p}");
+        }
+        for _ in 0..2000 {
+            let r = step(&mut pc, c, 0.9, None);
+            assert!(r.is_finite() && pc.reduction_db.is_finite());
+        }
+        assert!(pc.reduction_db > 0.0);
+    }
+
+    fn limiter(lookahead_ms: f32, enabled: bool) -> Limiter {
+        let mut l = Limiter::new();
+        l.set_params(&LimiterParams {
+            enabled,
+            threshold_db: -1.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            lookahead_ms,
+        });
+        l.set_peak_control(&pc_params(3.0, 4.0, 0.0, 2.0, 30.0));
+        l.configure(FS as f32, 1);
+        l
+    }
+
+    /// Tone bursts over the peak control's curve, for the reporting tests.
+    fn bursts(frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|n| {
+                let a = if (n / 3000) % 2 == 0 { 2.0 } else { 0.2 };
+                (a * (n as f64 * 0.07).sin()) as f32
+            })
+            .collect()
+    }
+
+    /// The reported reduction is the one in force for the most recently
+    /// output frame, i.e. computed for the peak frame `L` frames before it:
+    /// with lookahead `L` it is the series of a lookahead-0 limiter (where
+    /// output frame = peak frame) delayed by `L`, read after blocks of any
+    /// size. It never exceeds the total reduction of that frame.
+    #[test]
+    fn peak_control_reduction_is_reported_for_the_output_frame() {
+        let x = bursts(12_000);
+        let mut l0 = limiter(0.0, true);
+        let mut series = Vec::new();
+        for s in x.clone().chunks_mut(1) {
+            l0.process(s);
+            series.push(l0.peak_control_reduction_db());
+        }
+        assert!(series.iter().any(|&y| y > 3.0), "peak control idle");
+        let mut l = limiter(5.0, true);
+        let la = l.latency_frames();
+        assert_eq!(la, 240);
+        let mut y = x.clone();
+        let mut end = 0;
+        let sizes = [1usize, 64, 101, 7, 256];
+        let mut k = 0;
+        while end < y.len() {
+            let n = sizes[k % sizes.len()].min(y.len() - end);
+            k += 1;
+            l.process(&mut y[end..end + n]);
+            end += n;
+            let want = if end > la { series[end - 1 - la] } else { 0.0 };
+            let got = l.peak_control_reduction_db();
+            assert_eq!(got, want, "after frame {}", end - 1);
+            let total = -20.0 * l.current_gain().log10();
+            assert!(got <= total + 1e-5, "peak control {got} > total {total}");
+        }
+    }
+
+    /// Disabled, the peak control reduces nothing: the output is the input
+    /// delayed, bit for bit. Switched off while it reduces, its reported
+    /// reduction never exceeds the total and is 0 once the gain is back at
+    /// unity (also after the history ring has wrapped).
+    #[test]
+    fn peak_control_is_inactive_when_disabled() {
+        let x = bursts(12_000);
+        let mut l = limiter(5.0, false);
+        let mut y = x.clone();
+        for b in y.chunks_mut(64) {
+            l.process(b);
+            assert_eq!(l.peak_control_reduction_db(), 0.0);
+        }
+        let d = l.latency_frames();
+        for n in d..x.len() {
+            assert_eq!(y[n].to_bits(), x[n - d].to_bits(), "frame {n}");
+        }
+
+        // Lookahead 0 too: then the frame read back is in the block just
+        // processed.
+        for la in [5.0, 0.0] {
+            let mut l = limiter(la, true);
+            let mut loud: Vec<f32> = (0..9600)
+                .map(|n| (2.0 * (n as f64 * 0.07).sin()) as f32)
+                .collect();
+            l.process(&mut loud);
+            assert!(l.peak_control_reduction_db() > 3.0);
+            l.set_params(&LimiterParams {
+                enabled: false,
+                ..*l.params()
+            });
+            let mut y = bursts(9600);
+            for b in y.chunks_mut(64) {
+                l.process(b);
+                let got = l.peak_control_reduction_db();
+                let total = -20.0 * l.current_gain().log10();
+                assert!(
+                    got <= total + 1e-5,
+                    "lookahead {la}: peak control {got} > total {total}"
+                );
+            }
+            assert_eq!(l.current_gain(), 1.0);
+            assert_eq!(l.peak_control_reduction_db(), 0.0);
+        }
+    }
+
+    /// `process_with_peaks` is a no-op when the limiter is not configured,
+    /// when the buffer holds less than a frame or when `peaks` is shorter
+    /// than the frame count; a longer `peaks` is fine and, given the
+    /// measured peaks, the result is `process`'s.
+    #[test]
+    fn process_with_peaks_checks_its_arguments() {
+        let x: Vec<f32> = (0..2 * 500)
+            .map(|i| (2.0 * (i as f64 * 0.1).sin()) as f32)
+            .collect();
+        let peaks: Vec<f32> = x.chunks(2).map(|f| f[0].abs().max(f[1].abs())).collect();
+
+        let mut l = Limiter::new();
+        let mut y = x.clone();
+        l.process_with_peaks(&mut y, &peaks, None);
+        assert_eq!(y, x, "unconfigured");
+
+        let mut l = Limiter::new();
+        l.configure(FS as f32, 2);
+        let mut y = x.clone();
+        l.process_with_peaks(&mut y, &peaks[..499], None);
+        assert_eq!(y, x, "short peaks");
+        let mut one = [x[0]];
+        l.process_with_peaks(&mut one, &peaks, None);
+        assert_eq!(one, [x[0]], "less than a frame");
+
+        let mut a = x.clone();
+        let mut longer = peaks.clone();
+        longer.extend([9.0; 10]);
+        let mut la = Limiter::new();
+        la.configure(FS as f32, 2);
+        la.process_with_peaks(&mut a, &longer, None);
+        let mut b = x.clone();
+        let mut lb = Limiter::new();
+        lb.configure(FS as f32, 2);
+        lb.process(&mut b);
+        assert_eq!(a, b, "longer peaks");
+        assert_ne!(a, x);
+    }
+}

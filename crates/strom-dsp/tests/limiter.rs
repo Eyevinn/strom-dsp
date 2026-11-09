@@ -850,3 +850,479 @@ fn lookahead_frames_matches_reported_latency() {
     assert_eq!(strom_dsp::limiter::lookahead_frames(5.0, 48_000.0), 240);
     assert_eq!(strom_dsp::limiter::lookahead_frames(3.0, 44_100.0), 132); // 132.3
 }
+
+// ---------------------------------------------------------------------------
+// Live lookahead changes (ELEMENT_GUIDELINES, "Latency" and "Live parameter
+// changes"): `lookahead` is mutable while playing, so after a change and its
+// cross-fade the audio must be delayed by exactly the new reported latency.
+
+/// Length of the lookahead cross-fade (module docs: raised cosine, 5 ms).
+fn xfade_frames(fs: f32) -> usize {
+    ((5.0 * fs as f64 / 1000.0).round() as usize).max(1)
+}
+
+/// Process `frames` frames of silence in uneven blocks.
+fn silence(l: &mut Limiter, frames: usize, ch: usize) {
+    let mut z = vec![0.0f32; frames * ch];
+    run(l, &mut z, ch);
+}
+
+/// Feed an impulse after silence and return the frame at which it comes out
+/// (checking that it is the only non-zero frame and is bit-exact).
+fn impulse_delay(l: &mut Limiter, ch: usize, what: &str) -> usize {
+    let frames = 2 * l.latency_frames() + 200;
+    let mut x = vec![0.0f32; frames * ch];
+    x[0] = 0.5;
+    if ch > 1 {
+        x[1] = -0.25;
+    }
+    run(l, &mut x, ch);
+    let hits: Vec<usize> = (0..frames)
+        .filter(|&n| x[n * ch..(n + 1) * ch].iter().any(|&v| v != 0.0))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "{what}: impulse smeared over frames {hits:?}"
+    );
+    let n = hits[0];
+    assert_eq!(x[n * ch], 0.5, "{what}: impulse not bit-exact");
+    if ch > 1 {
+        assert_eq!(x[n * ch + 1], -0.25, "{what}: impulse not bit-exact");
+    }
+    n
+}
+
+/// After a live lookahead change (longer, shorter, to and from 0, a value
+/// that is not a whole number of frames, a change queued during a running
+/// cross-fade) and the cross-fade that follows it, an impulse comes out
+/// delayed by exactly the new `latency_frames()`, which is
+/// `lookahead_frames(new)`. Also when disabled: the delay is kept.
+#[test]
+fn live_lookahead_change_delays_by_the_new_latency() {
+    for &fs in &[48_000.0f32, 44_100.0] {
+        let ch = 2;
+        let xf = xfade_frames(fs);
+        for enabled in [true, false] {
+            let p0 = LimiterParams {
+                enabled,
+                ..params(0.0, 1.0, 100.0, 5.0)
+            };
+            let mut l = make(fs, ch, &p0);
+            silence(&mut l, 1000, ch); // no longer fresh: changes cross-fade
+            let what = format!("fs={fs} enabled={enabled} initial");
+            assert_eq!(impulse_delay(&mut l, ch, &what), l.latency_frames());
+            // Lookahead values set in turn; a second value is set while the
+            // cross-fade to the first is running (queued).
+            let steps: [&[f32]; 7] = [
+                &[12.0],
+                &[0.0],
+                &[20.0],
+                &[3.3],
+                &[0.0],
+                &[7.0, 2.0],
+                &[2.0],
+            ];
+            for seq in steps {
+                for (k, &ms) in seq.iter().enumerate() {
+                    l.set_params(&LimiterParams {
+                        lookahead_ms: ms,
+                        ..p0
+                    });
+                    assert_eq!(
+                        l.latency_frames(),
+                        strom_dsp::limiter::lookahead_frames(ms, fs),
+                        "reported latency follows the property at once"
+                    );
+                    if k + 1 < seq.len() {
+                        silence(&mut l, xf / 4, ch);
+                    }
+                }
+                // Both cross-fades (if one was queued), and enough silence
+                // that a longer tap no longer reaches the previous impulse
+                // (a longer delay replays what is already in the line).
+                let lmax = strom_dsp::limiter::lookahead_frames(MAX_LOOKAHEAD_MS, fs);
+                silence(&mut l, 2 * xf + lmax + 64, ch);
+                let ms = *seq.last().unwrap();
+                let what = format!("fs={fs} enabled={enabled} → {seq:?}");
+                let d = impulse_delay(&mut l, ch, &what);
+                assert_eq!(d, l.latency_frames(), "{what}");
+                assert_eq!(d, strom_dsp::limiter::lookahead_frames(ms, fs), "{what}");
+            }
+            assert_eq!(l.safety_clip_count(), 0);
+        }
+    }
+}
+
+/// The cross-fade between the old and the new delay tap is the documented
+/// raised cosine over 5 ms. On a linear ramp the two taps differ by a known
+/// constant, so the weight `w` of the new tap can be read from each output
+/// frame. Before the change the output is the old tap and after the
+/// cross-fade the new one, bit for bit. In between there are exactly
+/// `N = round(5 ms · fs)` mixed frames with weights strictly rising inside
+/// (0, 1) and point-symmetric about the middle (`w[k] + w[N − 1 − k] = 1`,
+/// the defining property of a raised-cosine fade). Click bound: no output
+/// step exceeds the ramp's own step plus `ΔL·b·π / (2(N + 1))`, the largest
+/// per-frame change of a raised cosine of `N + 1` steps times the tap
+/// difference.
+#[test]
+fn lookahead_crossfade_is_a_raised_cosine_over_5_ms() {
+    for &fs in &[48_000.0f32, 44_100.0] {
+        let n_x = xfade_frames(fs);
+        for &(from, to) in &[(2.0f32, 7.0f32), (7.0, 2.0), (0.0, 5.0), (5.0, 0.0)] {
+            let (la, lb) = (
+                strom_dsp::limiter::lookahead_frames(from, fs),
+                strom_dsp::limiter::lookahead_frames(to, fs),
+            );
+            let total = 4000;
+            let b = 0.8 / total as f64; // ramp slope per frame, stays below 1
+            let input: Vec<f32> = (0..total).map(|n| (0.05 + b * n as f64) as f32).collect();
+            let mut l = make(fs, 1, &params(0.0, 1.0, 100.0, from));
+            let mut out = input.clone();
+            let split = 1500;
+            l.process(&mut out[..split]);
+            l.set_params(&params(0.0, 1.0, 100.0, to));
+            run(&mut l, &mut out[split..], 1);
+            let what = format!("fs={fs} {from} → {to} ms");
+            for n in la..split {
+                assert_eq!(out[n], input[n - la], "{what}: old tap at {n}");
+            }
+            let dx = input[split - lb] as f64 - input[split - la] as f64;
+            assert!(dx.abs() > 0.01, "{what}: taps too close to measure");
+            let w: Vec<f64> = (split..split + n_x)
+                .map(|n| {
+                    let (xa, xb) = (input[n - la] as f64, input[n - lb] as f64);
+                    (out[n] as f64 - xa) / (xb - xa)
+                })
+                .collect();
+            for n in split + n_x..total {
+                assert_eq!(out[n], input[n - lb], "{what}: new tap at {n}");
+            }
+            // Weights are recovered to about 1e-6 (f32 rounding of a sample
+            // below 1 over a tap difference of at least 0.04).
+            let tol = 1e-5;
+            assert!(
+                w[0] > 0.0 && w[n_x - 1] < 1.0,
+                "{what}: {:?}",
+                (w[0], w[n_x - 1])
+            );
+            for k in 1..n_x {
+                assert!(w[k] > w[k - 1], "{what}: weight not rising at {k}");
+            }
+            for k in 0..n_x {
+                let sym = w[k] + w[n_x - 1 - k];
+                assert!(
+                    (sym - 1.0).abs() < tol,
+                    "{what}: w[{k}] + w[N−1−{k}] = {sym}"
+                );
+            }
+            let bound = b + dx.abs() * std::f64::consts::PI / (2.0 * (n_x + 1) as f64) + 1e-6;
+            for n in split..total {
+                let step = (out[n] as f64 - out[n - 1] as f64).abs();
+                assert!(step <= bound, "{what}: step {step} > {bound} at {n}");
+            }
+        }
+    }
+}
+
+/// While the required gain is constant (a steady DC level 12 dB over the
+/// ceiling), changes of attack, release (and so the hold) and lookahead
+/// leave the gain where it is: every rebuild replays the base window exactly
+/// and the cross-fade mixes two equal samples. The output stays at its
+/// settled value (within 1e-6, two f32 rounding steps), never above the
+/// ceiling, and the safety clip stays idle.
+#[test]
+fn steady_limiting_is_unchanged_by_shape_and_lookahead_changes() {
+    let fs = 48_000.0f32;
+    let thr = -6.0;
+    let changes = [
+        params(thr, 5.0, 100.0, 5.0),
+        params(thr, 0.01, 100.0, 5.0),
+        params(thr, 20.0, 5.0, 5.0),
+        params(thr, 20.0, 2000.0, 20.0),
+        params(thr, 1.0, 1.0, 20.0),
+        params(thr, 50.0, 300.0, 0.0),
+        params(thr, 3.0, 10.0, 8.0),
+        params(thr, 19.0, 100.0, 20.0),
+        params(thr, 20.0, 100.0, 20.0),
+        params(thr, 2.0, 50.0, 1.0),
+    ];
+    let mut l = make(fs, 1, &params(thr, 1.0, 100.0, 5.0));
+    let mut x = vec![2.0f32; 9600];
+    l.process(&mut x);
+    let y0 = x[9599];
+    let c = l.ceiling_linear();
+    assert!(
+        y0 <= c && y0 as f64 >= c as f64 * (1.0 - 1e-6),
+        "settled at {y0}, ceiling {c}"
+    );
+    for (k, p) in changes.iter().enumerate() {
+        l.set_params(p);
+        let mut x = vec![2.0f32; 480]; // 10 ms, longer than a cross-fade
+        run(&mut l, &mut x, 1);
+        for (n, &y) in x.iter().enumerate() {
+            assert!(y <= c, "change {k}: {y} over the ceiling at {n}");
+            assert!(
+                (y - y0).abs() <= 1e-6,
+                "change {k} {p:?}: {y} vs {y0} at {n}"
+            );
+        }
+    }
+    assert_eq!(l.safety_clip_count(), 0);
+}
+
+/// A lookahead increase larger than the old window (lookahead + hold)
+/// makes the new, longer tap output audio again that left through the old
+/// tap before the change. The module docs' cross-fade argument still
+/// applies: the window is widened to cover both taps and its base part is
+/// replayed from the stored history, so the old loud burst is limited the
+/// second time too. The ceiling holds with no help from the safety clip.
+#[test]
+fn lookahead_increase_limits_the_replayed_audio() {
+    let fs = 48_000.0f32;
+    let thr = -6.0;
+    for &(rel, from, to) in &[
+        (1.0f32, 2.0f32, 20.0f32),
+        (1.0, 0.0, 15.0),
+        (3.0, 1.0, 12.0),
+    ] {
+        for after in [50usize, 200, 400, 600] {
+            let mut l = make(fs, 1, &params(thr, 1.0, rel, from));
+            let mut x = vec![0.01f32; 4000];
+            for v in &mut x[1000..1300] {
+                *v = 2.0;
+            }
+            let split = 1300 + after;
+            l.process(&mut x[..split]);
+            l.set_params(&params(thr, 1.0, rel, to));
+            l.process(&mut x[split..]);
+            let what = format!("release {rel}, {from} → {to} ms, {after} after the burst");
+            assert_ceiling(&x, thr, &what);
+            assert_eq!(l.safety_clip_count(), 0, "{what}: safety clip used");
+        }
+    }
+}
+
+/// A rebuild of the gain pipeline (on an attack or hold change) replays it
+/// from the stored history. When the geometry ends up as it was (attack or
+/// release changed and changed back before the next buffer), the replay
+/// must restore the exact state: the output is bit-identical to a limiter
+/// that saw no change. One setting uses the largest pipeline (lookahead
+/// 20 ms, attack capped at the lookahead, hold 20 ms), where the replay
+/// reaches back `a + L + H + 1` frames, the history's full documented depth.
+#[test]
+fn rebuild_with_unchanged_geometry_is_invisible() {
+    for &fs in &[48_000.0f32, 44_100.0, 8_000.0] {
+        for base in [
+            params(-6.0, 20.0, 100.0, 20.0),
+            params(-3.0, 1.0, 100.0, 5.0),
+        ] {
+            let wiggles = [
+                LimiterParams {
+                    attack_ms: base.attack_ms * 0.5,
+                    ..base
+                },
+                LimiterParams {
+                    release_ms: 5.0,
+                    ..base
+                },
+            ];
+            let frames = (fs as usize) / 2;
+            let input = bursts(frames, 2, 0x9e37);
+            let mut plain = make(fs, 2, &base);
+            let mut wiggled = make(fs, 2, &base);
+            let (mut a, mut b) = (input.clone(), input);
+            let block = 200;
+            for (k, (ca, cb)) in a
+                .chunks_mut(block * 2)
+                .zip(b.chunks_mut(block * 2))
+                .enumerate()
+            {
+                if k % 3 == 1 {
+                    wiggled.set_params(&wiggles[k % 2]);
+                    wiggled.set_params(&base);
+                }
+                plain.process(ca);
+                wiggled.process(cb);
+            }
+            let first = a
+                .iter()
+                .zip(&b)
+                .position(|(u, v)| u.to_bits() != v.to_bits());
+            assert_eq!(first, None, "fs={fs} {base:?}: outputs differ");
+        }
+    }
+}
+
+/// With the limiter switched off while it is limiting, incoming frames
+/// require unity gain and, once the limited frames have left, the gain
+/// returns to exactly 1.0 by a linear ramp of 10 ms for the full scale
+/// (module docs). Read frame by frame: the gain never rises by more than
+/// `1/(10 ms · fs)` per frame, never exceeds 1, reaches exactly 1.0 after
+/// `(1 − g0) · 10 ms · fs` frames of ramp (plus at most the attack length,
+/// where the box ramp is still the slower of the two), and from then on the
+/// output is the input delayed by the latency, bit for bit.
+#[test]
+fn disabling_ramps_the_gain_linearly_to_exact_unity() {
+    for &fs in &[48_000.0f32, 44_100.0] {
+        let p = params(-20.0, 1.0, 50.0, 5.0);
+        let mut l = make(fs, 1, &p);
+        let mut x = vec![1.0f32; 4800];
+        l.process(&mut x);
+        let g0 = l.current_gain();
+        assert!((g0 - db(-20.0)).abs() < 1e-6, "settled gain {g0}");
+        l.set_params(&LimiterParams {
+            enabled: false,
+            ..p
+        });
+        let step = 1.0 / (0.010 * fs as f64);
+        let attack = (fs as f64 * 0.001).round();
+        let d = l.latency_frames();
+        let n_total = 4800;
+        let input: Vec<f32> = (0..n_total).map(|n| 0.9 - 0.1 * ((n % 7) as f32)).collect();
+        let mut out = input.clone();
+        let mut gains = Vec::with_capacity(n_total);
+        for f in out.chunks_mut(1) {
+            l.process(f);
+            gains.push(l.current_gain());
+        }
+        let what = format!("fs={fs}");
+        let rise_start = gains.iter().position(|&g| g > g0).expect("gain never rose");
+        let unity = gains
+            .iter()
+            .position(|&g| g == 1.0)
+            .expect("gain never reached 1.0");
+        for w in gains.windows(2) {
+            let up = w[1] - w[0];
+            assert!(up <= step + 1e-12, "{what}: gain rose by {up} > {step}");
+            assert!(w[1] <= 1.0, "{what}: gain {} over unity", w[1]);
+        }
+        let ramp = (unity - rise_start + 1) as f64;
+        let expect = (1.0 - g0) / step;
+        assert!(
+            ramp >= expect - 1.0 && ramp <= expect + attack + 2.0,
+            "{what}: ramp of {ramp} frames, expected {expect}"
+        );
+        for n in unity + 1..n_total {
+            assert_eq!(gains[n], 1.0, "{what}: gain left unity at {n}");
+            if n >= d {
+                assert_eq!(
+                    out[n].to_bits(),
+                    input[n - d].to_bits(),
+                    "{what}: not a pure delay at {n}"
+                );
+            }
+        }
+    }
+}
+
+/// The safety clip is a counted guard (module docs): a NaN output sample,
+/// only possible from NaN input, is replaced by 0 and counted. Every NaN
+/// input sample comes out as one zeroed, counted sample in the single-tap
+/// path. Inside a lookahead cross-fade a sample is read from both taps, so
+/// it is counted once per tap it leaves through.
+#[test]
+fn safety_clip_replaces_and_counts_nan() {
+    let fs = 48_000.0f32;
+    for ch in [1usize, 2, 3] {
+        let mut l = make(fs, ch, &params(-1.0, 1.0, 100.0, 2.0));
+        let mut x = vec![0.25f32; 3000 * ch];
+        let nans = [100usize, 101, 2000];
+        for &n in &nans {
+            x[n * ch + ch - 1] = f32::NAN;
+        }
+        run(&mut l, &mut x, ch);
+        let d = l.latency_frames();
+        for &n in &nans {
+            assert_eq!(x[(n + d) * ch + ch - 1], 0.0);
+        }
+        assert!(x.iter().all(|v| v.is_finite()));
+        assert_eq!(l.safety_clip_count(), nans.len() as u64, "ch={ch}");
+
+        // Cross-fade 2 → 7 ms starting at input frame `m0`: a NaN 50 frames
+        // earlier leaves through the old tap inside the fade and through the
+        // new tap after it: two counted samples.
+        let mut l = make(fs, ch, &params(-1.0, 1.0, 100.0, 2.0));
+        let m0 = 1000;
+        let mut x = vec![0.25f32; 2000 * ch];
+        x[(m0 - 50) * ch] = f32::NAN;
+        l.process(&mut x[..m0 * ch]);
+        assert_eq!(l.safety_clip_count(), 0);
+        l.set_params(&params(-1.0, 1.0, 100.0, 7.0));
+        l.process(&mut x[m0 * ch..]);
+        assert!(x.iter().all(|v| v.is_finite()));
+        assert_eq!(l.safety_clip_count(), 2, "ch={ch} cross-fade");
+    }
+}
+
+/// The enforced ceiling is the largest `f32` not above `10^(dB/20)`
+/// (`ceiling_linear` docs): not above it, and the next `f32` up is.
+#[test]
+fn ceiling_is_the_largest_f32_not_above_the_threshold() {
+    let mut l = Limiter::new();
+    l.configure(48_000.0, 1);
+    for k in 0..=240 {
+        let thr = -(k as f32) * 0.25;
+        for t in [thr, (thr - 0.0206).max(-60.0)] {
+            l.set_params(&params(t, 1.0, 100.0, 5.0));
+            let c = l.ceiling_linear();
+            let exact = 10f64.powf(t as f64 / 20.0);
+            let up = f32::from_bits(c.to_bits() + 1);
+            assert!(c as f64 <= exact, "thr={t}: {c} above {exact}");
+            assert!(up as f64 > exact, "thr={t}: {c} is not the largest");
+        }
+    }
+    l.set_params(&params(0.0, 1.0, 100.0, 5.0));
+    assert_eq!(l.ceiling_linear(), 1.0);
+}
+
+/// `params()` returns the sanitised parameters last set, not the defaults.
+#[test]
+fn params_returns_what_was_set() {
+    let mut l = Limiter::new();
+    l.configure(48_000.0, 2);
+    for p in [
+        params(-12.5, 3.25, 640.0, 7.5),
+        LimiterParams {
+            enabled: false,
+            ..params(-0.5, 0.02, 1.5, 0.0)
+        },
+    ] {
+        l.set_params(&p);
+        assert_eq!(*l.params(), p);
+    }
+}
+
+/// A rate the limiter cannot use (0, negative, infinite, NaN) falls back to
+/// the same 48 kHz in `lookahead_frames` and in `configure`, so the reported
+/// latency is the one at 48 kHz.
+#[test]
+fn unusable_rates_fall_back_to_48_khz() {
+    let at48 = strom_dsp::limiter::lookahead_frames(5.0, 48_000.0);
+    for fs in [0.0f32, -5.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+        assert_eq!(
+            strom_dsp::limiter::lookahead_frames(5.0, fs),
+            at48,
+            "fs={fs}"
+        );
+        let mut l = Limiter::new();
+        l.configure(fs, 1);
+        assert_eq!(l.latency_frames(), at48, "fs={fs}");
+    }
+}
+
+/// A SIMD level forced with `set_simd_level` is kept across `configure`;
+/// without one, `configure` detects the best level.
+#[test]
+fn simd_level_forced_or_detected() {
+    use strom_dsp::simd::{detect, Level};
+    let mut l = Limiter::new();
+    l.set_simd_level(Level::fallback());
+    l.configure(48_000.0, 2);
+    assert!(l.simd_level().is_fallback());
+    l.configure(44_100.0, 1);
+    assert!(l.simd_level().is_fallback());
+    let mut l = Limiter::new();
+    l.configure(48_000.0, 2);
+    assert_eq!(format!("{:?}", l.simd_level()), format!("{:?}", detect()));
+}
