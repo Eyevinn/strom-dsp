@@ -277,6 +277,31 @@ fn steady_sine_keeps_its_level() {
     }
 }
 
+/// Before any programme, and again after `reset`, the target is the static
+/// makeup at the prior level ("Prior (start)" and "Switching" in the
+/// compressor's module docs): `reset` forgets the programme measured so far.
+#[test]
+fn reset_returns_estimate_to_prior() {
+    let p = reference_params();
+    let gc = GainComputer::from_linear(p.threshold as f64, p.ratio as f64, p.knee as f64);
+    let prior = static_makeup_db(&gc);
+    let mut c = Compressor::new();
+    c.set_auto_makeup(true);
+    c.set_params(&p);
+    c.configure(FS, CH);
+    assert!((c.auto_makeup_gain_db() - prior).abs() < 1e-9);
+    // 0.5 s of a −3 dBFS sine, far above the prior level: the estimate moves.
+    let amp = db_to_lin(-3.0);
+    let mut x: Vec<f32> = (0..CH * 24_000)
+        .map(|i| (amp * (2.0 * std::f64::consts::PI * (i / CH) as f64 / 48.0).sin()) as f32)
+        .collect();
+    c.process(&mut x);
+    let moved = c.auto_makeup_gain_db();
+    assert!(moved > prior + 1.0, "{moved} vs {prior}");
+    c.reset();
+    assert!((c.auto_makeup_gain_db() - prior).abs() < 1e-9);
+}
+
 /// A table on the typical programme:
 /// integrated output loudness with the reference settings, per
 /// detector, with and without auto-makeup. Prints only (`--nocapture`).
