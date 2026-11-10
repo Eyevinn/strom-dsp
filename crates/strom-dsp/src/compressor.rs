@@ -1300,4 +1300,209 @@ mod tests {
             assert!((c.gain_reduction_db() - want).abs() < 1e-9, "x={x}");
         }
     }
+
+    // The automatic makeup's statistic, checked against the closed form of
+    // the documented model ("Auto-makeup" in the module docs): bins and the
+    // two energy sums age by `exp(−n/(τ·fs))` per update of `n` gated frames,
+    // the prior is `AUTO_MAKEUP_PRIOR_S` of a sine at `AUTO_MAKEUP_PRIOR_DB`
+    // and fades by `exp(−n/(AUTO_MAKEUP_PRIOR_S·fs))`. No audio: frames go
+    // straight to `push`, so these run in microseconds.
+
+    const EST_FS: f64 = 48_000.0;
+
+    /// Hard knee, T −30 dB, 4:1: r(x) = 0.75·(x + 30) above −30 dB.
+    fn est_curve() -> GainComputer {
+        GainComputer::from_linear(db_to_lin(-30.0), 4.0, 1.0)
+    }
+
+    /// Mean frame energy of a sine at the prior level.
+    fn prior_sine_energy() -> f64 {
+        0.5 * db_to_lin(2.0 * AUTO_MAKEUP_PRIOR_DB)
+    }
+
+    fn frame(level_db: f64, energy: f64, static_power: f64, applied_power: f64) -> MakeupFrame {
+        MakeupFrame {
+            level_db,
+            energy,
+            static_power,
+            applied_power,
+        }
+    }
+
+    fn fresh_estimator(fs: f64) -> MakeupEstimator {
+        let mut e = MakeupEstimator::new();
+        e.set_rate(fs);
+        e.reset(fs);
+        e
+    }
+
+    /// `M_s + C` for a prior of mass `p` and level-bin masses `(x_dB, w)`.
+    fn expected_makeup(gc: &GainComputer, p: f64, bins: &[(f64, f64)], c: f64) -> f64 {
+        let pw = |x: f64| db_to_lin(-gc.reduction_db(x)).powi(2);
+        let kept = p * pw(AUTO_MAKEUP_PRIOR_DB) + bins.iter().map(|&(x, w)| w * pw(x)).sum::<f64>();
+        let total = p + bins.iter().map(|&(_, w)| w).sum::<f64>();
+        (-10.0 * (kept / total).log10() + c).clamp(0.0, AUTO_MAKEUP_MAX_DB)
+    }
+
+    /// Before any programme the estimate is the static makeup at the prior
+    /// level, and it updates every `AUTO_MAKEUP_UPDATE_MS` of gated frames.
+    #[test]
+    fn makeup_estimator_starts_at_prior_and_updates_every_10_ms() {
+        let gc = est_curve();
+        let mut e = fresh_estimator(EST_FS);
+        assert!((e.makeup_db(&gc) - static_makeup_db(&gc)).abs() < 1e-9);
+        let n = (AUTO_MAKEUP_UPDATE_MS * 1e-3 * EST_FS) as usize; // 480
+        let f = frame(-40.0, prior_sine_energy(), 1.0, 1.0);
+        for i in 1..n {
+            assert!(!e.push(f), "update after {i} frames, want {n}");
+        }
+        assert!(e.push(f), "no update after {n} frames");
+        // Frames below the gate do not count toward the next update.
+        for _ in 0..2 * n {
+            assert!(!e.push(frame(AUTO_MAKEUP_GATE_DB - 1.0, 1.0, 1.0, 1.0)));
+        }
+        for _ in 1..n {
+            assert!(!e.push(f));
+        }
+        assert!(e.push(f));
+    }
+
+    /// Prior mass and both time constants: one update of a sine-energy
+    /// frame stream at −40 dB (no reduction), then `k` updates of
+    /// zero-energy gated frames, which only age the statistic.
+    #[test]
+    fn makeup_estimator_prior_and_ageing_follow_their_time_constants() {
+        let gc = est_curve();
+        let mut e = fresh_estimator(EST_FS);
+        let n = (AUTO_MAKEUP_UPDATE_MS * 1e-3 * EST_FS) as usize;
+        let es = prior_sine_energy();
+        for _ in 0..n {
+            e.push(frame(-40.0, es, 1.0, 1.0));
+        }
+        // The prior is AUTO_MAKEUP_PRIOR_S of that sine.
+        let p0 = es * AUTO_MAKEUP_PRIOR_S * EST_FS;
+        let w = es * n as f64;
+        let d = (-(n as f64) / (AUTO_MAKEUP_TIME_S * EST_FS)).exp();
+        let pd = (-(n as f64) / (AUTO_MAKEUP_PRIOR_S * EST_FS)).exp();
+        let want = expected_makeup(&gc, p0 * pd, &[(-40.0, w)], 0.0);
+        assert!(
+            (e.makeup_db(&gc) - want).abs() < 1e-6,
+            "{} vs {want}",
+            e.makeup_db(&gc)
+        );
+        let k = 50; // 0.5 s
+        for _ in 0..k * n {
+            e.push(frame(-40.0, 0.0, 1.0, 1.0));
+        }
+        let want = expected_makeup(
+            &gc,
+            p0 * pd.powi(k as i32 + 1),
+            &[(-40.0, w * d.powi(k as i32))],
+            0.0,
+        );
+        assert!(
+            (e.makeup_db(&gc) - want).abs() < 1e-6,
+            "{} vs {want}",
+            e.makeup_db(&gc)
+        );
+    }
+
+    /// The correction `C = 10·log10(Σ E·10^(−r/10) / Σ E·10^(−y/10))` is
+    /// added, and bounded by ±AUTO_MAKEUP_CORRECTION_DB.
+    #[test]
+    fn makeup_estimator_adds_bounded_correction() {
+        let gc = est_curve();
+        let n = (AUTO_MAKEUP_UPDATE_MS * 1e-3 * EST_FS) as usize;
+        let es = prior_sine_energy();
+        let p = es
+            * AUTO_MAKEUP_PRIOR_S
+            * EST_FS
+            * (-(n as f64) / (AUTO_MAKEUP_PRIOR_S * EST_FS)).exp();
+        let bins = [(-40.0, es * n as f64)];
+        for (static_db, applied_db, c) in [
+            (0.0, 2.0, 2.0),
+            (3.0, 1.0, -2.0),
+            (0.0, 10.0, AUTO_MAKEUP_CORRECTION_DB),
+            (10.0, 0.0, -AUTO_MAKEUP_CORRECTION_DB),
+        ] {
+            let mut e = fresh_estimator(EST_FS);
+            let f = frame(
+                -40.0,
+                es,
+                db_to_lin(-2.0 * static_db),
+                db_to_lin(-2.0 * applied_db),
+            );
+            for _ in 0..n {
+                e.push(f);
+            }
+            let want = expected_makeup(&gc, p, &bins, c);
+            let got = e.makeup_db(&gc);
+            assert!((got - want).abs() < 1e-6, "C {c}: {got} vs {want}");
+        }
+    }
+
+    /// Frames at or above +10 dB count in the top bin, at +10 dB.
+    #[test]
+    fn makeup_estimator_top_bin_is_plus_10_db() {
+        let gc = est_curve();
+        let n = (AUTO_MAKEUP_UPDATE_MS * 1e-3 * EST_FS) as usize;
+        let p = prior_sine_energy()
+            * AUTO_MAKEUP_PRIOR_S
+            * EST_FS
+            * (-(n as f64) / (AUTO_MAKEUP_PRIOR_S * EST_FS)).exp();
+        for level in [10.0, 15.0] {
+            let mut e = fresh_estimator(EST_FS);
+            for _ in 0..n {
+                e.push(frame(level, 1.0, 1.0, 1.0));
+            }
+            let want = expected_makeup(&gc, p, &[(10.0, n as f64)], 0.0);
+            let got = e.makeup_db(&gc);
+            assert!((got - want).abs() < 1e-6, "{level} dB: {got} vs {want}");
+        }
+    }
+
+    /// Aged-out bins and the faded prior are flushed to exactly zero (no
+    /// subnormals). 1 frame per update at 100 Hz; the per-update ageing is
+    /// the same as at any rate.
+    #[test]
+    fn makeup_estimator_flushes_aged_out_mass() {
+        let fs = 100.0;
+        let mut e = fresh_estimator(fs);
+        assert_eq!(e.update_frames, 1);
+        e.push(frame(-20.0, 1.0, 1.0, 1.0));
+        let old = (-20.0 - AUTO_MAKEUP_GATE_DB) as usize;
+        // Prior: P0·exp(−0.02·k) falls below 1e-30 of the bins (≈ 1000 per
+        // unit energy) by k ≈ 4000, long before it underflows.
+        for _ in 0..4_000 {
+            e.push(frame(-40.0, 1.0, 1.0, 1.0));
+        }
+        assert_eq!(e.prior, 0.0);
+        assert!(e.bins[old] > 0.0);
+        // Old bin: exp(−0.001·k) < 1e-30·1000 by k ≈ 62 000.
+        for _ in 0..66_000 {
+            e.push(frame(-40.0, 1.0, 1.0, 1.0));
+        }
+        assert_eq!(e.bins[old], 0.0);
+    }
+
+    #[test]
+    fn key_filter_round_trips() {
+        let mut c = Compressor::new();
+        let f = KeyFilter::HighPass {
+            frequency_hz: 120.0,
+            q: 0.707,
+        };
+        c.set_key_filter(f);
+        assert_eq!(c.key_filter(), f);
+    }
+
+    /// Before `configure` (0 channels) `process_with_key` leaves the buffer
+    /// alone, like `process`.
+    #[test]
+    fn unconfigured_process_with_key_is_a_no_op() {
+        let mut c = Compressor::new();
+        let mut buf = [0.5f32; 8];
+        c.process_with_key(&mut buf, &[0.5; 8], 2);
+        assert_eq!(buf, [0.5; 8]);
+    }
 }
