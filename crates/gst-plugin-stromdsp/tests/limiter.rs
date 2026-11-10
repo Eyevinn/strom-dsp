@@ -178,6 +178,67 @@ fn limiter_latency_message_on_lookahead_change() {
     assert_eq!(query_latency(&h).1, gst::ClockTime::from_mseconds(12));
 }
 
+/// Push `frames` frames (`channels` interleaved) and return the output.
+fn push_samples(h: &mut Harness, samples: &[f32]) -> Vec<f32> {
+    let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(
+        h.push(gst::Buffer::from_mut_slice(bytes)),
+        Ok(gst::FlowSuccess::Ok)
+    );
+    let out = h.pull().unwrap();
+    let map = out.map_readable().unwrap();
+    map.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| f32::from_le_bytes(b))
+        .collect()
+}
+
+/// `lookahead` is mutable in PLAYING. After a live change and its
+/// cross-fade, an impulse comes out delayed by exactly the latency the
+/// element now reports in the LATENCY query (ELEMENT_GUIDELINES, latency
+/// test), for longer and shorter values and to and from 0.
+#[test]
+fn limiter_live_lookahead_change_delays_by_reported_latency() {
+    util::init();
+    let (rate, channels) = (48_000u32, 2usize);
+    let mut h = Harness::new("stromdsp-limiter");
+    let element = h.element().unwrap();
+    h.set_upstream_latency(gst::ClockTime::ZERO);
+    element.set_property("threshold", 0.0f32);
+    element.set_property("lookahead", 5.0f32);
+    h.set_src_caps_str(&util::caps_str(rate, channels));
+    h.play();
+    // 30 ms of silence: longer than the longest lookahead plus a
+    // cross-fade, so no earlier impulse is left in the delay line.
+    let silence = vec![0.0f32; 1440 * channels];
+    push_samples(&mut h, &silence);
+    for lookahead in [12.0f32, 0.0, 20.0, 3.3, 0.0, 5.0] {
+        element.set_property("lookahead", lookahead);
+        push_samples(&mut h, &silence);
+        let ns = query_latency(&h).1.nseconds();
+        // Reported as frames · 1e9 / rate rounded up, so this recovers them.
+        let frames = (ns * u64::from(rate) / 1_000_000_000) as usize;
+        assert_eq!(
+            query_latency(&h).1,
+            expected_latency(f64::from(lookahead), u64::from(rate))
+        );
+        let mut probe = vec![0.0f32; 2048 * channels];
+        probe[0] = 0.5;
+        probe[1] = -0.25;
+        let out = push_samples(&mut h, &probe);
+        let hits: Vec<usize> = (0..2048)
+            .filter(|&n| out[n * channels] != 0.0 || out[n * channels + 1] != 0.0)
+            .collect();
+        assert_eq!(hits, [frames], "lookahead {lookahead}");
+        assert_eq!(
+            (out[frames * channels], out[frames * channels + 1]),
+            (0.5, -0.25)
+        );
+        push_samples(&mut h, &silence);
+    }
+}
+
 /// Other elements have no internal latency and must not change the query.
 #[test]
 fn other_elements_do_not_add_latency() {
